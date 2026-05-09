@@ -493,6 +493,11 @@ SYSTEM_INSTRUCTION_GRC = (
     "Do not read out URLs. For bookings say 'visit the Georges River Council website' or "
     "'you can register at the council website'. "
 
+    # --- Human transfer ---
+    "If the caller says they want to speak to a human, a person, an agent, or requests "
+    "to be transferred or escalated: immediately call transfer_to_human — do not ask "
+    "clarifying questions first. "
+
     # --- Scope ---
     "You ONLY handle three topics: bin collection day lookups, "
     "development application inquiries, and Georges River Council events. "
@@ -730,6 +735,31 @@ def fetch_twilio_ice_servers():
 ice_servers = [IceServer(urls="stun:stun.l.google.com:19302")]
 
 
+def _configure_twilio_webhook():
+    """Point the Twilio inbound phone number at this server's /twilio/voice webhook."""
+    account_sid = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
+    auth_token  = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
+    phone_number = os.getenv("TWILIO_PHONE_NUMBER", "").strip()
+    public_url  = os.getenv("PUBLIC_URL", "").strip().rstrip("/")
+
+    if not all([account_sid, auth_token, phone_number, public_url]):
+        logger.info("Twilio webhook auto-config skipped — TWILIO_PHONE_NUMBER or PUBLIC_URL not set")
+        return
+
+    try:
+        from twilio.rest import Client as TwilioClient
+        client = TwilioClient(account_sid, auth_token)
+        numbers = client.incoming_phone_numbers.list(phone_number=phone_number, limit=1)
+        if not numbers:
+            logger.warning(f"Twilio webhook config: number {phone_number} not found on this account")
+            return
+        voice_url = f"{public_url}/twilio/voice"
+        numbers[0].update(voice_url=voice_url, voice_method="POST")
+        logger.info(f"Twilio webhook configured: {phone_number} → {voice_url}")
+    except Exception as e:
+        logger.error(f"Twilio webhook auto-config failed: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Pre-load Silero VAD ONNX session once (avoids 50–250ms load per session).
@@ -748,7 +778,8 @@ async def lifespan(app: FastAPI):
     SileroOnnxModel.__init__ = _fast_init
     logger.info("Silero VAD ONNX session pre-loaded")
 
-
+    # Auto-configure Twilio inbound phone number webhook so callers reach the bot.
+    _configure_twilio_webhook()
 
     yield
 
@@ -1486,6 +1517,29 @@ async def run_twilio_bot(websocket: WebSocket):
 
     llm.register_function("get_bin_collection_day", handle_get_bin_collection_day)
 
+    async def handle_transfer_to_human(params: FunctionCallParams):
+        """Transfer the call to a human agent via Twilio REST API."""
+        transfer_number = os.getenv("TRANSFER_PHONE_NUMBER", "").strip()
+        if not transfer_number:
+            await params.result_callback({"result": "I'm sorry, transfer is not available right now. Please call us on (02) 9330 6400."})
+            return
+
+        try:
+            from twilio.rest import Client as TwilioClient
+            tw = TwilioClient(os.getenv("TWILIO_ACCOUNT_SID"), os.getenv("TWILIO_AUTH_TOKEN"))
+            tw.calls(call_sid).update(
+                twiml=f"<Response><Dial>{transfer_number}</Dial></Response>"
+            )
+            logger.info(f"[TRANSFER] Call {call_sid} transferred to {transfer_number}")
+            await params.result_callback({"result": "Transferring you now. Please hold."})
+        except Exception as e:
+            logger.error(f"[TRANSFER] Failed: {e}")
+            await params.result_callback({"result": "I wasn't able to transfer the call. Please call us directly on (02) 9330 6400."})
+
+        await task.cancel()
+
+    llm.register_function("transfer_to_human", handle_transfer_to_human)
+
     get_bin_collection_day_schema = FunctionSchema(
         name="get_bin_collection_day",
         description=(
@@ -1506,8 +1560,18 @@ async def run_twilio_bot(websocket: WebSocket):
         },
         required=["address"],
     )
+    transfer_to_human_schema = FunctionSchema(
+        name="transfer_to_human",
+        description=(
+            "Transfer the caller to a human council officer. "
+            "Call this when the user says they want to speak to a person, a human, an agent, "
+            "or requests to be transferred or escalated."
+        ),
+        properties={},
+        required=[],
+    )
     context = LLMContext(
-        tools=ToolsSchema(standard_tools=[get_bin_collection_day_schema])
+        tools=ToolsSchema(standard_tools=[get_bin_collection_day_schema, transfer_to_human_schema])
     )
 
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
