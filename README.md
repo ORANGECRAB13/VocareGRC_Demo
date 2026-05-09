@@ -150,3 +150,70 @@ The agent call panel supports two mic modes, toggleable during an active call:
 cd GRC_pilot
 python main.py
 ```
+
+---
+
+## Azure CI/CD Deployment
+
+This project includes a GitHub Actions workflow (`.github/workflows/deploy-azure.yml`) to automatically deploy the application to **Azure Container Apps**.
+
+> **Note**: Azure Container Apps routes traffic through a Layer 7 load balancer (TCP 80/443). WebRTC's native UDP connections won't pass through. Therefore, the **Twilio TURN server configuration in your `.env` file is strictly required** for audio to work in production!
+
+### One-Time Setup Instructions
+
+Before the CI pipeline can run, you must provision the Azure infrastructure and set up GitHub Secrets.
+
+#### 1. Provision Azure Resources
+Run the following Azure CLI commands to create a Container Registry and a Container App:
+
+```bash
+az login
+
+RESOURCE_GROUP="vocare-grc-rg"
+LOCATION="australiaeast"
+ACR_NAME="vocaregrcregistry$RANDOM"
+ENV_NAME="vocare-grc-env"
+APP_NAME="vocare-grc-app"
+
+# Create Resource Group & Registry
+az group create --name $RESOURCE_GROUP --location $LOCATION
+az acr create --resource-group $RESOURCE_GROUP --name $ACR_NAME --sku Basic --admin-enabled true
+
+# Create Container App Environment & App
+az containerapp env create --name $ENV_NAME --resource-group $RESOURCE_GROUP --location $LOCATION
+az containerapp create \
+  --name $APP_NAME \
+  --resource-group $RESOURCE_GROUP \
+  --environment $ENV_NAME \
+  --image mcr.microsoft.com/k8se/quickstart:latest \
+  --target-port 8080 \
+  --ingress external \
+  --min-replicas 1 \
+  --max-replicas 5
+```
+
+#### 2. Set Container App Environment Variables
+Copy the keys from your `.env` file into Azure so the bot can authenticate:
+```bash
+az containerapp update --name $APP_NAME --resource-group $RESOURCE_GROUP \
+  --set-env-vars "ELEVENLABS_API_KEY=sk_..." "GROQ_API_KEY=gsk_..." "TWILIO_ACCOUNT_SID=AC..." "TWILIO_AUTH_TOKEN=..."
+```
+
+#### 3. Add GitHub Secrets
+Navigate to your GitHub repository's **Settings > Secrets and variables > Actions** and add the following repository secrets:
+
+1. `AZURE_CREDENTIALS`: Run the command below and paste the entire JSON output as the secret value.
+   ```bash
+   az ad sp create-for-rbac --name "vocare-deployer" --role contributor \
+     --scopes /subscriptions/<YOUR_SUBSCRIPTION_ID>/resourceGroups/vocare-grc-rg \
+     --sdk-auth
+   ```
+2. `REGISTRY_LOGIN_SERVER`: Output of `az acr show --name $ACR_NAME --query loginServer -o tsv`
+3. `REGISTRY_USERNAME`: Output of `az acr credential show --name $ACR_NAME --query username -o tsv`
+4. `REGISTRY_PASSWORD`: Output of `az acr credential show --name $ACR_NAME --query passwords[0].value -o tsv`
+
+### Continuous Deployment
+Once the setup is complete, every time you push code to the `master` branch, GitHub Actions will automatically:
+1. Build the new Docker image.
+2. Push the image to Azure Container Registry.
+3. Update the Azure Container App to serve the latest version.
