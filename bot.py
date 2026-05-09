@@ -17,7 +17,7 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Dict
+from typing import Awaitable, Callable, Dict
 
 sys.path.insert(0, str(Path(__file__).parent / "GRC_pilot"))
 from tools import get_bin_collection_zone, _correct_address  # noqa: E402
@@ -225,6 +225,85 @@ FILLERS = [
     "One moment please.",
 ]
 
+WEB_INTERFACE_SYSTEM_OVERRIDE = (
+    "WEB INTERFACE LIMITATION: This session is running in the browser web interface, "
+    "not on a live Twilio phone call. You cannot transfer the user to a human from "
+    "this interface. If the user asks for a human, person, operator, agent, transfer, "
+    "or escalation, do not say that you can transfer them. Say that transfer is not "
+    "available in the web interface and provide the council phone number 9330 6400."
+)
+
+TRANSFER_REQUEST_RE = re.compile(
+    r"\b("
+    r"speak\s+(?:to|with)\s+(?:a\s+)?(?:human|person|someone|agent|operator|representative)|"
+    r"talk\s+(?:to|with)\s+(?:a\s+)?(?:human|person|someone|agent|operator|representative)|"
+    r"(?:real|live|human)\s+(?:person|agent)|"
+    r"(?:need|want)\s+(?:a\s+)?(?:human|person|agent|operator|representative)|"
+    r"(?:human|person|agent|operator|representative)\s+please|"
+    r"transfer\s+me|connect\s+me|put\s+me\s+through|"
+    r"transfer|human|escalate|operator|representative|customer\s+service"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _is_transfer_request(text: str) -> bool:
+    return bool(TRANSFER_REQUEST_RE.search(text or ""))
+
+
+class TransferRequestProcessor(FrameProcessor):
+    """Deterministically handles human-transfer requests before the LLM."""
+
+    def __init__(
+        self,
+        on_transfer_request: Callable[[], Awaitable[str | None]],
+        immediate_message: str | None = None,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self._on_transfer_request = on_transfer_request
+        self._immediate_message = immediate_message
+        self._transfer_requested = False
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        if direction == FrameDirection.DOWNSTREAM and isinstance(
+            frame, (InterimTranscriptionFrame, TranscriptionFrame)
+        ):
+            if self._transfer_requested:
+                return
+
+            if isinstance(frame, TranscriptionFrame) and _is_transfer_request(frame.text):
+                self._transfer_requested = True
+                logger.info(f"[TRANSFER] Direct transfer intent detected: {frame.text!r}")
+                self.create_task(self._handle_transfer(), "direct_transfer")
+                return
+
+        await self.push_frame(frame, direction)
+
+    async def _handle_transfer(self):
+        try:
+            if self._immediate_message:
+                await self.push_frame(
+                    TTSSpeakFrame(text=self._immediate_message),
+                    FrameDirection.DOWNSTREAM,
+                )
+                await asyncio.sleep(1.25)
+            message = await self._on_transfer_request()
+            if message:
+                await self.push_frame(TTSSpeakFrame(text=message), FrameDirection.DOWNSTREAM)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"[TRANSFER] Direct transfer handler failed: {e}")
+            await self.push_frame(
+                TTSSpeakFrame(
+                    text="I wasn't able to transfer the call. Please call us directly on 9330 6400."
+                ),
+                FrameDirection.DOWNSTREAM,
+            )
+
 
 class ThinkerProcessor(FrameProcessor):
     """Runs a background 8B LLM to pre-extract intent/entities from STT transcripts.
@@ -397,9 +476,10 @@ class FillerTTSProcessor(FrameProcessor):
         await super().process_frame(frame, direction)
 
         if isinstance(frame, FunctionCallInProgressFrame) and direction == FrameDirection.DOWNSTREAM:
-            # Skip filler for bin collection — Wastetrack is fast and injects its
-            # own filler only when falling back to the slower polygon lookup.
-            if frame.function_name != "get_bin_collection_day":
+            # Skip filler for bin collection (has its own filler) and transfer
+            # (filler loop would play repeatedly before Twilio redirects the call).
+            _NO_FILLER_TOOLS = {"get_bin_collection_day", "transfer_to_human"}
+            if frame.function_name not in _NO_FILLER_TOOLS:
                 filler = FILLERS[self._filler_index % len(FILLERS)]
                 self._filler_index += 1
                 await self.push_frame(TTSSpeakFrame(text=filler), direction)
@@ -741,6 +821,14 @@ def fetch_twilio_ice_servers():
         return [IceServer(urls="stun:stun.l.google.com:19302")], stun
 
 
+def _clean_public_url(value: str) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    match = re.search(r"https?://[^\s|#]+", raw)
+    return match.group(0).rstrip("/") if match else raw.rstrip("/")
+
+
 # Fetched fresh on each /api/offer so credentials are always valid.
 ice_servers = [IceServer(urls="stun:stun.l.google.com:19302")]
 
@@ -750,7 +838,7 @@ def _configure_twilio_webhook():
     account_sid = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
     auth_token  = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
     phone_number = os.getenv("TWILIO_PHONE_NUMBER", "").strip()
-    public_url  = os.getenv("PUBLIC_URL", "").strip().rstrip("/")
+    public_url  = _clean_public_url(os.getenv("PUBLIC_URL", ""))
 
     if not all([account_sid, auth_token, phone_number, public_url]):
         logger.info("Twilio webhook auto-config skipped — TWILIO_PHONE_NUMBER or PUBLIC_URL not set")
@@ -1051,7 +1139,13 @@ async def run_bot(
     # the first call — no HTTP round-trip during the conversation itself.
     _events = await asyncio.to_thread(get_events)
     _events_block = format_events_for_system_prompt(_events)
-    system_instruction = SYSTEM_INSTRUCTION_GRC + "\n\n" + _events_block
+    system_instruction = (
+        SYSTEM_INSTRUCTION_GRC
+        + "\n\n"
+        + WEB_INTERFACE_SYSTEM_OVERRIDE
+        + "\n\n"
+        + _events_block
+    )
     logger.info(f"[CAG] Embedded {len(_events)} events into system instruction")
 
     transport = SmallWebRTCTransport(
@@ -1152,10 +1246,12 @@ async def run_bot(
     # Register GRC tools on the LLM and build schema
     llm.register_function("get_bin_collection_day", handle_get_bin_collection_day)
 
+    async def transfer_to_human_webrtc() -> str:
+        logger.info("[TRANSFER] WebRTC transfer requested; returning council phone fallback")
+        return "I can't transfer you through the web interface, but you can reach a council officer directly on 9330 6400."
+
     async def handle_transfer_to_human_webrtc(params: FunctionCallParams):
-        await params.result_callback({
-            "result": "I can't transfer you through the web interface, but you can reach a council officer directly on (02) 9330 6400."
-        })
+        await params.result_callback({"result": await transfer_to_human_webrtc()})
 
     llm.register_function("transfer_to_human", handle_transfer_to_human_webrtc)
 
@@ -1182,9 +1278,9 @@ async def run_bot(
     transfer_to_human_schema = FunctionSchema(
         name="transfer_to_human",
         description=(
-            "Transfer the caller to a human council officer. "
-            "Call this when the user says they want to speak to a person, a human, an agent, "
-            "or requests to be transferred or escalated."
+            "Use this in the web interface when the user asks for a human, person, agent, "
+            "operator, transfer, or escalation. This does not perform a real transfer; "
+            "it returns council phone fallback details."
         ),
         properties={},
         required=[],
@@ -1199,11 +1295,15 @@ async def run_bot(
             user_mute_strategies=[MuteUntilFirstBotCompleteUserMuteStrategy()],
         ),
     )
+    transfer_processor = TransferRequestProcessor(
+        on_transfer_request=transfer_to_human_webrtc,
+    )
 
     pipeline = Pipeline(
         [
             transport.input(),
             stt,
+            transfer_processor,
             thinker_processor,
             lang_switch,
             user_aggregator,
@@ -1544,8 +1644,54 @@ async def run_twilio_bot(websocket: WebSocket):
 
     llm.register_function("get_bin_collection_day", handle_get_bin_collection_day)
 
+    direct_transfer_in_progress = False
+
+    async def transfer_twilio_call_to_human() -> str | None:
+        nonlocal direct_transfer_in_progress
+        if direct_transfer_in_progress:
+            return None
+        direct_transfer_in_progress = True
+
+        transfer_number = os.getenv("TRANSFER_PHONE_NUMBER", "").strip()
+        if not transfer_number:
+            direct_transfer_in_progress = False
+            return "I'm sorry, transfer is not available right now. Please call us on 9330 6400."
+
+        try:
+            from twilio.rest import Client as TwilioClient
+            logger.info(f"[TRANSFER] Requesting Twilio redirect for call_sid={call_sid} to {transfer_number}")
+            tw = TwilioClient(os.getenv("TWILIO_ACCOUNT_SID"), os.getenv("TWILIO_AUTH_TOKEN"))
+            updated_call = await asyncio.wait_for(
+                asyncio.to_thread(
+                    tw.calls(call_sid).update,
+                    twiml=(
+                        "<Response>"
+                        f"<Dial>{transfer_number}</Dial>"
+                        "</Response>"
+                    ),
+                ),
+                timeout=10,
+            )
+            logger.info(
+                f"[TRANSFER] Direct call {call_sid} redirected to {transfer_number}; "
+                f"Twilio status={getattr(updated_call, 'status', 'unknown')}"
+            )
+            return None
+        except asyncio.TimeoutError:
+            logger.error("[TRANSFER] Direct transfer timed out while calling Twilio")
+            direct_transfer_in_progress = False
+            return "I wasn't able to transfer the call. Please call us directly on 9330 6400."
+        except Exception as e:
+            logger.error(f"[TRANSFER] Direct transfer failed: {e}")
+            direct_transfer_in_progress = False
+            return "I wasn't able to transfer the call. Please call us directly on 9330 6400."
+
     async def handle_transfer_to_human(params: FunctionCallParams):
         """Transfer the call to a human agent via Twilio REST API."""
+        result = await transfer_twilio_call_to_human()
+        await params.result_callback({"result": result or "Transferring you now. Please hold."})
+        return
+
         transfer_number = os.getenv("TRANSFER_PHONE_NUMBER", "").strip()
         if not transfer_number:
             await params.result_callback({
@@ -1615,11 +1761,16 @@ async def run_twilio_bot(websocket: WebSocket):
             user_mute_strategies=[MuteUntilFirstBotCompleteUserMuteStrategy()],
         ),
     )
+    transfer_processor = TransferRequestProcessor(
+        on_transfer_request=transfer_twilio_call_to_human,
+        immediate_message="Transferring you now. Please hold.",
+    )
 
     pipeline = Pipeline(
         [
             transport.input(),
             stt,
+            transfer_processor,
             thinker_processor,
             lang_switch,
             user_aggregator,
