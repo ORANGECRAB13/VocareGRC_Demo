@@ -267,7 +267,7 @@ function useAgentCall() {
           type: pc.localDescription.type,
           pc_id: pcId,
           stt: 'elevenlabs',
-          llm: 'mistral',
+          llm: 'cerebras',
           tts: 'elevenlabs',
           use_kg: true,
           mode: 'indiv',

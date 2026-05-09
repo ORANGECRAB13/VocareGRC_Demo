@@ -1142,6 +1142,13 @@ async def run_bot(
     # Register GRC tools on the LLM and build schema
     llm.register_function("get_bin_collection_day", handle_get_bin_collection_day)
 
+    async def handle_transfer_to_human_webrtc(params: FunctionCallParams):
+        await params.result_callback({
+            "result": "I can't transfer you through the web interface, but you can reach a council officer directly on (02) 9330 6400."
+        })
+
+    llm.register_function("transfer_to_human", handle_transfer_to_human_webrtc)
+
     get_bin_collection_day_schema = FunctionSchema(
         name="get_bin_collection_day",
         description=(
@@ -1162,7 +1169,17 @@ async def run_bot(
         },
         required=["address"],
     )
-    tools = ToolsSchema(standard_tools=[get_bin_collection_day_schema])
+    transfer_to_human_schema = FunctionSchema(
+        name="transfer_to_human",
+        description=(
+            "Transfer the caller to a human council officer. "
+            "Call this when the user says they want to speak to a person, a human, an agent, "
+            "or requests to be transferred or escalated."
+        ),
+        properties={},
+        required=[],
+    )
+    tools = ToolsSchema(standard_tools=[get_bin_collection_day_schema, transfer_to_human_schema])
 
     context = LLMContext(tools=tools)
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
