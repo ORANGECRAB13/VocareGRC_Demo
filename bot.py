@@ -464,8 +464,10 @@ SYSTEM_INSTRUCTION_GRC = (
     "Do not use filler phrases like 'Certainly!' or 'Of course!'. "
 
     # --- Service: Bin collection ---
-    "For bin collection day: always call get_bin_collection_day with the resident's "
-    "full street address. Never guess or invent a collection day. "
+    "For bin collection day: ask for the resident's full street address if they haven't "
+    "provided one. Only call get_bin_collection_day once you have a specific street address. "
+    "Never call the tool with a vague phrase, question, or incomplete input. "
+    "Never guess or invent a collection day. "
 
     # --- Service: Development applications ---
     "For DA inquiries: answer from the knowledge base below. "
@@ -515,7 +517,7 @@ SYSTEM_INSTRUCTION_GRC = (
     # --- Thinker acceleration ---
     "You may receive a [THINKER_STATE] system message with pre-extracted intent and entities. "
     "When present, use it to respond faster: "
-    "if intent is bin_collection and address is present, call get_bin_collection_day immediately. "
+    "if intent is bin_collection and address is a real street address (contains a street name and optionally a number), call get_bin_collection_day immediately. "
     "If no THINKER_STATE is present, proceed as normal. "
 
     "\n\n"
@@ -1045,6 +1047,22 @@ async def run_bot(
     async def handle_get_bin_collection_day(params: FunctionCallParams):
         address = _correct_address(params.arguments.get("address", "").strip())
         logger.info(f"Function call: get_bin_collection_day({address})")
+
+        # Guard: reject if the address doesn't look like a real street address.
+        # A valid address has at least two words and contains at least one digit
+        # OR a recognised street-type word.
+        _STREET_TYPES = {"street","st","road","rd","avenue","ave","lane","ln",
+                         "drive","dr","place","pl","court","ct","way","crescent","cres","close"}
+        _words = address.lower().split()
+        _has_number = any(w[0].isdigit() for w in _words)
+        _has_street_type = bool(_STREET_TYPES.intersection(_words))
+        if len(_words) < 2 or not (_has_number or _has_street_type):
+            logger.warning(f"[BIN TOOL] Rejected non-address input: '{address}'")
+            await params.result_callback({
+                "result": "I need a street address to look that up — could you tell me your street address?"
+            })
+            return
+
         try:
             # ── Fast path: Thinker may have already prefetched this address ──────
             prefetch_future = thinker_processor.pop_prefetch(address)
@@ -1091,12 +1109,18 @@ async def run_bot(
         name="get_bin_collection_day",
         description=(
             "Look up the bin collection day for a resident's address. "
-            "Call when a resident asks what day their bins are collected."
+            "Only call this tool once the resident has provided a specific street address "
+            "(e.g. '50 Vine Street Hurstville'). "
+            "Do NOT call this tool if you only have a vague question — ask for the address first."
         ),
         properties={
             "address": {
                 "type": "string",
-                "description": "Full street address within the Georges River LGA",
+                "description": (
+                    "Full street address within the Georges River LGA, "
+                    "e.g. '50 Vine Street Hurstville'. "
+                    "Must be a real address, not a question or vague phrase."
+                ),
             },
         },
         required=["address"],
@@ -1403,6 +1427,19 @@ async def run_twilio_bot(websocket: WebSocket):
     async def handle_get_bin_collection_day(params: FunctionCallParams):
         address = _correct_address(params.arguments.get("address", "").strip())
         logger.info(f"[Twilio] get_bin_collection_day({address})")
+
+        _STREET_TYPES = {"street","st","road","rd","avenue","ave","lane","ln",
+                         "drive","dr","place","pl","court","ct","way","crescent","cres","close"}
+        _words = address.lower().split()
+        _has_number = any(w[0].isdigit() for w in _words)
+        _has_street_type = bool(_STREET_TYPES.intersection(_words))
+        if len(_words) < 2 or not (_has_number or _has_street_type):
+            logger.warning(f"[BIN TOOL] Rejected non-address input: '{address}'")
+            await params.result_callback({
+                "result": "I need a street address to look that up — could you tell me your street address?"
+            })
+            return
+
         try:
             # ── Fast path: Thinker may have already prefetched this address ──────
             prefetch_future = thinker_processor.pop_prefetch(address)
@@ -1445,9 +1482,21 @@ async def run_twilio_bot(websocket: WebSocket):
 
     get_bin_collection_day_schema = FunctionSchema(
         name="get_bin_collection_day",
-        description="Look up the bin collection day for a resident's address.",
+        description=(
+            "Look up the bin collection day for a resident's address. "
+            "Only call this tool once the resident has provided a specific street address "
+            "(e.g. '50 Vine Street Hurstville'). "
+            "Do NOT call this tool if you only have a vague question — ask for the address first."
+        ),
         properties={
-            "address": {"type": "string", "description": "Full street address within the Georges River LGA"},
+            "address": {
+                "type": "string",
+                "description": (
+                    "Full street address within the Georges River LGA, "
+                    "e.g. '50 Vine Street Hurstville'. "
+                    "Must be a real address, not a question or vague phrase."
+                ),
+            },
         },
         required=["address"],
     )
