@@ -424,34 +424,33 @@ class LanguageSwitchProcessor(FrameProcessor):
         self._llm = llm
         self._en_voice_id = en_voice_id
         self._multilingual_voice_id = multilingual_voice_id
-        self._current_language: Language | None = Language.EN
+        self._is_english: bool = True  # start English; flip on first non-EN utterance
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
 
         if isinstance(frame, TranscriptionFrame) and direction == FrameDirection.DOWNSTREAM:
-            # None means STT didn't tag a language — treat as English (the default/unmarked case).
-            # Normalise all Chinese variants (ZH, ZH_CN, ZH_TW, ZH_HK …) to a single sentinel.
             raw = frame.language
-            is_chinese = raw is not None and raw.value.startswith("zh")
-            target = Language.ZH if is_chinese else Language.EN
-
-            if target != self._current_language:
-                self._current_language = target
-                await self._switch_language(target)
+            # None means STT didn't return a language tag — keep current assumption.
+            # Any language code that doesn't start with "en" is treated as non-English.
+            if raw is not None:
+                is_english = raw.value.lower().startswith("en")
+                if is_english != self._is_english:
+                    self._is_english = is_english
+                    await self._switch_language(is_english)
 
         await self.push_frame(frame, direction)
 
-    async def _switch_language(self, language: Language):
+    async def _switch_language(self, is_english: bool):
         from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 
-        is_chinese = language == Language.ZH
-        voice     = self._multilingual_voice_id if is_chinese else self._en_voice_id
-        llm_model = self._ML_MODEL if is_chinese else self._EN_MODEL
+        voice     = self._en_voice_id if is_english else self._multilingual_voice_id
+        llm_model = self._EN_MODEL if is_english else self._ML_MODEL
 
-        tts_delta = ElevenLabsTTSService.Settings(
-            voice=voice, language=Language.ZH if is_chinese else Language.EN
-        )
+        # Switch voice only — no language code so ElevenLabs auto-detects from
+        # the generated text. Passing a fixed language code (e.g. ZH) would break
+        # any language that isn't Chinese.
+        tts_delta = ElevenLabsTTSService.Settings(voice=voice)
         await self.push_frame(
             TTSUpdateSettingsFrame(delta=tts_delta, service=self._tts),
             FrameDirection.DOWNSTREAM,
@@ -463,8 +462,8 @@ class LanguageSwitchProcessor(FrameProcessor):
             FrameDirection.DOWNSTREAM,
         )
         logger.info(
-            f"Language switch → {'zh' if is_chinese else 'en'} | "
-            f"voice={'multilingual' if is_chinese else 'english'} | "
+            f"Language switch → {'en' if is_english else 'multilingual'} | "
+            f"voice={'english' if is_english else 'multilingual'} | "
             f"llm={llm_model}"
         )
 
@@ -590,11 +589,15 @@ def create_tts(name: str):
     if name == "elevenlabs":
         from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 
+        # Prefer the multilingual voice so TTS can speak any language the LLM
+        # generates without requiring a runtime switch.
+        voice = (
+            os.getenv("ELEVENLABS_MULTILINGUAL_VOICE_ID")
+            or os.getenv("ELEVENLABS_VOICE_ID")
+        )
         return ElevenLabsTTSService(
             api_key=os.getenv("ELEVENLABS_API_KEY"),
-            settings=ElevenLabsTTSService.Settings(
-                voice=os.getenv("ELEVENLABS_VOICE_ID"),
-            ),
+            settings=ElevenLabsTTSService.Settings(voice=voice),
         )
     else:
         raise ValueError(f"Unknown TTS service: {name}")
