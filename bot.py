@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent / "GRC_pilot"))
 from tools import get_bin_collection_zone, _correct_address  # noqa: E402
 from grc_events import get_events, format_events_for_system_prompt  # noqa: E402
 from da_knowledge import DA_KNOWLEDGE  # noqa: E402
+from bin_faq import BIN_FAQ  # noqa: E402
 
 import uvicorn
 from dotenv import load_dotenv
@@ -464,10 +465,13 @@ SYSTEM_INSTRUCTION_GRC = (
     "Do not use filler phrases like 'Certainly!' or 'Of course!'. "
 
     # --- Service: Bin collection ---
-    "For bin collection day: ask for the resident's full street address if they haven't "
+    "For bin collection day lookups: ask for the resident's full street address if they haven't "
     "provided one. Only call get_bin_collection_day once you have a specific street address. "
     "Never call the tool with a vague phrase, question, or incomplete input. "
     "Never guess or invent a collection day. "
+    "For bin service FAQ questions (bin types, what goes in each bin, missed collections, "
+    "bin placement rules, fees, public holidays, infirm service, bin tags, etc.): "
+    "answer directly from the BIN SERVICES KNOWLEDGE BASE embedded below — no tool call needed. "
 
     # --- Service: Development applications ---
     "For DA inquiries: answer from the knowledge base below. "
@@ -522,6 +526,8 @@ SYSTEM_INSTRUCTION_GRC = (
 
     "\n\n"
     + DA_KNOWLEDGE
+    + "\n\n"
+    + BIN_FAQ
 )
 
 # ---------------------------------------------------------------------------
