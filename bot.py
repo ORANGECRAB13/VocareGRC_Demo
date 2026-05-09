@@ -1521,22 +1521,29 @@ async def run_twilio_bot(websocket: WebSocket):
         """Transfer the call to a human agent via Twilio REST API."""
         transfer_number = os.getenv("TRANSFER_PHONE_NUMBER", "").strip()
         if not transfer_number:
-            await params.result_callback({"result": "I'm sorry, transfer is not available right now. Please call us on (02) 9330 6400."})
+            await params.result_callback({
+                "result": "I'm sorry, transfer is not available right now. Please call us on (02) 9330 6400."
+            })
             return
 
         try:
             from twilio.rest import Client as TwilioClient
             tw = TwilioClient(os.getenv("TWILIO_ACCOUNT_SID"), os.getenv("TWILIO_AUTH_TOKEN"))
-            tw.calls(call_sid).update(
-                twiml=f"<Response><Dial>{transfer_number}</Dial></Response>"
+            # Run synchronous Twilio REST call off the event loop thread
+            await asyncio.to_thread(
+                tw.calls(call_sid).update,
+                twiml=f"<Response><Dial>{transfer_number}</Dial></Response>",
             )
             logger.info(f"[TRANSFER] Call {call_sid} transferred to {transfer_number}")
+            # Let the LLM speak the farewell; Twilio will close the Media Stream
+            # WebSocket once the <Dial> takes effect, which triggers on_client_disconnected
+            # and cancels the task naturally — no need to cancel here.
             await params.result_callback({"result": "Transferring you now. Please hold."})
         except Exception as e:
             logger.error(f"[TRANSFER] Failed: {e}")
-            await params.result_callback({"result": "I wasn't able to transfer the call. Please call us directly on (02) 9330 6400."})
-
-        await task.cancel()
+            await params.result_callback({
+                "result": "I wasn't able to transfer the call. Please call us directly on (02) 9330 6400."
+            })
 
     llm.register_function("transfer_to_human", handle_transfer_to_human)
 
