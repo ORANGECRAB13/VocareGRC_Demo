@@ -153,7 +153,6 @@ from pipecat.frames.frames import (
     LLMFullResponseEndFrame,
     LLMRunFrame,
     LLMTextFrame,
-    LLMUpdateSettingsFrame,
     TTSSpeakFrame,
     TTSStartedFrame,
     TTSUpdateSettingsFrame,
@@ -415,13 +414,9 @@ class LanguageSwitchProcessor(FrameProcessor):
     to reconnect the ElevenLabs WebSocket with the correct voice and language code.
     """
 
-    _EN_MODEL = "gpt-oss-120b"
-    _ML_MODEL = "qwen-3-235b-a22b-instruct-2507"
-
-    def __init__(self, tts, llm, en_voice_id: str, multilingual_voice_id: str, **kwargs):
+    def __init__(self, tts, en_voice_id: str, multilingual_voice_id: str, **kwargs):
         super().__init__(**kwargs)
         self._tts = tts
-        self._llm = llm
         self._en_voice_id = en_voice_id
         self._multilingual_voice_id = multilingual_voice_id
         self._is_english: bool = True  # start English; flip on first non-EN utterance
@@ -444,27 +439,19 @@ class LanguageSwitchProcessor(FrameProcessor):
     async def _switch_language(self, is_english: bool):
         from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 
-        voice     = self._en_voice_id if is_english else self._multilingual_voice_id
-        llm_model = self._EN_MODEL if is_english else self._ML_MODEL
+        voice = self._en_voice_id if is_english else self._multilingual_voice_id
 
         # Switch voice only — no language code so ElevenLabs auto-detects from
-        # the generated text. Passing a fixed language code (e.g. ZH) would break
-        # any language that isn't Chinese.
+        # the generated text. Passing a fixed language code would restrict the
+        # voice to one language and break anything other than that language.
         tts_delta = ElevenLabsTTSService.Settings(voice=voice)
         await self.push_frame(
             TTSUpdateSettingsFrame(delta=tts_delta, service=self._tts),
             FrameDirection.DOWNSTREAM,
         )
-
-        llm_delta = CerebrasLLMSettings(model=llm_model)
-        await self.push_frame(
-            LLMUpdateSettingsFrame(delta=llm_delta, service=self._llm),
-            FrameDirection.DOWNSTREAM,
-        )
         logger.info(
             f"Language switch → {'en' if is_english else 'multilingual'} | "
-            f"voice={'english' if is_english else 'multilingual'} | "
-            f"llm={llm_model}"
+            f"voice={'english' if is_english else 'multilingual'}"
         )
 
 
@@ -560,7 +547,7 @@ def create_llm(name: str, system_instruction: str = ""):
         return CerebrasLLMService(
             api_key=os.getenv("CEREBRAS_API_KEY"),
             settings=CerebrasLLMSettings(
-                model="gpt-oss-120b",
+                model="qwen-3-235b-a22b-instruct-2507",
                 system_instruction=system_instruction,
             ),
         )
@@ -1042,7 +1029,6 @@ async def run_bot(
     filler_tts = FillerTTSProcessor()
     lang_switch = LanguageSwitchProcessor(
         tts=tts,
-        llm=llm,
         en_voice_id=os.getenv("ELEVENLABS_VOICE_ID", ""),
         multilingual_voice_id=os.getenv("ELEVENLABS_MULTILINGUAL_VOICE_ID", os.getenv("ELEVENLABS_VOICE_ID", "")),
     )
@@ -1409,7 +1395,6 @@ async def run_twilio_bot(websocket: WebSocket):
     filler_tts = FillerTTSProcessor()
     lang_switch = LanguageSwitchProcessor(
         tts=tts,
-        llm=llm,
         en_voice_id=os.getenv("ELEVENLABS_VOICE_ID", ""),
         multilingual_voice_id=os.getenv("ELEVENLABS_MULTILINGUAL_VOICE_ID", os.getenv("ELEVENLABS_VOICE_ID", "")),
     )
