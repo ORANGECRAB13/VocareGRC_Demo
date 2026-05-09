@@ -1,0 +1,324 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Georges River Bin Zone API",
+    "description": "API for looking up bin collection zones and schedules for Georges River Council. Designed for ElevenLabs voice agent integration.",
+    "version": "1.0.0",
+    "contact": {
+      "name": "Support"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://localhost:3000",
+      "description": "Local development"
+    },
+    {
+      "url": "https://api.example.com",
+      "description": "Production (replace with actual URL)"
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "Health Check",
+        "description": "Returns API health status and zone statistics",
+        "operationId": "healthCheck",
+        "tags": ["System"],
+        "responses": {
+          "200": {
+            "description": "API is healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "ok"
+                    },
+                    "zones_loaded": {
+                      "type": "integer",
+                      "example": 2
+                    },
+                    "timestamp": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/zones": {
+      "get": {
+        "summary": "List All Zones",
+        "description": "Returns a list of all loaded zones with their collection days",
+        "operationId": "listZones",
+        "tags": ["Zones"],
+        "responses": {
+          "200": {
+            "description": "List of zones",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "total_zones": {
+                      "type": "integer"
+                    },
+                    "zones": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "zone_id": {
+                            "type": "integer"
+                          },
+                          "collection_days": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": ["monday", "tuesday", "wednesday", "thursday", "friday"]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/bin-zone": {
+      "get": {
+        "summary": "Lookup Zone by Coordinates",
+        "description": "Find the bin collection zone and schedule for given latitude and longitude coordinates",
+        "operationId": "lookupZoneByCoordinates",
+        "tags": ["Lookup"],
+        "parameters": [
+          {
+            "name": "lat",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "number",
+              "format": "double"
+            },
+            "description": "Latitude coordinate (e.g., -33.968)",
+            "example": -33.968
+          },
+          {
+            "name": "lng",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "number",
+              "format": "double"
+            },
+            "description": "Longitude coordinate (e.g., 151.048)",
+            "example": 151.048
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Zone found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BinZoneResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "required": {
+                      "type": "array"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Address not in any collection zone",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "coordinate": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/bin-zone/address": {
+      "post": {
+        "summary": "Lookup Zone by Address",
+        "description": "Find the bin collection zone by street address (requires Google Maps API key)",
+        "operationId": "lookupZoneByAddress",
+        "tags": ["Lookup"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "address": {
+                    "type": "string",
+                    "description": "Street address to look up",
+                    "example": "123 Main Street, Hurstville NSW 2220"
+                  }
+                },
+                "required": ["address"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Zone found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/BinZoneResponse"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "address": {
+                          "type": "string",
+                          "description": "Geocoded address"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing address parameter"
+          },
+          "404": {
+            "description": "Address not found or not in any collection zone"
+          },
+          "500": {
+            "description": "Geocoding service error or API key not configured"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "BinZoneResponse": {
+        "type": "object",
+        "properties": {
+          "zone_id": {
+            "type": "integer",
+            "description": "Zone identifier number",
+            "example": 1
+          },
+          "collection_schedule": {
+            "type": "object",
+            "properties": {
+              "general_waste": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": ["monday", "tuesday", "wednesday", "thursday", "friday"]
+                },
+                "description": "Days of the week when general waste is collected",
+                "example": ["monday", "friday"]
+              },
+              "next_collection_day": {
+                "type": "object",
+                "properties": {
+                  "day": {
+                    "type": "string",
+                    "enum": ["monday", "tuesday", "wednesday", "thursday", "friday"],
+                    "example": "monday"
+                  },
+                  "date": {
+                    "type": "string",
+                    "format": "date",
+                    "example": "2026-04-20"
+                  },
+                  "days_until": {
+                    "type": "integer",
+                    "example": 2
+                  }
+                },
+                "description": "Next scheduled collection date"
+              },
+              "bin_type": {
+                "type": "string",
+                "example": "General Waste",
+                "description": "Type of waste this schedule applies to"
+              }
+            }
+          },
+          "coordinate": {
+            "type": "object",
+            "properties": {
+              "lat": {
+                "type": "number"
+              },
+              "lng": {
+                "type": "number"
+              }
+            },
+            "description": "Coordinates used for lookup"
+          },
+          "voice_prompt": {
+            "type": "string",
+            "description": "Natural language response ready for text-to-speech",
+            "example": "Your address is in Zone 1. General waste is collected on Monday and Friday."
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "System",
+      "description": "API health and status"
+    },
+    {
+      "name": "Zones",
+      "description": "Zone information"
+    },
+    {
+      "name": "Lookup",
+      "description": "Bin collection zone lookup"
+    }
+  ]
+}

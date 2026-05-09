@@ -1,0 +1,99 @@
+{
+  "year": 2026,
+  "zones": [
+    {
+      "name": "Monday Zone 1",
+      "day": "Monday",
+      "general": { "frequency": "weekly" },
+      "recycling_garden": {
+        "start_date": "2026-01-05",
+        "pattern": ["recycling", "garden"]
+      }
+    },
+    {
+      "name": "Monday Zone 2",
+      "day": "Monday",
+      "general": { "frequency": "weekly" },
+      "recycling_garden": {
+        "start_date": "2026-01-05",
+        "pattern": ["recycling", "garden"],
+        "offset": 1
+      }
+    },
+    {
+      "name": "Tuesday Zone 1",
+      "day": "Tuesday",
+      "general": { "frequency": "weekly" },
+      "recycling_garden": {
+        "start_date": "2026-01-06",
+        "pattern": ["recycling", "garden"]
+      }
+    },
+    {
+      "name": "Tuesday Zone 2",
+      "day": "Tuesday",
+      "general": { "frequency": "weekly" },
+      "recycling_garden": {
+        "start_date": "2026-01-06",
+        "pattern": ["recycling", "garden"],
+        "offset": 1
+      }
+    },
+    {
+      "name": "Wednesday Zone 1",
+      "day": "Wednesday",
+      "general": { "frequency": "weekly" },
+      "recycling_garden": {
+        "start_date": "2026-01-07",
+        "pattern": ["recycling", "garden"]
+      }
+    },
+    {
+      "name": "Wednesday Zone 2",
+      "day": "Wednesday",
+      "general": { "frequency": "weekly" },
+      "recycling_garden": {
+        "start_date": "2026-01-07",
+        "pattern": ["recycling", "garden"],
+        "offset": 1
+      }
+    },
+    {
+      "name": "Thursday Zone 1",
+      "day": "Thursday",
+      "general": { "frequency": "weekly" },
+      "recycling_garden": {
+        "start_date": "2026-01-01",
+        "pattern": ["garden", "recycling"]
+      }
+    },
+    {
+      "name": "Thursday Zone 2",
+      "day": "Thursday",
+      "general": { "frequency": "weekly" },
+      "recycling_garden": {
+        "start_date": "2026-01-01",
+        "pattern": ["recycling", "garden"]
+      }
+    },
+    {
+      "name": "Friday Zone 1",
+      "day": "Friday",
+      "general": { "frequency": "weekly" },
+      "recycling_garden": {
+        "start_date": "2026-01-02",
+        "pattern": ["recycling", "garden"]
+      }
+    },
+    {
+      "name": "Friday Zone 2",
+      "day": "Friday",
+      "general": { "frequency": "weekly" },
+      "recycling_garden": {
+        "start_date": "2026-01-02",
+        "pattern": ["recycling", "garden"],
+        "offset": 1
+      }
+    }
+  ]
+}

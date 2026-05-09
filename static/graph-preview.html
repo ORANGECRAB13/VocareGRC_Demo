@@ -1,0 +1,1021 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Graph Layout Editor — QF-8200</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #050508;
+      color: #e0e0e0;
+      font-family: 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      height: 100vh;
+      overflow: hidden;
+      display: grid;
+      grid-template-columns: 380px 1fr;
+    }
+
+    /* ── Left panel ── */
+    .panel-left {
+      background: #07070e;
+      border-right: 1px solid #1a1a1a;
+      display: flex;
+      flex-direction: column;
+      padding: 1.5rem;
+      gap: 1.2rem;
+      overflow-y: auto;
+    }
+
+    .app-title { font-size: 22px; font-weight: 700; color: #f59e0b; letter-spacing: -0.02em; }
+
+    .section-label {
+      font-size: 10px;
+      color: #333;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      margin-bottom: 5px;
+    }
+
+    .mock-select {
+      width: 100%;
+      padding: 7px 10px;
+      background: #0f0f18;
+      border: 1px solid #1e1e1e;
+      border-radius: 6px;
+      color: #555;
+      font-size: 12px;
+    }
+
+    .mock-connect {
+      width: 100%;
+      padding: 9px;
+      background: #f59e0b;
+      border: none;
+      border-radius: 6px;
+      color: #000;
+      font-weight: 700;
+      font-size: 13px;
+      cursor: default;
+    }
+
+    .divider { border-top: 1px solid #111; margin: 0.2rem 0; }
+
+    /* ── Editor controls ── */
+    .editor-section { display: flex; flex-direction: column; gap: 8px; }
+    .editor-title {
+      font-size: 11px;
+      font-weight: 600;
+      color: #666;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .btn {
+      font-size: 12px;
+      font-weight: 500;
+      padding: 7px 12px;
+      border-radius: 6px;
+      border: 1px solid #222;
+      background: #111;
+      color: #999;
+      cursor: pointer;
+      transition: all 0.18s;
+      text-align: center;
+    }
+    .btn:hover { border-color: #444; color: #ddd; background: #1a1a1a; }
+
+    .btn-remember {
+      background: rgba(16,185,129,0.08);
+      border-color: #10b981;
+      color: #10b981;
+      font-weight: 600;
+      font-size: 13px;
+      padding: 9px 12px;
+    }
+    .btn-remember:hover { background: rgba(16,185,129,0.16); }
+
+    .btn-remember.saved {
+      background: rgba(16,185,129,0.2);
+      color: #34d399;
+    }
+
+    /* ── Traversal buttons ── */
+    .btn-traversal {
+      width: 100%;
+      padding: 8px 12px;
+      border-radius: 6px;
+      border: 1px solid;
+      background: transparent;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.18s;
+      text-align: left;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      letter-spacing: 0.02em;
+    }
+    .btn-traversal:hover { filter: brightness(1.3); background: rgba(255,255,255,0.03); }
+    .btn-traversal.trav-active { filter: brightness(1.4); background: rgba(255,255,255,0.06); }
+
+    .trav-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    /* ── Node info panel ── */
+    .node-info {
+      background: #0a0a14;
+      border: 1px solid #1a1a1a;
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 11px;
+      color: #555;
+      min-height: 72px;
+      line-height: 1.7;
+    }
+    .node-info .nid { color: #3b82f6; font-weight: 500; }
+    .node-info .npos { color: #10b981; }
+    .node-info .ntype { color: #8b5cf6; }
+
+    .hint {
+      font-size: 10px;
+      color: #252530;
+      line-height: 1.6;
+    }
+
+    /* ── Save status ── */
+    .save-status {
+      font-size: 11px;
+      color: #555;
+      text-align: center;
+      min-height: 16px;
+    }
+    .save-status.ok { color: #10b981; }
+    .save-status.err { color: #ef4444; }
+
+    /* ── Right panel — graph scene ── */
+    .scene {
+      position: relative;
+      overflow: hidden;
+      background: #050508;
+    }
+
+    canvas {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      z-index: 1;
+    }
+
+    /* ── Nodes ── */
+    .graph-node {
+      position: absolute;
+      border-radius: 50%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: rgba(10, 10, 15, 0.88);
+      border: 2px solid var(--node-color);
+      transform: translate(-50%, -50%);
+      cursor: grab;
+      user-select: none;
+      z-index: 3;
+      transition: box-shadow 0.2s, opacity 0.4s;
+    }
+    .graph-node:active { cursor: grabbing; }
+    .graph-node.dragging {
+      box-shadow: 0 0 0 3px rgba(255,255,255,0.15), 0 0 30px var(--node-color-alpha);
+      z-index: 10;
+    }
+
+    .graph-node.size-lg { width: 80px; height: 80px; }
+    .graph-node.size-md { width: 68px; height: 68px; }
+    .graph-node.size-sm { width: 60px; height: 60px; }
+
+    .graph-node .node-icon { font-size: 14px; line-height: 1; }
+    .graph-node.size-lg .node-icon { font-size: 20px; }
+    .graph-node.size-md .node-icon { font-size: 17px; }
+
+    .graph-node .node-label {
+      position: absolute;
+      bottom: -20px;
+      left: 50%;
+      transform: translateX(-50%);
+      white-space: nowrap;
+      font-size: 11px;
+      font-weight: 500;
+      color: #ccc;
+      pointer-events: none;
+    }
+    .graph-node .node-sublabel {
+      position: absolute;
+      bottom: -33px;
+      left: 50%;
+      transform: translateX(-50%);
+      white-space: nowrap;
+      font-size: 9px;
+      color: #666;
+      pointer-events: none;
+      max-width: 160px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .graph-node .node-alert {
+      position: absolute;
+      top: -17px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 10px;
+      font-weight: 600;
+      color: #ef4444;
+      white-space: nowrap;
+      pointer-events: none;
+      animation: alertPulse 1.5s ease-in-out infinite;
+    }
+    @keyframes alertPulse { 0%,100% { opacity:.5; } 50% { opacity:1; } }
+
+    /* Active / inactive states — matches deployed app */
+    .graph-node.inactive {
+      opacity: 0.35;
+      box-shadow: none;
+    }
+    .graph-node.inactive .node-icon { opacity: 0.3; }
+    .graph-node.inactive .node-label { color: #555; }
+    .graph-node.inactive .node-sublabel { color: #333; }
+
+    .graph-node.active {
+      opacity: 1;
+      box-shadow: 0 0 20px var(--node-color-alpha), 0 0 40px var(--node-color-alpha-dim);
+    }
+    .graph-node.active .node-icon { opacity: 0.9; color: #fff; }
+    .graph-node.active .node-label { color: #fff; }
+    .graph-node.active .node-sublabel { color: #aaa; }
+
+    /* ── Graph overlay labels ── */
+    .graph-header {
+      position: absolute;
+      top: 1rem;
+      left: 1.5rem;
+      z-index: 20;
+      pointer-events: none;
+    }
+    .graph-header h2 {
+      font-size: 0.85rem;
+      font-weight: 500;
+      color: #555;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .graph-header .graph-status {
+      font-size: 0.75rem;
+      color: #444;
+      margin-top: 0.25rem;
+    }
+
+    .graph-legend {
+      position: absolute;
+      bottom: 1rem;
+      left: 1rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      z-index: 20;
+      pointer-events: none;
+    }
+    .legend-item { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #555; }
+    .legend-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+
+    /* ── Editor mode badge ── */
+    .editor-badge {
+      position: absolute;
+      top: 1rem;
+      right: 1rem;
+      font-size: 10px;
+      color: #10b981;
+      border: 1px solid #10b981;
+      border-radius: 4px;
+      padding: 3px 8px;
+      letter-spacing: 0.08em;
+      z-index: 20;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+
+<!-- Left panel: deployed-app controls + editor tools -->
+<div class="panel-left">
+  <div class="app-title">Vocare</div>
+
+  <div>
+    <div class="section-label">STT</div>
+    <div class="mock-select">Deepgram Nova 2</div>
+  </div>
+  <div>
+    <div class="section-label">LLM</div>
+    <div class="mock-select">Claude Sonnet 4.6</div>
+  </div>
+  <div>
+    <div class="section-label">TTS</div>
+    <div class="mock-select">Cartesia Sonic</div>
+  </div>
+
+  <button class="mock-connect">CONNECT</button>
+  <div class="divider"></div>
+
+  <!-- Editor tools -->
+  <div class="editor-section">
+    <div class="editor-title">Layout Editor</div>
+
+    <div style="display:flex;gap:6px;">
+      <button class="btn" id="btnShowAll" style="flex:1;">Show All</button>
+      <button class="btn" id="btnReplay"  style="flex:1;">↺ Reset</button>
+    </div>
+
+    <button class="btn-remember btn" id="btnRemember">⬛ Remember Layout</button>
+    <div class="save-status" id="saveStatus"></div>
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- Traversal paths -->
+  <div class="editor-section">
+    <div class="editor-title">Traversal Preview</div>
+
+    <button class="btn-traversal" id="trav-crm"
+      style="color:#fbbf24;border-color:#fbbf2444;"
+      onclick="highlightPath('crm')">
+      <span class="trav-dot" style="background:#fbbf24;"></span>CRM Channel
+    </button>
+
+    <button class="btn-traversal" id="trav-comms"
+      style="color:#f97316;border-color:#f9731644;"
+      onclick="highlightPath('comms')">
+      <span class="trav-dot" style="background:#f97316;"></span>Communications
+    </button>
+
+    <button class="btn-traversal" id="trav-baggage"
+      style="color:#10b981;border-color:#10b98144;"
+      onclick="highlightPath('baggage')">
+      <span class="trav-dot" style="background:#10b981;"></span>Baggage Handling
+    </button>
+
+    <button class="btn-traversal" id="trav-codeshare"
+      style="color:#8b5cf6;border-color:#8b5cf644;"
+      onclick="highlightPath('codeshare')">
+      <span class="trav-dot" style="background:#8b5cf6;"></span>CodeShare Flights
+    </button>
+
+    <button class="btn-traversal" id="trav-events"
+      style="color:#6366f1;border-color:#6366f144;"
+      onclick="highlightPath('events')">
+      <span class="trav-dot" style="background:#6366f1;"></span>Event Chain
+    </button>
+
+    <button class="btn" id="btnClearPath" onclick="clearPath()"
+      style="margin-top:2px;">✕ Reset</button>
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- Selected node info -->
+  <div class="editor-section">
+    <div class="editor-title">Selected Node</div>
+    <div class="node-info" id="nodeInfo">
+      <span style="color:#333;">Click or drag a node to inspect it</span>
+    </div>
+  </div>
+
+  <!-- Layout JSON output panel -->
+  <div id="layoutOutput" style="display:none;flex-direction:column;gap:6px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+      <div class="editor-title">Layout JSON</div>
+      <button class="btn" style="padding:2px 8px;font-size:10px;" onclick="document.getElementById('layoutOutput').style.display='none'">✕</button>
+    </div>
+    <textarea id="layoutJson" readonly
+      style="width:100%;height:140px;background:#0a0a14;border:1px solid #1e1e1e;border-radius:6px;
+             color:#10b981;font-size:10px;font-family:monospace;padding:8px;resize:vertical;"></textarea>
+    <div style="font-size:10px;color:#333;">Copy this and paste it to Claude, or tell Claude "apply layout-export.json".</div>
+  </div>
+
+  <div class="hint">
+    Drag nodes to reposition.<br>
+    Click a node to see its ID &amp; coordinates.<br>
+    Press <strong style="color:#888;">Remember Layout</strong> — downloads the file and shows the JSON here.
+  </div>
+</div>
+
+<!-- Right panel: graph -->
+<div class="scene" id="scene">
+  <canvas id="edgeCanvas"></canvas>
+  <div id="world"></div>
+
+  <div class="graph-header">
+    <h2>Knowledge Graph</h2>
+    <div class="graph-status" id="graphStatus">Layout Editor — drag nodes to reposition</div>
+  </div>
+
+  <div class="editor-badge">EDITOR</div>
+
+  <div class="graph-legend">
+    <div class="legend-item"><div class="legend-dot" style="background:#f59e0b;"></div>Customer</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#64748b;"></div>Channel</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#3b82f6;"></div>Flight</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#fbbf24;"></div>CRM</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#10b981;"></div>Baggage</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#8b5cf6;"></div>Rebooking</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#f97316;"></div>Comms</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#6366f1;"></div>Event</div>
+  </div>
+</div>
+
+<script>
+// ── Graph data ────────────────────────────────────────────────────────────────
+
+const GRAPH_DATA = {
+  nodes: [
+    { id: 'customer-QF-8200',          type: 'Customer',
+      label: 'Jack Smith', sublabel: 'QF-8200 · Silver member' },
+
+    { id: 'channel-crm',               type: 'Channel', label: 'CRM Channel',              sublabel: 'Salesforce CRM' },
+    { id: 'channel-communications',    type: 'Channel', label: 'Communications Channel',   sublabel: 'Qantas Digital Services' },
+    { id: 'channel-baggage-handling',  type: 'Channel', label: 'Baggage Handling Channel', sublabel: 'Terminal RFID System' },
+    { id: 'channel-codeshare-flights', type: 'Channel', label: 'CodeShare Flights Channel',sublabel: 'Revenue Management' },
+
+    { id: 'flight-QF82',   type: 'FlightOperation',
+      label: 'QF82 · Sydney to Melbourne', sublabel: 'Cancelled — engineering fault', alert: true },
+    { id: 'crm-crm-001',   type: 'CRMRecord', label: 'Loyalty Query',  sublabel: 'Dec 2025 · 12,400 pts' },
+    { id: 'crm-crm-002',   type: 'CRMRecord', label: 'Seat Upgrade',   sublabel: 'Jan 2026 · Business QF1' },
+    { id: 'crm-crm-003',   type: 'CRMRecord', label: 'Baggage Policy', sublabel: 'Mar 2026 · 32 kg approved' },
+
+    { id: 'comm-Email',    type: 'Communication', label: 'Email', sublabel: '10:20 PM · Cancellation notice' },
+    { id: 'comm-SMS',      type: 'Communication', label: 'SMS',   sublabel: '10:46 PM · Hotel voucher + $50' },
+    { id: 'comm-Phone',    type: 'Communication', label: 'Phone', sublabel: '10:50 PM · Outbound, no answer' },
+
+    { id: 'baggage-QF82001', type: 'Baggage', label: 'Bag QF82001', sublabel: 'Terminal 3 · Carousel 4' },
+    { id: 'baggage-QF82002', type: 'Baggage', label: 'Bag QF82002', sublabel: 'Terminal 3 · Carousel 4' },
+
+    { id: 'rebooking-QF83',  type: 'Rebooking', label: 'QF83',  sublabel: '6:00 AM · 1 seat' },
+    { id: 'rebooking-VA850', type: 'Rebooking', label: 'VA850', sublabel: '7:30 AM · 3 seats · codeshare' },
+    { id: 'rebooking-QF85',  type: 'Rebooking', label: 'QF85',  sublabel: '9:45 AM · 5 seats' },
+
+    { id: 'event-evt-001', type: 'Event', label: 'Flight Cancelled',       sublabel: 'Engineering fault' },
+    { id: 'event-evt-002', type: 'Event', label: 'Baggage Intercepted',    sublabel: 'Held Terminal 3' },
+    { id: 'event-evt-003', type: 'Event', label: 'Accommodation Arranged', sublabel: 'Rydges Hotel' },
+    { id: 'event-evt-004', type: 'Event', label: 'Passenger Notified',     sublabel: 'SMS + voucher' },
+  ],
+  edges: [
+    { source: 'customer-QF-8200', target: 'channel-crm' },
+    { source: 'customer-QF-8200', target: 'channel-communications' },
+    { source: 'customer-QF-8200', target: 'channel-baggage-handling' },
+    { source: 'customer-QF-8200', target: 'channel-codeshare-flights' },
+
+    { source: 'channel-crm', target: 'flight-QF82' },
+    { source: 'channel-crm', target: 'crm-crm-001' },
+    { source: 'channel-crm', target: 'crm-crm-002' },
+    { source: 'channel-crm', target: 'crm-crm-003' },
+
+    { source: 'channel-communications', target: 'comm-Email' },
+    { source: 'channel-communications', target: 'comm-SMS' },
+    { source: 'channel-communications', target: 'comm-Phone' },
+
+    { source: 'channel-baggage-handling', target: 'baggage-QF82001' },
+    { source: 'channel-baggage-handling', target: 'baggage-QF82002' },
+
+    { source: 'channel-codeshare-flights', target: 'rebooking-QF83' },
+    { source: 'channel-codeshare-flights', target: 'rebooking-VA850' },
+    { source: 'channel-codeshare-flights', target: 'rebooking-QF85' },
+
+    { source: 'baggage-QF82001', target: 'flight-QF82' },
+    { source: 'baggage-QF82002', target: 'flight-QF82' },
+
+    { source: 'customer-QF-8200', target: 'event-evt-001' },
+    { source: 'event-evt-001',    target: 'event-evt-002' },
+    { source: 'event-evt-002',    target: 'event-evt-003' },
+    { source: 'event-evt-003',    target: 'event-evt-004' },
+  ],
+};
+
+// ── Visual config ─────────────────────────────────────────────────────────────
+
+const TYPE_COLORS = {
+  Customer:        { hex: '#f59e0b', rgb: '245,158,11' },
+  Channel:         { hex: '#64748b', rgb: '100,116,139' },
+  FlightOperation: { hex: '#3b82f6', rgb: '59,130,246' },
+  CRMRecord:       { hex: '#fbbf24', rgb: '251,191,36' },
+  Baggage:         { hex: '#10b981', rgb: '16,185,129' },
+  Rebooking:       { hex: '#8b5cf6', rgb: '139,92,246' },
+  Communication:   { hex: '#f97316', rgb: '249,115,22' },
+  Event:           { hex: '#6366f1', rgb: '99,102,241' },
+};
+
+const NODE_ICONS = {
+  Customer: '👤', Channel: '🏢', FlightOperation: '✈️',
+  CRMRecord: '📋', Baggage: '🧳', Rebooking: '🔄',
+  Communication: '✉️', Event: '⚡',
+};
+
+// Radius in px (half of node diameter) — used for edge termination
+const NODE_RADII = { Customer: 40, Channel: 34 };
+function nodeRadius(type) { return NODE_RADII[type] || 30; }
+
+// z values per type (preserved for deployed LAYOUT_MAP, not used for 2D rendering)
+const TYPE_Z = {
+  Customer: 0, Channel: -150,
+  FlightOperation: -300, CRMRecord: -300, Communication: -300,
+  Baggage: -300, Rebooking: -300, Event: -450,
+};
+
+const INITIAL_LAYOUT = {
+  Customer:        [{ xPct: 49.8, yPct: 46.1 }],
+  Channel: [
+    { xPct: 36.7, yPct: 32.7 },
+    { xPct: 62.1, yPct: 32.8 },
+    { xPct: 37.6, yPct: 58.6 },
+    { xPct: 62.6, yPct: 58.6 },
+  ],
+  FlightOperation: [{ xPct: 8.6,  yPct: 45.0 }],
+  CRMRecord:       [{ xPct: 9.3,  yPct: 24.9 }, { xPct: 17.6, yPct: 16.0 }, { xPct: 28.2, yPct: 10.7 }],
+  Communication:   [{ xPct: 71.1, yPct: 10.9 }, { xPct: 81.9, yPct: 15.7 }, { xPct: 90.5, yPct: 25.5 }],
+  Baggage:         [{ xPct: 6.7,  yPct: 73.8 }, { xPct: 13.5, yPct: 82.8 }],
+  Rebooking:       [{ xPct: 93.8, yPct: 62.9 }, { xPct: 90.3, yPct: 76.9 }, { xPct: 81.8, yPct: 87.2 }],
+  Event:           [{ xPct: 44.3, yPct: 78.5 }, { xPct: 37.7, yPct: 87.8 }, { xPct: 60.1, yPct: 87.4 }, { xPct: 52.7, yPct: 78.5 }],
+};
+
+const TYPE_ORDER = ['Customer','Channel','FlightOperation','CRMRecord','Communication','Baggage','Rebooking','Event'];
+
+// ── Traversal paths ───────────────────────────────────────────────────────────
+// Each path defines the ordered node sequence and which edges light up.
+// steps[0] is always Customer; animation plays one step every STEP_MS.
+
+const STEP_MS = 320;
+
+const TRAVERSAL_PATHS = {
+  crm: {
+    label: 'CRM',
+    color: '#fbbf24',
+    steps: ['customer-QF-8200','channel-crm','flight-QF82','crm-crm-001','crm-crm-002','crm-crm-003'],
+    edgeKeys: new Set(['customer-QF-8200::channel-crm','channel-crm::flight-QF82','channel-crm::crm-crm-001','channel-crm::crm-crm-002','channel-crm::crm-crm-003']),
+  },
+  comms: {
+    label: 'Communications',
+    color: '#f97316',
+    steps: ['customer-QF-8200','channel-communications','comm-Email','comm-SMS','comm-Phone'],
+    edgeKeys: new Set(['customer-QF-8200::channel-communications','channel-communications::comm-Email','channel-communications::comm-SMS','channel-communications::comm-Phone']),
+  },
+  baggage: {
+    label: 'Baggage',
+    color: '#10b981',
+    steps: ['customer-QF-8200','channel-baggage-handling','baggage-QF82001','baggage-QF82002'],
+    edgeKeys: new Set(['customer-QF-8200::channel-baggage-handling','channel-baggage-handling::baggage-QF82001','channel-baggage-handling::baggage-QF82002']),
+  },
+  codeshare: {
+    label: 'Flights',
+    color: '#8b5cf6',
+    steps: ['customer-QF-8200','channel-codeshare-flights','rebooking-QF83','rebooking-VA850','rebooking-QF85'],
+    edgeKeys: new Set(['customer-QF-8200::channel-codeshare-flights','channel-codeshare-flights::rebooking-QF83','channel-codeshare-flights::rebooking-VA850','channel-codeshare-flights::rebooking-QF85']),
+  },
+  events: {
+    label: 'Event Chain',
+    color: '#6366f1',
+    steps: ['customer-QF-8200','event-evt-001','event-evt-002','event-evt-003','event-evt-004'],
+    edgeKeys: new Set(['customer-QF-8200::event-evt-001','event-evt-001::event-evt-002','event-evt-002::event-evt-003','event-evt-003::event-evt-004']),
+  },
+};
+
+// ── State ─────────────────────────────────────────────────────────────────────
+
+const scene    = document.getElementById('scene');
+const world    = document.getElementById('world');
+const canvas   = document.getElementById('edgeCanvas');
+const ctx      = canvas.getContext('2d');
+const nodeInfo = document.getElementById('nodeInfo');
+const status   = document.getElementById('graphStatus');
+const saveStatus = document.getElementById('saveStatus');
+
+let nodes    = [];   // { id, type, el, xPct, yPct, z, active }
+let edges    = [];   // { srcId, tgtId }
+let nodeMap  = {};
+let selected = null;
+
+// Drag state
+let dragging  = null;
+let dragOffX  = 0;
+let dragOffY  = 0;
+
+// Path highlight state — null when not in path mode
+let activePath    = null;  // current TRAVERSAL_PATHS entry
+let revealedIds   = null;  // Set of node IDs revealed so far in animation
+let pathTimers    = [];    // setTimeout handles so we can cancel
+
+// ── Build scene ───────────────────────────────────────────────────────────────
+
+function buildScene() {
+  world.innerHTML = '';
+  nodes = []; edges = []; nodeMap = {};
+  selected = null;
+
+  const groups = {};
+  GRAPH_DATA.nodes.forEach(n => {
+    if (!groups[n.type]) groups[n.type] = [];
+    groups[n.type].push(n);
+  });
+
+  TYPE_ORDER.forEach(type => {
+    const group   = groups[type] || [];
+    const layouts = INITIAL_LAYOUT[type] || [];
+    group.forEach((n, i) => {
+      const pos   = layouts[i] || layouts[0] || { xPct: 50, yPct: 50 };
+      const color = TYPE_COLORS[n.type] || TYPE_COLORS.Customer;
+      const sizeClass = type === 'Customer' ? 'size-lg' : type === 'Channel' ? 'size-md' : 'size-sm';
+
+      const el = document.createElement('div');
+      el.className = `graph-node ${sizeClass} inactive`;
+      el.style.setProperty('--node-color',           color.hex);
+      el.style.setProperty('--node-color-alpha',     `rgba(${color.rgb}, 0.4)`);
+      el.style.setProperty('--node-color-alpha-dim', `rgba(${color.rgb}, 0.15)`);
+
+      const icon = document.createElement('span');
+      icon.className = 'node-icon';
+      icon.textContent = NODE_ICONS[type] || '?';
+      el.appendChild(icon);
+
+      const label = document.createElement('span');
+      label.className = 'node-label';
+      label.textContent = n.label;
+      el.appendChild(label);
+
+      if (n.sublabel) {
+        const sub = document.createElement('span');
+        sub.className = 'node-sublabel';
+        sub.textContent = n.sublabel;
+        el.appendChild(sub);
+      }
+
+      if (n.alert) {
+        const alert = document.createElement('span');
+        alert.className = 'node-alert';
+        alert.textContent = 'Cancelled';
+        el.appendChild(alert);
+      }
+
+      world.appendChild(el);
+
+      const node = {
+        id: n.id, type: n.type, el,
+        xPct: pos.xPct, yPct: pos.yPct,
+        z: TYPE_Z[type] ?? -300,
+        active: false,
+      };
+      nodes.push(node);
+      nodeMap[n.id] = node;
+
+      positionNode(node);
+      attachDrag(el, node);
+    });
+  });
+
+  GRAPH_DATA.edges.forEach(e => {
+    if (nodeMap[e.source] && nodeMap[e.target]) {
+      edges.push({ srcId: e.source, tgtId: e.target });
+    }
+  });
+
+  resize();
+  drawEdges();
+}
+
+function positionNode(node) {
+  const W = scene.clientWidth;
+  const H = scene.clientHeight;
+  node.el.style.left = `${node.xPct / 100 * W}px`;
+  node.el.style.top  = `${node.yPct / 100 * H}px`;
+}
+
+function nodeCenter(node) {
+  const W = scene.clientWidth;
+  const H = scene.clientHeight;
+  return { x: node.xPct / 100 * W, y: node.yPct / 100 * H };
+}
+
+// ── Edge drawing — border-to-border ──────────────────────────────────────────
+
+function edgeEndpoints(sx, sy, sr, tx, ty, tr) {
+  const dx = tx - sx;
+  const dy = ty - sy;
+  const dist = Math.hypot(dx, dy);
+  if (dist < 2) return [sx, sy, tx, ty];
+  const nx = dx / dist;
+  const ny = dy / dist;
+  return [sx + nx * sr, sy + ny * sr, tx - nx * tr, ty - ny * tr];
+}
+
+function drawEdges() {
+  const W = scene.clientWidth;
+  const H = scene.clientHeight;
+  ctx.clearRect(0, 0, W, H);
+
+  edges.forEach(e => {
+    const src = nodeMap[e.srcId];
+    const tgt = nodeMap[e.tgtId];
+    if (!src || !tgt) return;
+
+    const sc = nodeCenter(src);
+    const tc = nodeCenter(tgt);
+    const sr = nodeRadius(src.type);
+    const tr = nodeRadius(tgt.type);
+    const [x1, y1, x2, y2] = edgeEndpoints(sc.x, sc.y, sr, tc.x, tc.y, tr);
+
+    const srcColor = TYPE_COLORS[src.type] || TYPE_COLORS.Customer;
+    const tgtColor = TYPE_COLORS[tgt.type] || TYPE_COLORS.Customer;
+
+    let lineWidth, alpha, glowing = false;
+
+    if (activePath) {
+      // Path mode: only light up edges where BOTH endpoints are revealed
+      const key  = `${e.srcId}::${e.tgtId}`;
+      const rkey = `${e.tgtId}::${e.srcId}`;
+      const inPath = activePath.edgeKeys.has(key) || activePath.edgeKeys.has(rkey);
+      const revealed = revealedIds && revealedIds.has(e.srcId) && revealedIds.has(e.tgtId);
+      if (inPath && revealed) {
+        lineWidth = 2.2;
+        alpha     = 0.85;
+        glowing   = true;
+      } else {
+        lineWidth = 0.6;
+        alpha     = 0.04;
+      }
+    } else {
+      // Normal mode: brightness follows node active state
+      lineWidth = src.active && tgt.active ? 1.5 : 0.7;
+      alpha     = src.active && tgt.active ? 0.45 : 0.12;
+    }
+
+    if (glowing) {
+      // Solid path color with glow
+      ctx.save();
+      ctx.shadowColor = activePath.color;
+      ctx.shadowBlur  = 12;
+      ctx.strokeStyle = activePath.color;
+      ctx.lineWidth   = lineWidth;
+      ctx.globalAlpha = alpha;
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.stroke();
+      ctx.restore();
+    } else {
+      const grad = ctx.createLinearGradient(x1, y1, x2, y2);
+      grad.addColorStop(0, `rgba(${srcColor.rgb}, ${alpha})`);
+      grad.addColorStop(1, `rgba(${tgtColor.rgb}, ${alpha})`);
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.strokeStyle = grad;
+      ctx.lineWidth   = lineWidth;
+      ctx.stroke();
+    }
+  });
+}
+
+// ── Drag ─────────────────────────────────────────────────────────────────────
+
+function attachDrag(el, node) {
+  el.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    dragging  = node;
+    dragOffX  = e.clientX - el.getBoundingClientRect().left - el.offsetWidth / 2 + (node.xPct / 100 * scene.clientWidth - el.getBoundingClientRect().left - el.offsetWidth / 2);
+    dragOffY  = 0;
+    el.setPointerCapture(e.pointerId);
+    el.classList.add('dragging');
+    selectNode(node);
+  });
+
+  el.addEventListener('pointermove', (e) => {
+    if (dragging !== node) return;
+    const rect = scene.getBoundingClientRect();
+    const W = scene.clientWidth;
+    const H = scene.clientHeight;
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    node.xPct = Math.max(2, Math.min(98, (x / W) * 100));
+    node.yPct = Math.max(2, Math.min(98, (y / H) * 100));
+    positionNode(node);
+    updateNodeInfo(node);
+    drawEdges();
+  });
+
+  el.addEventListener('pointerup', () => {
+    if (dragging !== node) return;
+    el.classList.remove('dragging');
+    dragging = null;
+    updateNodeInfo(node);
+    drawEdges();
+  });
+
+  // Click to select (without drag)
+  el.addEventListener('click', () => selectNode(node));
+}
+
+// ── Selection ─────────────────────────────────────────────────────────────────
+
+function selectNode(node) {
+  selected = node;
+  updateNodeInfo(node);
+}
+
+function updateNodeInfo(node) {
+  nodeInfo.innerHTML = `
+    <span class="ntype">${node.type}</span><br>
+    <span class="nid">${node.id}</span><br>
+    <span class="npos">x: ${node.xPct.toFixed(1)}%  y: ${node.yPct.toFixed(1)}%</span>
+    <span style="color:#333;">  z: ${node.z}</span>
+  `;
+}
+
+// ── Activate all / replay ─────────────────────────────────────────────────────
+
+function showAll() {
+  nodes.forEach(n => {
+    n.active = true;
+    n.el.classList.remove('inactive');
+    n.el.classList.add('active');
+  });
+  drawEdges();
+}
+
+function resetActive() {
+  nodes.forEach(n => {
+    n.active = false;
+    n.el.classList.remove('active');
+    n.el.classList.add('inactive');
+  });
+  drawEdges();
+  status.textContent = 'Layout Editor — drag nodes to reposition';
+}
+
+// ── Remember layout ───────────────────────────────────────────────────────────
+
+function buildLayoutExport() {
+  // Group nodes by type in typeOrder order, preserving slot order
+  const byType = {};
+  TYPE_ORDER.forEach(t => { byType[t] = []; });
+  nodes.forEach(n => {
+    if (byType[n.type] !== undefined) {
+      byType[n.type].push({
+        xPct: Math.round(n.xPct * 10) / 10,
+        yPct: Math.round(n.yPct * 10) / 10,
+        z: n.z,
+      });
+    }
+  });
+  // Remove empty types
+  Object.keys(byType).forEach(k => { if (!byType[k].length) delete byType[k]; });
+  return byType;
+}
+
+function rememberLayout() {
+  const btn    = document.getElementById('btnRemember');
+  const layout = buildLayoutExport();
+  const json   = JSON.stringify(layout, null, 2);
+
+  // 1. Download the file directly to the user's machine
+  const blob = new Blob([json], { type: 'application/json' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = 'layout-export.json';
+  a.click();
+  URL.revokeObjectURL(url);
+
+  // 2. Show the JSON in the output panel so Claude can also read it from chat
+  const panel = document.getElementById('layoutOutput');
+  const ta    = document.getElementById('layoutJson');
+  ta.value    = json;
+  panel.style.display = 'flex';
+  ta.select();
+
+  btn.classList.add('saved');
+  btn.textContent = '✓ Layout Remembered';
+  saveStatus.textContent = 'Downloaded layout-export.json — tell Claude "apply it".';
+  saveStatus.className = 'save-status ok';
+
+  setTimeout(() => {
+    btn.classList.remove('saved');
+    btn.textContent = '⬛ Remember Layout';
+  }, 3000);
+}
+
+// ── Path traversal ───────────────────────────────────────────────────────────
+
+function clearPath() {
+  pathTimers.forEach(clearTimeout);
+  pathTimers = [];
+  activePath  = null;
+  revealedIds = null;
+
+  // Restore all nodes to active (show-all state)
+  nodes.forEach(n => {
+    n.active = true;
+    n.el.classList.remove('inactive', 'path-dim');
+    n.el.classList.add('active');
+    n.el.style.opacity = '';
+  });
+  drawEdges();
+  status.textContent = 'Layout Editor — drag nodes to reposition';
+
+  // Deactivate all traversal buttons
+  document.querySelectorAll('.btn-traversal').forEach(b => b.classList.remove('trav-active'));
+}
+
+function highlightPath(key) {
+  const path = TRAVERSAL_PATHS[key];
+  if (!path) return;
+
+  // Cancel any in-progress animation
+  pathTimers.forEach(clearTimeout);
+  pathTimers = [];
+  document.querySelectorAll('.btn-traversal').forEach(b => b.classList.remove('trav-active'));
+  document.getElementById(`trav-${key}`).classList.add('trav-active');
+
+  activePath  = path;
+  revealedIds = new Set();
+  const pathSet = new Set(path.steps);
+
+  // Dim all nodes immediately
+  nodes.forEach(n => {
+    n.active = false;
+    n.el.classList.remove('active');
+    n.el.classList.add('inactive');
+    n.el.style.opacity = pathSet.has(n.id) ? '0.2' : '0.07';
+  });
+  drawEdges();
+
+  status.textContent = `Traversing: ${path.label}…`;
+
+  // Reveal each step sequentially
+  path.steps.forEach((nodeId, i) => {
+    const t = setTimeout(() => {
+      const node = nodeMap[nodeId];
+      if (!node) return;
+
+      revealedIds.add(nodeId);
+      node.active = true;
+      node.el.classList.remove('inactive');
+      node.el.classList.add('active');
+      node.el.style.opacity = '1';
+
+      // Pulse the node briefly
+      node.el.style.boxShadow = `0 0 28px ${path.color}, 0 0 56px ${path.color}44`;
+      setTimeout(() => {
+        node.el.style.boxShadow = '';
+      }, 600);
+
+      drawEdges();
+
+      if (i === path.steps.length - 1) {
+        status.textContent = `${path.label} path — click another or Reset`;
+      }
+    }, i * STEP_MS);
+    pathTimers.push(t);
+  });
+}
+
+// ── Resize ────────────────────────────────────────────────────────────────────
+
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  const W = scene.clientWidth;
+  const H = scene.clientHeight;
+  canvas.width  = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width  = W + 'px';
+  canvas.style.height = H + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  nodes.forEach(positionNode);
+  drawEdges();
+}
+
+window.addEventListener('resize', resize);
+
+// ── Wire buttons ──────────────────────────────────────────────────────────────
+
+document.getElementById('btnShowAll').addEventListener('click', showAll);
+document.getElementById('btnReplay').addEventListener('click', resetActive);
+document.getElementById('btnRemember').addEventListener('click', rememberLayout);
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+
+buildScene();
+// Start with all nodes visible so the layout is easy to work with
+showAll();
+</script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+pipecat-ai[deepgram,elevenlabs,groq,silero,smallwebrtc]
+fastapi
+uvicorn[standard]
+python-dotenv
+loguru
+requests
+beautifulsoup4

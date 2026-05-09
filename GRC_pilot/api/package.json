@@ -1,0 +1,34 @@
+{
+  "name": "georges-river-bin-zone-api",
+  "version": "1.0.0",
+  "description": "API for Georges River Council general waste collection zone lookup",
+  "main": "bin-zone-api.js",
+  "scripts": {
+    "start": "node bin-zone-api.js",
+    "dev": "nodemon bin-zone-api.js",
+    "test": "node test-api.js"
+  },
+  "keywords": [
+    "waste",
+    "collection",
+    "bin",
+    "zone",
+    "api",
+    "elevenlabs"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^17.4.2",
+    "express": "^4.18.2",
+    "node-fetch": "^3.3.2",
+    "point-in-polygon": "^1.0.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}

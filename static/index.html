@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Georges River Council — Call Command Centre</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800;900&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet" />
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
+  <style>
+    /* ── GRC Brand Tokens ── */
+    :root {
+      --grc-red:        #C8232C;
+      --grc-red-dark:   #9E1B22;
+      --grc-red-light:  #F9E6E7;
+      --grc-teal:       #00A9A5;
+      --grc-teal-dark:  #007A77;
+      --grc-teal-light: #D0F2F1;
+      --grc-slate:      #767676;
+      --grc-slate-light:#E8E8E8;
+
+      --color-primary:              var(--grc-red);
+      --color-primary-container:    var(--grc-red-dark);
+      --color-on-primary:           #ffffff;
+      --color-secondary:            var(--grc-teal);
+      --color-secondary-container:  var(--grc-teal-light);
+      --color-on-secondary:         #ffffff;
+      --color-on-secondary-container: var(--grc-teal-dark);
+      --color-tertiary-fixed:       var(--grc-teal-light);
+      --color-tertiary-fixed-dim:   var(--grc-teal);
+      --color-on-tertiary-container:var(--grc-teal-dark);
+      --color-error:                #C0392B;
+
+      --bg-main:       #F4F5F6;
+      --bg-card:       #FFFFFF;
+      --bg-sidebar:    #FFFFFF;
+      --text-primary:  #1A1A1A;
+      --text-secondary:#5A5F6B;
+      --border-light:  #E8E9EB;
+      --shadow-card:   0 2px 12px rgba(0,0,0,0.06);
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--bg-main);
+      color: var(--text-primary);
+      -webkit-font-smoothing: antialiased;
+      min-height: 100vh;
+    }
+
+    #root { min-height: 100vh; }
+
+    .font-headline { font-family: 'Manrope', sans-serif; }
+
+    /* Material Symbols fill variant */
+    .ms-fill { font-variation-settings: 'FILL' 1; }
+
+    /* Animations */
+    @keyframes pulse-ring {
+      0%   { box-shadow: 0 0 0 0 rgba(0,169,165,0.4); }
+      70%  { box-shadow: 0 0 0 10px rgba(0,169,165,0); }
+      100% { box-shadow: 0 0 0 0 rgba(0,169,165,0); }
+    }
+    @keyframes fadeInUp {
+      from { opacity: 0; transform: translateY(12px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .animate-in { animation: fadeInUp 0.35s ease-out both; }
+    .delay-1 { animation-delay: 0.05s; }
+    .delay-2 { animation-delay: 0.10s; }
+    .delay-3 { animation-delay: 0.15s; }
+    .delay-4 { animation-delay: 0.20s; }
+
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.4} }
+    .live-blink { animation: blink 2s infinite; }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 4px; height: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #ddd; border-radius: 4px; }
+
+    button { font-family: 'Inter', sans-serif; cursor: pointer; border: none; background: none; }
+    input, select { font-family: 'Inter', sans-serif; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" src="/static/grc-shell.jsx"></script>
+<script type="text/babel" src="/static/grc-heatmap.jsx"></script>
+<script type="text/babel" src="/static/grc-dashboard.jsx"></script>
+<script type="text/babel" src="/static/grc-livecalls.jsx"></script>
+<script type="text/babel" src="/static/grc-agents.jsx"></script>
+<script type="text/babel" src="/static/grc-history.jsx"></script>
+<script type="text/babel" src="/static/grc-translation.jsx"></script>
+<script type="text/babel" src="/static/grc-translate-join.jsx"></script>
+<script type="text/babel" src="/static/grc-app.jsx"></script>
+</body>
+</html>
