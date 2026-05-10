@@ -1,4 +1,4 @@
-pipecat-ai[deepgram,elevenlabs,groq,silero,smallwebrtc]
+pipecat-ai[deepgram,elevenlabs,groq,mistral,silero,webrtc]
 fastapi
 uvicorn[standard]
 python-dotenv
@@ -6,3 +6,5 @@ loguru
 requests
 beautifulsoup4
 twilio
+cerebras-cloud-sdk
+neo4j

@@ -187,9 +187,13 @@ from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams, FastAPI
 
 load_dotenv(override=True)
 
+
+def _env(name: str, default: str = "") -> str:
+    return os.getenv(name, default).strip()
+
 # Suppress pipecat internal DEBUG/TRACE noise — keep only INFO and above.
 # Re-enable temporarily by setting VOCARE_LOG_LEVEL=DEBUG in the environment.
-_log_level = os.getenv("VOCARE_LOG_LEVEL", "INFO").upper()
+_log_level = _env("VOCARE_LOG_LEVEL", "INFO").upper()
 logger.remove()
 logger.add(sys.stderr, level=_log_level, colorize=True,
            format="<green>{time:HH:mm:ss.SSS}</green> | <level>{level:<7}</level> | {message}")
@@ -525,7 +529,7 @@ class LanguageSwitchProcessor(FrameProcessor):
         # Switch voice only — no language code so ElevenLabs auto-detects from
         # the generated text. Passing a fixed language code would restrict the
         # voice to one language and break anything other than that language.
-        tts_delta = ElevenLabsTTSService.Settings(voice=voice)
+        tts_delta = ElevenLabsTTSService.Settings(voice=voice, model="eleven_turbo_v2_5")
         await self.push_frame(
             TTSUpdateSettingsFrame(delta=tts_delta, service=self._tts),
             FrameDirection.DOWNSTREAM,
@@ -606,12 +610,13 @@ SYSTEM_INSTRUCTION_GRC = (
     "Always answer only what was asked. Be brief and direct. "
 
     # --- Multilingual ---
-    "LANGUAGE RULE (mandatory): match the language of your response to the language "
-    "of the user's most recent message — every single turn, no exceptions. "
-    "If their last message was in English, respond in English. "
-    "If their last message was in Mandarin Chinese, respond in Mandarin Chinese. "
-    "A single English word or sentence from the user means the entire response must be in English. "
-    "Never continue in a previous language if the user has switched. "
+    "LANGUAGE RULE (mandatory): At the very start of every call you ask the caller which language "
+    "they prefer. Once they choose, you conduct the ENTIRE conversation in that language — do not "
+    "switch under any circumstances. "
+    "If the caller chooses English (or says anything in English), respond fully in English for the rest of the call. "
+    "If the caller chooses Mandarin / 中文 (or says anything in Chinese/Mandarin), respond fully in Mandarin Chinese for the rest of the call. "
+    "Exception: street addresses are always stated in English regardless of the chosen language — "
+    "for example, say '50 Vine Street Hurstville' even inside a Chinese response. "
 
     # --- Thinker acceleration ---
     "You may receive a [THINKER_STATE] system message with pre-extracted intent and entities. "
@@ -635,11 +640,11 @@ def create_stt(name: str):
     if name == "deepgram":
         from pipecat.services.deepgram.stt import DeepgramSTTService
 
-        return DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
+        return DeepgramSTTService(api_key=_env("DEEPGRAM_API_KEY"))
     elif name == "elevenlabs":
         from pipecat.services.elevenlabs.stt import ElevenLabsRealtimeSTTService
 
-        return ElevenLabsRealtimeSTTService(api_key=os.getenv("ELEVENLABS_API_KEY"))
+        return ElevenLabsRealtimeSTTService(api_key=_env("ELEVENLABS_API_KEY"))
     else:
         raise ValueError(f"Unknown STT service: {name}")
 
@@ -648,7 +653,7 @@ def create_llm(name: str, system_instruction: str = ""):
     """Create an LLM service by name."""
     if name == "cerebras":
         return CerebrasLLMService(
-            api_key=os.getenv("CEREBRAS_API_KEY"),
+            api_key=_env("CEREBRAS_API_KEY"),
             settings=CerebrasLLMSettings(
                 model="qwen-3-235b-a22b-instruct-2507",
                 system_instruction=system_instruction,
@@ -658,14 +663,14 @@ def create_llm(name: str, system_instruction: str = ""):
         from pipecat.services.mistral.llm import MistralLLMService
 
         return MistralLLMService(
-            api_key=os.getenv("MISTRAL_API_KEY"),
+            api_key=_env("MISTRAL_API_KEY"),
             settings=MistralLLMService.Settings(
                 system_instruction=system_instruction,
             ),
         )
     elif name == "groq":
         return GroqLLMService(
-            api_key=os.getenv("GROQ_API_KEY"),
+            api_key=_env("GROQ_API_KEY"),
             settings=GroqLLMService.Settings(
                 system_instruction=system_instruction,
             ),
@@ -682,12 +687,20 @@ def create_tts(name: str):
         # Prefer the multilingual voice so TTS can speak any language the LLM
         # generates without requiring a runtime switch.
         voice = (
-            os.getenv("ELEVENLABS_MULTILINGUAL_VOICE_ID")
-            or os.getenv("ELEVENLABS_VOICE_ID")
+            _env("ELEVENLABS_MULTILINGUAL_VOICE_ID")
+            or _env("ELEVENLABS_VOICE_ID")
         )
+        api_key = _env("ELEVENLABS_API_KEY")
+        if not api_key:
+            raise RuntimeError("ELEVENLABS_API_KEY is not set in the container environment")
+        if not voice:
+            raise RuntimeError("ELEVENLABS_VOICE_ID or ELEVENLABS_MULTILINGUAL_VOICE_ID is not set")
         return ElevenLabsTTSService(
-            api_key=os.getenv("ELEVENLABS_API_KEY"),
-            settings=ElevenLabsTTSService.Settings(voice=voice),
+            api_key=api_key,
+            settings=ElevenLabsTTSService.Settings(
+                voice=voice,
+                model="eleven_turbo_v2_5",
+            ),
         )
     else:
         raise ValueError(f"Unknown TTS service: {name}")
@@ -1172,8 +1185,8 @@ async def run_bot(
     filler_tts = FillerTTSProcessor()
     lang_switch = LanguageSwitchProcessor(
         tts=tts,
-        en_voice_id=os.getenv("ELEVENLABS_VOICE_ID", ""),
-        multilingual_voice_id=os.getenv("ELEVENLABS_MULTILINGUAL_VOICE_ID", os.getenv("ELEVENLABS_VOICE_ID", "")),
+        en_voice_id=_env("ELEVENLABS_VOICE_ID"),
+        multilingual_voice_id=_env("ELEVENLABS_MULTILINGUAL_VOICE_ID") or _env("ELEVENLABS_VOICE_ID"),
     )
 
     # Attach transcript observer so the frontend can display live conversation
@@ -1331,10 +1344,8 @@ async def run_bot(
         context.add_message({
             "role": "system",
             "content": (
-                "Greet the caller with: "
-                "'Hi, I'm Maya from Georges River Council. "
-                "I can help you with bin collection days, development application inquiries, "
-                "and upcoming council events — what can I help you with today?'"
+                "Greet the caller and ask for their language preference. Say exactly: "
+                "'Hi, I'm Maya from Georges River Council — would you like to continue in English or Mandarin?'"
             ),
         })
         await task.queue_frames([LLMRunFrame()])
@@ -1583,8 +1594,8 @@ async def run_twilio_bot(websocket: WebSocket):
     filler_tts = FillerTTSProcessor()
     lang_switch = LanguageSwitchProcessor(
         tts=tts,
-        en_voice_id=os.getenv("ELEVENLABS_VOICE_ID", ""),
-        multilingual_voice_id=os.getenv("ELEVENLABS_MULTILINGUAL_VOICE_ID", os.getenv("ELEVENLABS_VOICE_ID", "")),
+        en_voice_id=_env("ELEVENLABS_VOICE_ID"),
+        multilingual_voice_id=_env("ELEVENLABS_MULTILINGUAL_VOICE_ID") or _env("ELEVENLABS_VOICE_ID"),
     )
 
     # Register GRC tools
@@ -1795,10 +1806,8 @@ async def run_twilio_bot(websocket: WebSocket):
         context.add_message({
             "role": "system",
             "content": (
-                "Greet the caller with: "
-                "'Hi, I'm Maya from Georges River Council. "
-                "I can help you with bin collection days, development application inquiries, "
-                "and upcoming council events — what can I help you with today?'"
+                "Greet the caller and ask for their language preference. Say exactly: "
+                "'Hi, I'm Maya from Georges River Council — would you like to continue in English or Mandarin?'"
             ),
         })
         await task.queue_frames([LLMRunFrame()])
@@ -2074,6 +2083,7 @@ async def run_translation_participant(
         api_key=os.getenv("ELEVENLABS_API_KEY"),
         settings=ElevenLabsTTSService.Settings(
             voice=participant.voice_config["voice_id"],
+            model="eleven_turbo_v2_5",
         ),
     )
 
@@ -2525,6 +2535,7 @@ async def run_auto_translation(
                 "ELEVENLABS_MULTILINGUAL_VOICE_ID",
                 os.getenv("ELEVENLABS_VOICE_ID", ""),
             ),
+            model="eleven_turbo_v2_5",
         ),
     )
 

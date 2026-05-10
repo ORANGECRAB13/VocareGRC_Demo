@@ -14,7 +14,6 @@ __pycache__/
 .superpowers/
 docs/
 
-GRC_pilot/
-
 docker-compose.yml
 preview_server.py
+**/node_modules/

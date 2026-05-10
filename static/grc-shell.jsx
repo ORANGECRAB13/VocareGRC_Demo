@@ -10,7 +10,18 @@ const NAV = [
   { id: 'translation', icon: 'g_translate',    label: 'Live Translation' },
 ];
 
+function useIsMobileShell() {
+  const [isMobile, setIsMobile] = useState(() => window.innerWidth <= 768);
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth <= 768);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  return isMobile;
+}
+
 function Sidebar({ activePage, onNavigate, style = 'light' }) {
+  const isMobile = useIsMobileShell();
   const isDark = style === 'dark';
   const isRed  = style === 'red';
 
@@ -22,6 +33,35 @@ function Sidebar({ activePage, onNavigate, style = 'light' }) {
   const navTxt  = isDark || isRed ? 'rgba(255,255,255,0.55)' : '#767676';
   const navActiveTxt = '#fff';
   const divider = isDark ? '#1f2937' : isRed ? '#9E1B22' : '#F0F1F3';
+
+  if (isMobile) {
+    return (
+      <nav style={{
+        position: 'fixed', left: 0, right: 0, bottom: 0, height: 64,
+        background: bg, borderTop: `1px solid ${border}`, zIndex: 30,
+        display: 'grid', gridTemplateColumns: `repeat(${NAV.length}, 1fr)`,
+        padding: '6px 6px calc(6px + env(safe-area-inset-bottom))',
+        boxShadow: '0 -8px 24px rgba(0,0,0,0.08)'
+      }}>
+        {NAV.map(item => {
+          const active = activePage === item.id || (item.id === 'live-calls' && activePage === 'takeover');
+          return (
+            <button key={item.id} onClick={() => onNavigate(item.id)} style={{
+              minWidth: 0, borderRadius: 10, background: active ? navActiveBg : 'transparent',
+              color: active ? navActiveTxt : navTxt, display: 'flex', flexDirection: 'column',
+              alignItems: 'center', justifyContent: 'center', gap: 2, fontSize: 9,
+              fontWeight: active ? 800 : 700
+            }}>
+              <span className="material-symbols-outlined" style={{ fontSize: 19 }}>{item.icon}</span>
+              <span style={{ maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {item.label.replace('Live ', '')}
+              </span>
+            </button>
+          );
+        })}
+      </nav>
+    );
+  }
 
   return (
     <aside style={{
@@ -139,6 +179,7 @@ function Sidebar({ activePage, onNavigate, style = 'light' }) {
 function Header({ activePage }) {
   const [dark, setDark] = useState(false);
   const [now, setNow] = useState(new Date());
+  const isMobile = useIsMobileShell();
 
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 1000);
@@ -159,25 +200,25 @@ function Header({ activePage }) {
 
   return (
     <header style={{
-      position: 'fixed', top: 0, left: 240, right: 0, height: 64,
+      position: 'fixed', top: 0, left: isMobile ? 0 : 240, right: 0, height: isMobile ? 56 : 64,
       background: 'rgba(244,245,246,0.85)', backdropFilter: 'blur(12px)',
       borderBottom: '1px solid #E8E9EB', zIndex: 10,
       display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-      padding: '0 36px'
+      padding: isMobile ? '0 12px' : '0 36px'
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <span className="material-symbols-outlined live-blink" style={{ fontSize: 14, color: '#C8232C' }}>radio_button_checked</span>
         <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: '#767676' }}>
           {pageLabels[activePage] || 'Live Command'}
         </span>
-        <span style={{ fontSize: 11, color: '#bbb', margin: '0 4px' }}>·</span>
-        <span style={{ fontSize: 11, fontWeight: 600, color: '#aaa', fontVariantNumeric: 'tabular-nums' }}>
+        <span style={{ fontSize: 11, color: '#bbb', margin: '0 4px', display: isMobile ? 'none' : 'inline' }}>·</span>
+        <span style={{ fontSize: 11, fontWeight: 600, color: '#aaa', fontVariantNumeric: 'tabular-nums', display: isMobile ? 'none' : 'inline' }}>
           {now.toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
         </span>
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
         {/* Search */}
-        <div style={{ position: 'relative' }}>
+        <div style={{ position: 'relative', display: isMobile ? 'none' : 'block' }}>
           <span className="material-symbols-outlined" style={{
             position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)',
             fontSize: 16, color: '#aaa'

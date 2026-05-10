@@ -1,4 +1,12 @@
 services:
+  app:
+    build: .
+    env_file:
+      - .env
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
   neo4j:
     image: neo4j:5-community
     ports:

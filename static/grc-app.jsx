@@ -2,9 +2,20 @@
 
 const { useState, useEffect } = React;
 
+function useIsMobileApp() {
+  const [isMobile, setIsMobile] = useState(() => window.innerWidth <= 768);
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth <= 768);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  return isMobile;
+}
+
 function App() {
   const [page, setPage] = useState(() => localStorage.getItem('grc-page') || 'dashboard');
   const [sidebarStyle, setSidebarStyle] = useState('light');
+  const isMobile = useIsMobileApp();
 
   useEffect(() => {
     localStorage.setItem('grc-page', page);
@@ -34,9 +45,9 @@ function App() {
   return (
     <div style={{ display: 'flex', minHeight: '100vh' }}>
       <Sidebar activePage={page} onNavigate={navigate} style={sidebarStyle} />
-      <div style={{ marginLeft: 240, flex: 1, display: 'flex', flexDirection: 'column' }}>
+      <div style={{ marginLeft: isMobile ? 0 : 240, flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
         <Header activePage={page} />
-        <main style={{ flex: 1, overflowY: 'auto', paddingTop: 64 }}>
+        <main style={{ flex: 1, overflowY: 'auto', paddingTop: isMobile ? 56 : 64, paddingBottom: isMobile ? 76 : 0 }}>
           {renderPage()}
         </main>
       </div>

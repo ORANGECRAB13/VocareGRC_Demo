@@ -2,6 +2,16 @@
 
 const { useState: useAgentState, useEffect: useAgentEffect, useRef: useAgentRef, useCallback: useAgentCb } = React;
 
+function useAgentsMobile() {
+  const [isMobile, setIsMobile] = useAgentState(() => window.innerWidth <= 768);
+  useAgentEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth <= 768);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  return isMobile;
+}
+
 const AGENT_PROFILES = [
   {
     name: 'Aria v2',
@@ -347,6 +357,7 @@ function useAgentCall() {
 function AgentCallPanel({ agent }) {
   const { callState, statusMsg, transcript, pttActive, micMode, connect, disconnect, startPTT, stopPTT, toggleMicMode } = useAgentCall();
   const transcriptRef = useAgentRef(null);
+  const isMobile = useAgentsMobile();
 
   useAgentEffect(() => {
     if (transcriptRef.current) {
@@ -367,9 +378,10 @@ function AgentCallPanel({ agent }) {
     }}>
       {/* Panel header */}
       <div style={{
-        padding: '14px 20px',
+        padding: isMobile ? '12px 14px' : '14px 20px',
         background: isConnected ? '#D0F2F1' : isError ? '#F9E6E7' : '#EBEBEB',
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        display: 'flex', alignItems: isMobile ? 'flex-start' : 'center',
+        justifyContent: 'space-between', gap: 10,
         transition: 'background 0.3s'
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -393,7 +405,7 @@ function AgentCallPanel({ agent }) {
           fontSize: 9, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em',
           color: isConnected ? '#00A9A5' : isConnecting ? '#D4860A' : isError ? '#C8232C' : '#767676',
           background: isConnected ? '#B0EAE9' : isConnecting ? '#FDF3E1' : isError ? '#F9E6E7' : '#DDDEDE',
-          padding: '3px 10px', borderRadius: 5
+          padding: '3px 10px', borderRadius: 5, flexShrink: 0
         }}>
           {isConnected ? 'Live' : isConnecting ? 'Connecting…' : isError ? 'Error' : 'Standby'}
         </span>
@@ -402,7 +414,7 @@ function AgentCallPanel({ agent }) {
       {/* Transcript area — only shown when connected or has history */}
       {(isConnected || transcript.length > 0) && (
         <div ref={transcriptRef} style={{
-          height: 160, overflowY: 'auto', padding: '14px 16px',
+          height: isMobile ? 220 : 160, overflowY: 'auto', padding: '14px 16px',
           background: '#fff', borderBottom: '1px solid #F0F1F3',
           display: 'flex', flexDirection: 'column', gap: 8
         }}>
@@ -418,6 +430,7 @@ function AgentCallPanel({ agent }) {
             }}>
               <div style={{
                 maxWidth: '75%', padding: '7px 12px', borderRadius: 10, fontSize: 12, fontWeight: 500,
+                overflowWrap: 'anywhere',
                 background: line.speaker === 'user' ? '#C8232C' : '#F4F5F6',
                 color: line.speaker === 'user' ? '#fff' : '#1A1A1A',
                 borderBottomRightRadius: line.speaker === 'user' ? 2 : 10,
@@ -431,7 +444,10 @@ function AgentCallPanel({ agent }) {
       )}
 
       {/* Controls */}
-      <div style={{ padding: '14px 16px', display: 'flex', alignItems: 'center', gap: 10, background: '#fff' }}>
+      <div style={{
+        padding: '14px 16px', display: 'flex', alignItems: 'center',
+        gap: 10, background: '#fff', flexWrap: isMobile ? 'wrap' : 'nowrap'
+      }}>
         {isIdle || isError ? (
           <button onClick={connect} style={{
             flex: 1, background: '#C8232C', color: '#fff', borderRadius: 9,
@@ -454,12 +470,13 @@ function AgentCallPanel({ agent }) {
           <>
             {/* Mode toggle pill */}
             <div style={{
-              display: 'flex', background: '#EBEBEB', borderRadius: 8, padding: 3, gap: 2, flexShrink: 0
+              display: 'flex', background: '#EBEBEB', borderRadius: 8, padding: 3, gap: 2,
+              flexShrink: 0, width: isMobile ? '100%' : 'auto'
             }}>
               <button
                 onClick={() => micMode === 'always' && toggleMicMode()}
                 style={{
-                  padding: '5px 9px', borderRadius: 6, fontSize: 10, fontWeight: 700,
+                  padding: '7px 9px', borderRadius: 6, fontSize: 10, fontWeight: 700, flex: isMobile ? 1 : 'initial',
                   letterSpacing: '0.04em', border: 'none', cursor: micMode === 'hold' ? 'default' : 'pointer',
                   background: micMode === 'hold' ? '#1A1A1A' : 'transparent',
                   color: micMode === 'hold' ? '#fff' : '#767676',
@@ -469,7 +486,7 @@ function AgentCallPanel({ agent }) {
               <button
                 onClick={() => micMode === 'hold' && toggleMicMode()}
                 style={{
-                  padding: '5px 9px', borderRadius: 6, fontSize: 10, fontWeight: 700,
+                  padding: '7px 9px', borderRadius: 6, fontSize: 10, fontWeight: 700, flex: isMobile ? 1 : 'initial',
                   letterSpacing: '0.04em', border: 'none', cursor: micMode === 'always' ? 'default' : 'pointer',
                   background: micMode === 'always' ? '#00A9A5' : 'transparent',
                   color: micMode === 'always' ? '#fff' : '#767676',
@@ -531,38 +548,57 @@ function AgentsPage() {
   const [selected, setSelected] = useAgentState(0);
   const [expressiveness, setExpressiveness] = useAgentState(72);
   const [velocity, setVelocity] = useAgentState(1.1);
+  const isMobile = useAgentsMobile();
   const agent = AGENT_PROFILES[selected];
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', minHeight: 'calc(100vh-64px)', paddingBottom: 40 }}>
+    <div style={{
+      display: 'flex', flexDirection: 'column',
+      minHeight: isMobile ? 'calc(100vh - 132px)' : 'calc(100vh - 64px)',
+      paddingBottom: isMobile ? 18 : 40
+    }}>
       {/* Header */}
-      <div style={{ padding: '28px 36px 0', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end' }}>
-        <div>
+      <div style={{
+        padding: isMobile ? '18px 16px 0' : '28px 36px 0',
+        display: 'flex', justifyContent: 'space-between',
+        alignItems: isMobile ? 'stretch' : 'flex-end',
+        flexDirection: isMobile ? 'column' : 'row', gap: isMobile ? 14 : 0
+      }}>
+        <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: '0.1em', color: '#aaa', textTransform: 'uppercase', marginBottom: 4 }}>
             Command / <span style={{ color: '#C8232C' }}>AI Agents</span>
           </div>
-          <div style={{ fontFamily: 'Manrope', fontWeight: 900, fontSize: 26, color: '#1A1A1A', letterSpacing: '-0.02em' }}>Intelligence Profiles</div>
+          <div style={{ fontFamily: 'Manrope', fontWeight: 900, fontSize: isMobile ? 22 : 26, color: '#1A1A1A', letterSpacing: '-0.02em' }}>Intelligence Profiles</div>
           <div style={{ fontSize: 12, color: '#767676', marginTop: 4 }}>Configure and connect to each autonomous agent.</div>
         </div>
         <button style={{
           background: '#C8232C', color: '#fff', padding: '9px 20px', borderRadius: 9,
-          fontSize: 12, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6
+          fontSize: 12, fontWeight: 700, display: 'flex', alignItems: 'center',
+          justifyContent: 'center', gap: 6, width: isMobile ? '100%' : 'auto'
         }}>
           <span className="material-symbols-outlined" style={{ fontSize: 16 }}>add</span> Deploy New Agent
         </button>
       </div>
 
       {/* Grid */}
-      <div style={{ padding: '24px 36px', display: 'grid', gridTemplateColumns: '300px 1fr', gap: 20, flex: 1 }}>
+      <div style={{
+        padding: isMobile ? '16px' : '24px 36px',
+        display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '300px 1fr',
+        gap: isMobile ? 16 : 20, flex: 1, minWidth: 0
+      }}>
         {/* Left: profile list */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: isMobile ? '1fr' : '1fr',
+          gap: 12, minWidth: 0
+        }}>
           {AGENT_PROFILES.map((a, i) => {
             const active = i === selected;
             return (
               <div key={a.name} onClick={() => setSelected(i)} style={{
                 background: active ? '#F9E6E7' : '#fff',
                 border: `1.5px solid ${active ? '#C8232C' : '#F0F1F3'}`,
-                borderRadius: 14, padding: '16px', cursor: 'pointer',
+                borderRadius: 14, padding: isMobile ? '14px' : '16px', cursor: 'pointer',
                 transition: 'all 0.15s'
               }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10 }}>
@@ -576,7 +612,7 @@ function AgentsPage() {
                     </div>
                     <div>
                       <div style={{ fontSize: 13, fontWeight: 800, color: '#1A1A1A', fontFamily: 'Manrope' }}>{a.name}</div>
-                      <div style={{ fontSize: 10, color: '#767676', fontWeight: 600 }}>{a.role}</div>
+                      <div style={{ fontSize: 10, color: '#767676', fontWeight: 600, overflowWrap: 'anywhere' }}>{a.role}</div>
                     </div>
                   </div>
                   <span style={{
@@ -623,32 +659,37 @@ function AgentsPage() {
         </div>
 
         {/* Right: config panel */}
-        <div style={{ background: '#fff', borderRadius: 14, boxShadow: '0 2px 12px rgba(0,0,0,0.05)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <div style={{ background: '#fff', borderRadius: 14, boxShadow: '0 2px 12px rgba(0,0,0,0.05)', display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
           {/* Panel header */}
-          <div style={{ padding: '20px 28px', borderBottom: '1px solid #F0F1F3', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+          <div style={{
+            padding: isMobile ? '16px' : '20px 28px', borderBottom: '1px solid #F0F1F3',
+            display: 'flex', justifyContent: 'space-between',
+            alignItems: isMobile ? 'stretch' : 'center',
+            flexDirection: isMobile ? 'column' : 'row', gap: isMobile ? 14 : 0
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 14, minWidth: 0 }}>
               <div style={{ width: 46, height: 46, borderRadius: 12, background: '#F9E6E7', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                 <span className="material-symbols-outlined ms-fill" style={{ fontSize: 24, color: '#C8232C' }}>{agent.icon}</span>
               </div>
               <div>
-                <div style={{ fontFamily: 'Manrope', fontWeight: 800, fontSize: 17, color: '#1A1A1A' }}>Configuration: {agent.name}</div>
-                <div style={{ fontSize: 11, color: '#aaa', display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
+                <div style={{ fontFamily: 'Manrope', fontWeight: 800, fontSize: isMobile ? 15 : 17, color: '#1A1A1A' }}>Configuration: {agent.name}</div>
+                <div style={{ fontSize: 11, color: '#aaa', display: 'flex', alignItems: 'center', gap: 6, marginTop: 2, flexWrap: 'wrap' }}>
                   <span style={{ width: 6, height: 6, borderRadius: '50%', background: agent.status === 'Live' ? '#00A9A5' : '#aaa', display: 'inline-block' }} />
                   {agent.status === 'Live' ? 'Neural link established · ' + agent.latency : 'Agent offline'}
                 </div>
               </div>
             </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button style={{ padding: '8px 16px', border: '1px solid #E8E9EB', borderRadius: 8, fontSize: 12, fontWeight: 600, color: '#767676' }}>Reset</button>
-              <button style={{ padding: '8px 16px', background: '#C8232C', borderRadius: 8, fontSize: 12, fontWeight: 700, color: '#fff' }}>Apply Changes</button>
+            <div style={{ display: 'flex', gap: 8, width: isMobile ? '100%' : 'auto' }}>
+              <button style={{ flex: isMobile ? 1 : 'initial', padding: '8px 16px', border: '1px solid #E8E9EB', borderRadius: 8, fontSize: 12, fontWeight: 600, color: '#767676' }}>Reset</button>
+              <button style={{ flex: isMobile ? 1 : 'initial', padding: '8px 16px', background: '#C8232C', borderRadius: 8, fontSize: 12, fontWeight: 700, color: '#fff' }}>Apply Changes</button>
             </div>
           </div>
 
-          <div style={{ padding: '28px', display: 'flex', flexDirection: 'column', gap: 28, overflowY: 'auto' }}>
+          <div style={{ padding: isMobile ? '16px' : '28px', display: 'flex', flexDirection: 'column', gap: isMobile ? 22 : 28, overflowY: 'auto' }}>
             {/* LLM selector */}
             <div>
               <div style={{ fontSize: 10, fontWeight: 800, color: '#aaa', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 14 }}>Neural Engine (LLM)</div>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(3,1fr)', gap: 12 }}>
                 {['GPT-4o','Claude 3.5 Sonnet','Gemini 1.5 Pro'].map(llm => {
                   const active = agent.llm === llm;
                   return (
@@ -674,7 +715,7 @@ function AgentsPage() {
             </div>
 
             {/* STT / TTS */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: isMobile ? 16 : 24 }}>
               {[{ label: 'Speech-to-Text (STT)', val: agent.stt }, { label: 'Text-to-Speech (TTS)', val: agent.tts }].map(({ label, val }) => (
                 <div key={label}>
                   <div style={{ fontSize: 10, fontWeight: 800, color: '#aaa', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 10 }}>{label}</div>
@@ -693,7 +734,7 @@ function AgentsPage() {
             </div>
 
             {/* Sliders */}
-            <div style={{ paddingTop: 4, borderTop: '1px solid #F0F1F3', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 28 }}>
+            <div style={{ paddingTop: 4, borderTop: '1px solid #F0F1F3', display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: isMobile ? 18 : 28 }}>
               <div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10 }}>
                   <span style={{ fontSize: 10, fontWeight: 800, color: '#aaa', textTransform: 'uppercase', letterSpacing: '0.1em' }}>Vocal Expressiveness</span>
