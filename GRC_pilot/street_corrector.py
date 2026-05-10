@@ -370,10 +370,16 @@ class StreetCorrector:
 
             # Score 2: phonetically-aware first-word similarity
             # Catches "Canons"->c vs "Gannons"->g where suffix matching would
-            # otherwise favour "Cairns Street" over "Gannons Avenue"
-            word_score = _phonetic_word_similarity(input_first_word, cand_first)
-
-            score = max(full_score, word_score)
+            # otherwise favour "Cairns Street" over "Gannons Avenue".
+            # Only boost via word_score when first words differ (STT substitution
+            # case). When first words are identical, full_score is more reliable —
+            # this prevents "Brighton Street Kogarah Bay" from matching "Brighton
+            # Road" with score 1.0 due to an identical first word.
+            if input_first_word != cand_first:
+                word_score = _phonetic_word_similarity(input_first_word, cand_first)
+                score = max(full_score, word_score)
+            else:
+                score = full_score
 
             if score > best_score:
                 best_score = score

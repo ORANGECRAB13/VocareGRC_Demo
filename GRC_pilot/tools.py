@@ -33,18 +33,46 @@ def _geocode_address(address: str, api_key: str) -> tuple:
         return (None, None)
 
 
+_STREET_TYPE_TOKENS = {
+    "street", "road", "avenue", "place", "crescent", "parade", "drive",
+    "court", "lane", "close", "grove", "circuit", "highway", "boulevard",
+    "terrace", "way", "path", "reserve", "rise", "walk", "square", "esplanade",
+    # abbreviations
+    "st", "rd", "ave", "av", "pde", "cres", "pl", "ct", "dr",
+    "ln", "cl", "gr", "cct", "hwy", "blvd", "tce",
+}
+
+
+def _split_street_suburb(text: str) -> tuple[str, str]:
+    """Split 'Beverly Place Beverly Hills' into ('Beverly Place', 'Beverly Hills').
+
+    Finds the last street-type token and treats everything after it as suburb.
+    Returns (full_text, '') if no street type is found.
+    """
+    tokens = text.split()
+    for i, tok in enumerate(tokens):
+        if tok.lower().rstrip(".,") in _STREET_TYPE_TOKENS:
+            return " ".join(tokens[: i + 1]), " ".join(tokens[i + 1 :])
+    return text, ""
+
+
 def _correct_address(address: str) -> str:
-    """Apply STT street-name correction while preserving the leading house number."""
+    """Apply STT street-name correction while preserving house number and suburb."""
     _num_match = re.match(r'^(\d+)\s+(.+)$', address)
     if _num_match:
-        _house, _street = _num_match.group(1), _num_match.group(2)
-        corrected = _sc.correct_street(_street)
+        _house, _rest = _num_match.group(1), _num_match.group(2)
+        _street_part, _suburb_part = _split_street_suburb(_rest)
+        corrected = _sc.correct_street(_street_part)
         if corrected:
-            return f"{_house} {corrected[0]}"
+            corrected_street = corrected[0]
+            suffix = f" {_suburb_part}" if _suburb_part else ""
+            return f"{_house} {corrected_street}{suffix}"
     else:
-        corrected = _sc.correct_street(address)
+        _street_part, _suburb_part = _split_street_suburb(address)
+        corrected = _sc.correct_street(_street_part)
         if corrected:
-            return corrected[0]
+            suffix = f" {_suburb_part}" if _suburb_part else ""
+            return f"{corrected[0]}{suffix}"
     return address
 
 

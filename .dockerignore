@@ -15,5 +15,7 @@ __pycache__/
 docs/
 
 docker-compose.yml
+Dockerfile.base
 preview_server.py
 **/node_modules/
+wheelhouse-linux/

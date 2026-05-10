@@ -32,6 +32,9 @@ Thumbs.db
 # Node
 node_modules/
 
+# Docker build artifacts
+wheelhouse-linux/
+
 # IDE
 .vscode/
 .idea/

@@ -21,7 +21,7 @@ from typing import Awaitable, Callable, Dict
 
 sys.path.insert(0, str(Path(__file__).parent / "GRC_pilot"))
 from tools import get_bin_collection_zone, _correct_address  # noqa: E402
-from grc_events import get_events, format_events_for_system_prompt  # noqa: E402
+from grc_events import get_events, format_events_for_system_prompt, get_future_events  # noqa: E402
 from da_knowledge import DA_KNOWLEDGE  # noqa: E402
 from bin_faq import BIN_FAQ  # noqa: E402
 
@@ -223,10 +223,16 @@ THINKER_SYSTEM_PROMPT = (
     "- Output ONLY the JSON object, no explanation"
 )
 
-FILLERS = [
+FILLERS_EN = [
     "Let me look that up for you.",
     "Just a moment while I check that.",
     "One moment please.",
+]
+
+FILLERS_ZH = [
+    "让我帮您查一下。",
+    "请稍等一下。",
+    "我来为您查询。",
 ]
 
 WEB_INTERFACE_SYSTEM_OVERRIDE = (
@@ -441,7 +447,7 @@ class ContextEnricherProcessor(FrameProcessor):
 
         if isinstance(frame, LLMContextFrame) and direction == FrameDirection.DOWNSTREAM:
             state = self._thinker.thinker_state
-            if state and state.get("confidence", 0.0) >= 0.5:
+            if state and float(state.get("confidence", 0.0)) >= 0.5:
                 intent = state.get("intent", "")
                 # For events intent: only tell the LLM if there's already a specific query.
                 # If the user just asked generically ("what's on?"), don't hint — let the
@@ -475,6 +481,7 @@ class FillerTTSProcessor(FrameProcessor):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._filler_index = 0
+        self.is_english = True
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
@@ -484,7 +491,8 @@ class FillerTTSProcessor(FrameProcessor):
             # (filler loop would play repeatedly before Twilio redirects the call).
             _NO_FILLER_TOOLS = {"get_bin_collection_day", "transfer_to_human"}
             if frame.function_name not in _NO_FILLER_TOOLS:
-                filler = FILLERS[self._filler_index % len(FILLERS)]
+                fillers = FILLERS_EN if self.is_english else FILLERS_ZH
+                filler = fillers[self._filler_index % len(fillers)]
                 self._filler_index += 1
                 await self.push_frame(TTSSpeakFrame(text=filler), direction)
 
@@ -499,43 +507,113 @@ class LanguageSwitchProcessor(FrameProcessor):
     to reconnect the ElevenLabs WebSocket with the correct voice and language code.
     """
 
-    def __init__(self, tts, en_voice_id: str, multilingual_voice_id: str, **kwargs):
+    def __init__(self, tts, voice_id: str, filler_tts=None, context=None, **kwargs):
         super().__init__(**kwargs)
         self._tts = tts
-        self._en_voice_id = en_voice_id
-        self._multilingual_voice_id = multilingual_voice_id
+        self._voice_id = voice_id
+        self._filler_tts = filler_tts
+        self._context = context
         self._is_english: bool = True  # start English; flip on first non-EN utterance
+
+    # Keywords that signal a language preference regardless of the STT language tag.
+    # "Mandarin" is an English word so ElevenLabs STT returns language="en" or None — we
+    # catch it via text content instead so the switch always fires on the first utterance.
+    _MANDARIN_KEYWORDS = frozenset({"mandarin", "chinese", "中文", "普通话", "国语"})
+    _ENGLISH_KEYWORDS  = frozenset({"english", "英文", "英语"})
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
 
         if isinstance(frame, TranscriptionFrame) and direction == FrameDirection.DOWNSTREAM:
-            raw = frame.language
-            # None means STT didn't return a language tag — keep current assumption.
-            # Any language code that doesn't start with "en" is treated as non-English.
-            if raw is not None:
-                is_english = raw.value.lower().startswith("en")
-                if is_english != self._is_english:
-                    self._is_english = is_english
-                    await self._switch_language(is_english)
+            switched = False
+            text_lower = frame.text.strip().lower()
+
+            # 1. Text-based keyword detection (catches "Mandarin" spoken in English)
+            if any(kw in text_lower for kw in self._MANDARIN_KEYWORDS):
+                if self._is_english:
+                    self._is_english = False
+                    await self._switch_language(False)
+                    switched = True
+            elif any(kw in text_lower for kw in self._ENGLISH_KEYWORDS):
+                if not self._is_english:
+                    self._is_english = True
+                    await self._switch_language(True)
+                    switched = True
+            else:
+                # 2. STT language-tag detection for ongoing conversation
+                raw = frame.language
+                if raw is not None:
+                    # frame.language may be a Language enum or a plain string
+                    lang_str = raw.value if hasattr(raw, "value") else str(raw)
+                    is_english = lang_str.lower().startswith("en")
+                    if is_english != self._is_english:
+                        self._is_english = is_english
+                        await self._switch_language(is_english)
+                        switched = True
+
+            if switched:
+                # ElevenLabs closes and reopens its WebSocket on a voice/language change.
+                # Wait for the reconnect before the LLM generates audio, otherwise the
+                # first TTS chunk is sent to a reconnecting socket and gets dropped.
+                await asyncio.sleep(1.0)
 
         await self.push_frame(frame, direction)
 
     async def _switch_language(self, is_english: bool):
         from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 
-        voice = self._en_voice_id if is_english else self._multilingual_voice_id
-
-        # Switch voice only — no language code so ElevenLabs auto-detects from
-        # the generated text. Passing a fixed language code would restrict the
-        # voice to one language and break anything other than that language.
-        tts_delta = ElevenLabsTTSService.Settings(voice=voice, model="eleven_turbo_v2_5")
+        # Same voice ID for both languages — language= in the WebSocket URL
+        # tells ElevenLabs which accent/phoneme set to use.
+        # "en" → English accent, "zh" → Mandarin Chinese accent.
+        # Higher stability + similarity_boost for Chinese keeps the accent
+        # anchored when the model encounters embedded English (street addresses).
+        if is_english:
+            tts_delta = ElevenLabsTTSService.Settings(
+                voice=self._voice_id,
+                model="eleven_turbo_v2_5",
+                language="en",
+                speed=1.0,
+                stability=0.5,
+                similarity_boost=0.75,
+            )
+        else:
+            tts_delta = ElevenLabsTTSService.Settings(
+                voice=self._voice_id,
+                model="eleven_turbo_v2_5",
+                language="zh",
+                speed=0.8,
+                stability=1,
+                similarity_boost=1,
+            )
         await self.push_frame(
             TTSUpdateSettingsFrame(delta=tts_delta, service=self._tts),
             FrameDirection.DOWNSTREAM,
         )
+        if self._filler_tts is not None:
+            self._filler_tts.is_english = is_english
+
+        # Inject a system message into the LLM context so the LLM actually
+        # responds in the new language — changing TTS voice alone isn't enough.
+        if self._context is not None:
+            if is_english:
+                msg = (
+                    "LANGUAGE SWITCH — ACTIVE LANGUAGE IS NOW: ENGLISH. "
+                    "You MUST write every word of every response in English from this point forward. "
+                    "Do not use any other language."
+                )
+            else:
+                msg = (
+                    "LANGUAGE SWITCH — ACTIVE LANGUAGE IS NOW: MANDARIN CHINESE (普通话). "
+                    "你必须用中文回答每一个问题，不论用户用什么语言提问。 "
+                    "You MUST write every word of every response in Chinese characters from this point forward. "
+                    "Zero English words are permitted except street addresses (e.g. '50 Vine Street Hurstville'). "
+                    "Do NOT write pinyin, romanisation, or mixed-language sentences. "
+                    "If you are about to write English, stop and rewrite in Chinese."
+                )
+            self._context.add_message({"role": "system", "content": msg})
+
         logger.info(
-            f"Language switch → {'en' if is_english else 'multilingual'} | "
+            f"Language switch → {'en' if is_english else 'zh'} | "
             f"voice={'english' if is_english else 'multilingual'}"
         )
 
@@ -575,16 +653,17 @@ SYSTEM_INSTRUCTION_GRC = (
 
     # --- Service: Events ---
     "For questions about upcoming events, activities, or what's on: "
-    "The full event listing is embedded in your context below — you already have all the data. "
-    "Do NOT call any tool for events questions. Answer directly from the embedded list. "
+    "The next 30 days of events are embedded in your context below — answer directly from that list. "
+    "If the user asks about events beyond 30 days (e.g. 'anything in July?', 'what about next month?'), "
+    "call the get_future_events tool to fetch those. "
     "For a vague or general question (e.g. 'what's on?', 'any events?'), "
     "acknowledge there are events on and ask one short friendly question to narrow it down — "
     "for example: 'We've got quite a few things coming up — are you after something free, "
     "something for the kids, or a particular type of activity?' "
-    "Once the user gives an interest, answer immediately from the embedded list. "
+    "Once the user gives an interest, answer immediately from the embedded list or tool result. "
     "If the user's first message already names a specific interest "
     "(e.g. 'any free events?', 'kids activities'), answer immediately — no clarifying question. "
-    "Keep your answer brief: name 2-3 matching events with date, venue, and cost. "
+    "Keep your answer brief: name 2-3 matching events with date and any available details. "
     "Do not read out URLs. For bookings say 'visit the Georges River Council website' or "
     "'you can register at the council website'. "
 
@@ -610,19 +689,29 @@ SYSTEM_INSTRUCTION_GRC = (
     "Always answer only what was asked. Be brief and direct. "
 
     # --- Multilingual ---
-    "LANGUAGE RULE (mandatory): At the very start of every call you ask the caller which language "
-    "they prefer. Once they choose, you conduct the ENTIRE conversation in that language — do not "
-    "switch under any circumstances. "
-    "If the caller chooses English (or says anything in English), respond fully in English for the rest of the call. "
-    "If the caller chooses Mandarin / 中文 (or says anything in Chinese/Mandarin), respond fully in Mandarin Chinese for the rest of the call. "
-    "Exception: street addresses are always stated in English regardless of the chosen language — "
-    "for example, say '50 Vine Street Hurstville' even inside a Chinese response. "
+    "LANGUAGE RULE — ABSOLUTE, NON-NEGOTIABLE: "
+    "This service supports EXACTLY TWO languages: English and Mandarin Chinese (普通话). "
+    "No other language is permitted under any circumstances — not Cantonese, not any other dialect or language. "
+    "At the very start of every call ask the caller which language they prefer: English or Mandarin. "
+    "Once the caller chooses, or a system message instructs you to switch, "
+    "EVERY single word you produce must be in that language — zero exceptions. "
+    "If the active language is Mandarin Chinese (普通话): "
+    "  • Write ALL output in simplified Chinese characters (普通话). "
+    "  • Do NOT produce any English words, romanisation, or pinyin. "
+    "  • The ONLY permitted English is a street address token embedded inside an otherwise fully Chinese sentence "
+    "    (e.g. '您在 50 Vine Street Hurstville 的垃圾收集日是...'). "
+    "  • If you are about to write English, stop and rewrite in Chinese. "
+    "If the active language is English: write ALL output in English only. "
+    "Switching languages or mixing languages mid-response is strictly forbidden. "
+    "If the caller speaks or asks in any language other than English or Mandarin, "
+    "respond in English: 'I'm sorry, this service is only available in English or Mandarin Chinese.' "
 
-    # --- Thinker acceleration ---
-    "You may receive a [THINKER_STATE] system message with pre-extracted intent and entities. "
-    "When present, use it to respond faster: "
-    "if intent is bin_collection and address is a real street address (contains a street name and optionally a number), call get_bin_collection_day immediately. "
-    "If no THINKER_STATE is present, proceed as normal. "
+
+    # --- Thinker acceleration (disabled) ---
+    # "You may receive a [THINKER_STATE] system message with pre-extracted intent and entities. "
+    # "When present, use it to respond faster: "
+    # "if intent is bin_collection and address is a real street address (contains a street name and optionally a number), call get_bin_collection_day immediately. "
+    # "If no THINKER_STATE is present, proceed as normal. "
 
     "\n\n"
     + DA_KNOWLEDGE
@@ -700,6 +789,7 @@ def create_tts(name: str):
             settings=ElevenLabsTTSService.Settings(
                 voice=voice,
                 model="eleven_turbo_v2_5",
+                language="en",
             ),
         )
     else:
@@ -1173,21 +1263,16 @@ async def run_bot(
     llm = create_llm(llm_name, system_instruction=system_instruction)
     tts = create_tts(tts_name)
 
-    thinker_llm = CerebrasLLMService(
-        api_key=os.getenv("CEREBRAS_API_KEY"),
-        settings=CerebrasLLMSettings(
-            model="llama3.1-8b",
-            extra={"response_format": {"type": "json_object"}},
-        ),
-    )
-    thinker_processor = ThinkerProcessor(thinker_llm=thinker_llm)
-    context_enricher = ContextEnricherProcessor(thinker_processor=thinker_processor)
+    # thinker_llm = CerebrasLLMService(
+    #     api_key=os.getenv("CEREBRAS_API_KEY"),
+    #     settings=CerebrasLLMSettings(
+    #         model="llama3.1-8b",
+    #         extra={"response_format": {"type": "json_object"}},
+    #     ),
+    # )
+    # thinker_processor = ThinkerProcessor(thinker_llm=thinker_llm)
+    # context_enricher = ContextEnricherProcessor(thinker_processor=thinker_processor)
     filler_tts = FillerTTSProcessor()
-    lang_switch = LanguageSwitchProcessor(
-        tts=tts,
-        en_voice_id=_env("ELEVENLABS_VOICE_ID"),
-        multilingual_voice_id=_env("ELEVENLABS_MULTILINGUAL_VOICE_ID") or _env("ELEVENLABS_VOICE_ID"),
-    )
 
     # Attach transcript observer so the frontend can display live conversation
     pc_id = webrtc_connection.pc_id
@@ -1218,24 +1303,24 @@ async def run_bot(
             return
 
         try:
-            # ── Fast path: Thinker may have already prefetched this address ──────
-            prefetch_future = thinker_processor.pop_prefetch(address)
-            if prefetch_future is not None:
-                if not prefetch_future.done():
-                    logger.info(f"[BIN TOOL] Prefetch still in flight — waiting up to 2s")
-                    try:
-                        await asyncio.wait_for(asyncio.shield(prefetch_future), timeout=2.0)
-                    except asyncio.TimeoutError:
-                        logger.warning(f"[BIN TOOL] Prefetch timeout — falling through to direct call")
-                if prefetch_future.done():
-                    voice = prefetch_future.result()
-                    if voice:
-                        logger.info(f"[BIN TOOL] PREFETCH HIT — zero-latency answer")
-                        await params.result_callback({"result": voice})
-                        return
-                    logger.warning(f"[BIN TOOL] Prefetch returned None — falling through to direct call")
+            # ── Fast path: Thinker prefetch (disabled) ───────────────────────────
+            # prefetch_future = thinker_processor.pop_prefetch(address)
+            # if prefetch_future is not None:
+            #     if not prefetch_future.done():
+            #         logger.info(f"[BIN TOOL] Prefetch still in flight — waiting up to 2s")
+            #         try:
+            #             await asyncio.wait_for(asyncio.shield(prefetch_future), timeout=2.0)
+            #         except asyncio.TimeoutError:
+            #             logger.warning(f"[BIN TOOL] Prefetch timeout — falling through to direct call")
+            #     if prefetch_future.done():
+            #         voice = prefetch_future.result()
+            #         if voice:
+            #             logger.info(f"[BIN TOOL] PREFETCH HIT — zero-latency answer")
+            #             await params.result_callback({"result": voice})
+            #             return
+            #         logger.warning(f"[BIN TOOL] Prefetch returned None — falling through to direct call")
 
-            # ── Direct Wastetrack call (prefetch miss or not triggered) ──────────
+            # ── Direct Wastetrack call ────────────────────────────────────────────
             from grc_wastetrack import get_bin_collection_details as _wt, format_voice_response as _wt_fmt
             wt_result = await asyncio.to_thread(_wt, address)
             voice = _wt_fmt(wt_result)
@@ -1268,12 +1353,17 @@ async def run_bot(
 
     llm.register_function("transfer_to_human", handle_transfer_to_human_webrtc)
 
+    async def handle_get_future_events(params: FunctionCallParams):
+        result = await asyncio.to_thread(get_future_events, 30)
+        await params.result_callback({"result": result})
+
+    llm.register_function("get_future_events", handle_get_future_events)
+
     get_bin_collection_day_schema = FunctionSchema(
         name="get_bin_collection_day",
         description=(
             "Look up the bin collection day for a resident's address. "
             "Only call this tool once the resident has provided a specific street address "
-            "(e.g. '50 Vine Street Hurstville'). "
             "Do NOT call this tool if you only have a vague question — ask for the address first."
         ),
         properties={
@@ -1281,7 +1371,6 @@ async def run_bot(
                 "type": "string",
                 "description": (
                     "Full street address within the Georges River LGA, "
-                    "e.g. '50 Vine Street Hurstville'. "
                     "Must be a real address, not a question or vague phrase."
                 ),
             },
@@ -1298,7 +1387,21 @@ async def run_bot(
         properties={},
         required=[],
     )
-    tools = ToolsSchema(standard_tools=[get_bin_collection_day_schema, transfer_to_human_schema])
+    get_future_events_schema = FunctionSchema(
+        name="get_future_events",
+        description=(
+            "Fetch GRC events beyond the next 30 days. Call this when the user asks about "
+            "events further in the future (e.g. 'anything in July?', 'what about next month?'). "
+            "Do NOT call this for events within the next 30 days — those are already in your context."
+        ),
+        properties={},
+        required=[],
+    )
+    tools = ToolsSchema(standard_tools=[
+        get_bin_collection_day_schema,
+        transfer_to_human_schema,
+        get_future_events_schema,
+    ])
 
     context = LLMContext(tools=tools)
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
@@ -1307,6 +1410,12 @@ async def run_bot(
             vad_analyzer=SileroVADAnalyzer(),
             user_mute_strategies=[MuteUntilFirstBotCompleteUserMuteStrategy()],
         ),
+    )
+    lang_switch = LanguageSwitchProcessor(
+        tts=tts,
+        voice_id=_env("ELEVENLABS_VOICE_ID"),
+        filler_tts=filler_tts,
+        context=context,
     )
     transfer_processor = TransferRequestProcessor(
         on_transfer_request=transfer_to_human_webrtc,
@@ -1317,10 +1426,10 @@ async def run_bot(
             transport.input(),
             stt,
             transfer_processor,
-            thinker_processor,
+            # thinker_processor,  # disabled
             lang_switch,
             user_aggregator,
-            context_enricher,
+            # context_enricher,   # disabled
             llm,
             filler_tts,
             tts,
@@ -1582,21 +1691,16 @@ async def run_twilio_bot(websocket: WebSocket):
     llm = create_llm("cerebras", system_instruction=system_instruction)
     tts = create_tts("elevenlabs")
 
-    thinker_llm = CerebrasLLMService(
-        api_key=os.getenv("CEREBRAS_API_KEY"),
-        settings=CerebrasLLMSettings(
-            model="llama3.1-8b",
-            extra={"response_format": {"type": "json_object"}},
-        ),
-    )
-    thinker_processor = ThinkerProcessor(thinker_llm=thinker_llm)
-    context_enricher = ContextEnricherProcessor(thinker_processor=thinker_processor)
+    # thinker_llm = CerebrasLLMService(
+    #     api_key=os.getenv("CEREBRAS_API_KEY"),
+    #     settings=CerebrasLLMSettings(
+    #         model="llama3.1-8b",
+    #         extra={"response_format": {"type": "json_object"}},
+    #     ),
+    # )
+    # thinker_processor = ThinkerProcessor(thinker_llm=thinker_llm)
+    # context_enricher = ContextEnricherProcessor(thinker_processor=thinker_processor)
     filler_tts = FillerTTSProcessor()
-    lang_switch = LanguageSwitchProcessor(
-        tts=tts,
-        en_voice_id=_env("ELEVENLABS_VOICE_ID"),
-        multilingual_voice_id=_env("ELEVENLABS_MULTILINGUAL_VOICE_ID") or _env("ELEVENLABS_VOICE_ID"),
-    )
 
     # Register GRC tools
     async def handle_get_bin_collection_day(params: FunctionCallParams):
@@ -1616,24 +1720,24 @@ async def run_twilio_bot(websocket: WebSocket):
             return
 
         try:
-            # ── Fast path: Thinker may have already prefetched this address ──────
-            prefetch_future = thinker_processor.pop_prefetch(address)
-            if prefetch_future is not None:
-                if not prefetch_future.done():
-                    logger.info(f"[BIN TOOL] Prefetch still in flight — waiting up to 2s")
-                    try:
-                        await asyncio.wait_for(asyncio.shield(prefetch_future), timeout=2.0)
-                    except asyncio.TimeoutError:
-                        logger.warning(f"[BIN TOOL] Prefetch timeout — falling through to direct call")
-                if prefetch_future.done():
-                    voice = prefetch_future.result()
-                    if voice:
-                        logger.info(f"[BIN TOOL] PREFETCH HIT — zero-latency answer")
-                        await params.result_callback({"result": voice})
-                        return
-                    logger.warning(f"[BIN TOOL] Prefetch returned None — falling through to direct call")
+            # ── Fast path: Thinker prefetch (disabled) ───────────────────────────
+            # prefetch_future = thinker_processor.pop_prefetch(address)
+            # if prefetch_future is not None:
+            #     if not prefetch_future.done():
+            #         logger.info(f"[BIN TOOL] Prefetch still in flight — waiting up to 2s")
+            #         try:
+            #             await asyncio.wait_for(asyncio.shield(prefetch_future), timeout=2.0)
+            #         except asyncio.TimeoutError:
+            #             logger.warning(f"[BIN TOOL] Prefetch timeout — falling through to direct call")
+            #     if prefetch_future.done():
+            #         voice = prefetch_future.result()
+            #         if voice:
+            #             logger.info(f"[BIN TOOL] PREFETCH HIT — zero-latency answer")
+            #             await params.result_callback({"result": voice})
+            #             return
+            #         logger.warning(f"[BIN TOOL] Prefetch returned None — falling through to direct call")
 
-            # ── Direct Wastetrack call (prefetch miss or not triggered) ──────────
+            # ── Direct Wastetrack call ────────────────────────────────────────────
             from grc_wastetrack import get_bin_collection_details as _wt, format_voice_response as _wt_fmt
             wt_result = await asyncio.to_thread(_wt, address)
             voice = _wt_fmt(wt_result)
@@ -1731,12 +1835,17 @@ async def run_twilio_bot(websocket: WebSocket):
 
     llm.register_function("transfer_to_human", handle_transfer_to_human)
 
+    async def handle_get_future_events_twilio(params: FunctionCallParams):
+        result = await asyncio.to_thread(get_future_events, 30)
+        await params.result_callback({"result": result})
+
+    llm.register_function("get_future_events", handle_get_future_events_twilio)
+
     get_bin_collection_day_schema = FunctionSchema(
         name="get_bin_collection_day",
         description=(
             "Look up the bin collection day for a resident's address. "
             "Only call this tool once the resident has provided a specific street address "
-            "(e.g. '50 Vine Street Hurstville'). "
             "Do NOT call this tool if you only have a vague question — ask for the address first."
         ),
         properties={
@@ -1744,7 +1853,6 @@ async def run_twilio_bot(websocket: WebSocket):
                 "type": "string",
                 "description": (
                     "Full street address within the Georges River LGA, "
-                    "e.g. '50 Vine Street Hurstville'. "
                     "Must be a real address, not a question or vague phrase."
                 ),
             },
@@ -1761,8 +1869,22 @@ async def run_twilio_bot(websocket: WebSocket):
         properties={},
         required=[],
     )
+    get_future_events_schema = FunctionSchema(
+        name="get_future_events",
+        description=(
+            "Fetch GRC events beyond the next 30 days. Call this when the user asks about "
+            "events further in the future (e.g. 'anything in July?', 'what about next month?'). "
+            "Do NOT call this for events within the next 30 days — those are already in your context."
+        ),
+        properties={},
+        required=[],
+    )
     context = LLMContext(
-        tools=ToolsSchema(standard_tools=[get_bin_collection_day_schema, transfer_to_human_schema])
+        tools=ToolsSchema(standard_tools=[
+            get_bin_collection_day_schema,
+            transfer_to_human_schema,
+            get_future_events_schema,
+        ])
     )
 
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
@@ -1771,6 +1893,12 @@ async def run_twilio_bot(websocket: WebSocket):
             vad_analyzer=SileroVADAnalyzer(),
             user_mute_strategies=[MuteUntilFirstBotCompleteUserMuteStrategy()],
         ),
+    )
+    lang_switch = LanguageSwitchProcessor(
+        tts=tts,
+        voice_id=_env("ELEVENLABS_VOICE_ID"),
+        filler_tts=filler_tts,
+        context=context,
     )
     transfer_processor = TransferRequestProcessor(
         on_transfer_request=transfer_twilio_call_to_human,
@@ -1782,10 +1910,10 @@ async def run_twilio_bot(websocket: WebSocket):
             transport.input(),
             stt,
             transfer_processor,
-            thinker_processor,
+            # thinker_processor,  # disabled
             lang_switch,
             user_aggregator,
-            context_enricher,
+            # context_enricher,   # disabled
             llm,
             filler_tts,
             tts,
