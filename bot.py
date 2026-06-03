@@ -180,6 +180,7 @@ from pipecat.services.cerebras.llm import CerebrasLLMService, CerebrasLLMSetting
 from pipecat.services.groq.llm import GroqLLMService
 from pipecat.services.llm_service import LLMService, FunctionCallParams
 from pipecat.serializers.twilio import TwilioFrameSerializer
+from pipecat.serializers.telnyx import TelnyxFrameSerializer
 from pipecat.transports.base_transport import TransportParams
 from pipecat.transports.smallwebrtc.connection import IceServer, SmallWebRTCConnection
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
@@ -744,7 +745,7 @@ def create_llm(name: str, system_instruction: str = ""):
         return CerebrasLLMService(
             api_key=_env("CEREBRAS_API_KEY"),
             settings=CerebrasLLMSettings(
-                model="qwen-3-235b-a22b-instruct-2507",
+                model=os.getenv("CEREBRAS_MODEL", "gpt-oss-120b"),
                 system_instruction=system_instruction,
             ),
         )
@@ -961,6 +962,38 @@ def _configure_twilio_webhook():
         logger.error(f"Twilio webhook auto-config failed: {e}")
 
 
+def _configure_telnyx_webhook():
+    """Point the Telnyx Call Control Application at this server's /telnyx/voice webhook."""
+    api_key   = os.getenv("TELNYX_API_KEY", "").strip()
+    app_id    = os.getenv("TELNYX_CALL_CONTROL_APP_ID", "").strip()
+    public_url = _clean_public_url(os.getenv("PUBLIC_URL_TELNYX", ""))
+
+    if not all([api_key, app_id, public_url]):
+        logger.info("Telnyx webhook auto-config skipped — TELNYX_API_KEY, TELNYX_CALL_CONTROL_APP_ID, or PUBLIC_URL_TELNYX not set")
+        return
+
+    try:
+        import urllib.request, urllib.error
+        webhook_url = f"{public_url}/telnyx/voice"
+        payload = json.dumps({"webhook_event_url": webhook_url, "webhook_event_failover_url": ""}).encode()
+        req = urllib.request.Request(
+            f"https://api.telnyx.com/v2/call_control_applications/{app_id}",
+            data=payload,
+            method="PATCH",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status in (200, 201):
+                logger.info(f"Telnyx webhook configured: app {app_id} → {webhook_url}")
+            else:
+                logger.warning(f"Telnyx webhook config returned status {resp.status}")
+    except Exception as e:
+        logger.error(f"Telnyx webhook auto-config failed: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Pre-load Silero VAD ONNX session once (avoids 50–250ms load per session).
@@ -981,6 +1014,8 @@ async def lifespan(app: FastAPI):
 
     # Auto-configure Twilio inbound phone number webhook so callers reach the bot.
     _configure_twilio_webhook()
+    # Auto-configure Telnyx Call Control Application webhook.
+    _configure_telnyx_webhook()
 
     yield
 
@@ -1602,6 +1637,34 @@ async def graph_poll(pc_id: str):
     return {"events": events, "closed": False}
 
 
+@app.post("/api/translate")
+async def translate_text(request: Request):
+    """Translate Chinese text to English using Cerebras."""
+    try:
+        data = await request.json()
+    except Exception:
+        return Response(status_code=400, content="Invalid JSON")
+    text = (data.get("text") or "").strip()
+    if not text:
+        return {"translation": ""}
+    try:
+        from cerebras.cloud.sdk import Cerebras as _Cerebras
+        client = _Cerebras(api_key=os.getenv("CEREBRAS_API_KEY"))
+        resp = client.chat.completions.create(
+            model=os.getenv("CEREBRAS_MODEL", "gpt-oss-120b"),
+            messages=[
+                {"role": "system", "content": "Translate the following Chinese text to English. Output only the English translation, nothing else."},
+                {"role": "user", "content": text},
+            ],
+            max_tokens=512,
+        )
+        translation = resp.choices[0].message.content.strip()
+        return {"translation": translation}
+    except Exception as e:
+        logger.warning(f"[translate] failed: {e}")
+        return {"translation": ""}
+
+
 @app.post("/api/hangup")
 async def hangup(request: Request):
     """Explicit browser hangup so provider sockets are released immediately."""
@@ -1969,6 +2032,308 @@ async def twilio_ws(websocket: WebSocket):
 
 
 # ---------------------------------------------------------------------------
+# Telnyx phone integration
+# ---------------------------------------------------------------------------
+
+
+async def run_telnyx_bot(websocket: WebSocket):
+    """Run the GRC bot over a Telnyx Call Control media-streaming WebSocket.
+
+    The call is answered (and streaming started) by the /telnyx/voice webhook via
+    the Call Control REST API. Telnyx then connects to this WS using its native
+    streaming protocol (stream_id, start.call_control_id, media_format), so we use
+    TelnyxFrameSerializer.
+    """
+    await websocket.accept()
+
+    stream_id = None
+    call_control_id = None
+    outbound_encoding = "PCMU"
+
+    async for raw in websocket.iter_text():
+        msg = json.loads(raw)
+        event = msg.get("event")
+        if event == "connected":
+            continue
+        if event == "start":
+            stream_id = msg.get("stream_id")
+            start = msg.get("start", {})
+            call_control_id = start.get("call_control_id")
+            enc = (start.get("media_format", {}).get("encoding") or "PCMU").upper()
+            outbound_encoding = "PCMA" if ("PCMA" in enc or "ALAW" in enc) else "PCMU"
+            logger.info(f"Telnyx call started — stream_id={stream_id} call_control_id={call_control_id} enc={outbound_encoding}")
+            break
+        if event == "stop":
+            logger.info("Telnyx call stopped before start event")
+            return
+
+    if not stream_id:
+        logger.warning("No Telnyx start event received")
+        return
+
+    serializer = TelnyxFrameSerializer(
+        stream_id=stream_id,
+        call_control_id=call_control_id,
+        outbound_encoding=outbound_encoding,
+        inbound_encoding="PCMU",
+        api_key=os.getenv("TELNYX_API_KEY"),
+    )
+
+    transport = FastAPIWebsocketTransport(
+        websocket=websocket,
+        params=FastAPIWebsocketParams(
+            audio_in_enabled=True,
+            audio_out_enabled=True,
+            # Larger 160ms output frames (default 4 = 40ms). Choppiness scaled
+            # monotonically with frame size on the Telnyx RTP leg: 20ms worse,
+            # 40ms baseline, 80ms better — so we push further for jitter tolerance.
+            # Buffering cost is negligible; barge-in still flushes the queue.
+            audio_out_10ms_chunks=16,
+            serializer=serializer,
+        ),
+    )
+
+    _events = await asyncio.to_thread(get_events)
+    _events_block = format_events_for_system_prompt(_events)
+    system_instruction = SYSTEM_INSTRUCTION_GRC + "\n\n" + _events_block
+    logger.info(f"[Telnyx CAG] Embedded {len(_events)} events into system instruction")
+
+    stt = create_stt("elevenlabs")
+    llm = create_llm("cerebras", system_instruction=system_instruction)
+    tts = create_tts("elevenlabs")
+    filler_tts = FillerTTSProcessor()
+
+    async def handle_get_bin_collection_day_telnyx(params: FunctionCallParams):
+        address = _correct_address(params.arguments.get("address", "").strip())
+        logger.info(f"[Telnyx] get_bin_collection_day({address})")
+        _STREET_TYPES = {"street","st","road","rd","avenue","ave","lane","ln",
+                         "drive","dr","place","pl","court","ct","way","crescent","cres","close"}
+        _words = address.lower().split()
+        _has_number = any(w[0].isdigit() for w in _words)
+        _has_street_type = bool(_STREET_TYPES.intersection(_words))
+        if len(_words) < 2 or not (_has_number or _has_street_type):
+            await params.result_callback({"result": "I need a street address to look that up — could you tell me your street address?"})
+            return
+        try:
+            from grc_wastetrack import get_bin_collection_details as _wt, format_voice_response as _wt_fmt
+            wt_result = await asyncio.to_thread(_wt, address)
+            voice = _wt_fmt(wt_result)
+            if voice:
+                await params.result_callback({"result": voice})
+                return
+            _filler = FILLERS[filler_tts._filler_index % len(FILLERS)]
+            filler_tts._filler_index += 1
+            await llm.push_frame(TTSSpeakFrame(text=_filler), FrameDirection.DOWNSTREAM)
+            result = await asyncio.to_thread(get_bin_collection_zone, {"address": address})
+            await params.result_callback({"result": result})
+        except Exception as e:
+            logger.error(f"[Telnyx] get_bin_collection_day failed: {e}")
+            await params.result_callback({"error": "I couldn't look up the bin collection day. Please try again."})
+
+    llm.register_function("get_bin_collection_day", handle_get_bin_collection_day_telnyx)
+
+    telnyx_transfer_in_progress = False
+
+    async def transfer_telnyx_call_to_human() -> str | None:
+        nonlocal telnyx_transfer_in_progress
+        if telnyx_transfer_in_progress:
+            return None
+        telnyx_transfer_in_progress = True
+        transfer_number = os.getenv("TRANSFER_PHONE_NUMBER", "").strip()
+        if not transfer_number:
+            telnyx_transfer_in_progress = False
+            return "I'm sorry, transfer is not available right now. Please call us on 9330 6400."
+        try:
+            import aiohttp
+            logger.info(f"[Telnyx TRANSFER] Redirecting call_control_id={call_control_id} to {transfer_number}")
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"https://api.telnyx.com/v2/calls/{call_control_id}/actions/transfer",
+                    json={"to": transfer_number},
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {os.getenv('TELNYX_API_KEY')}",
+                    },
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status in (200, 202):
+                        logger.info(f"[Telnyx TRANSFER] Success — status {resp.status}")
+                        return None
+                    else:
+                        text = await resp.text()
+                        logger.error(f"[Telnyx TRANSFER] Failed: {resp.status} {text}")
+                        telnyx_transfer_in_progress = False
+                        return "I wasn't able to transfer the call. Please call us directly on 9330 6400."
+        except Exception as e:
+            logger.error(f"[Telnyx TRANSFER] Exception: {e}")
+            telnyx_transfer_in_progress = False
+            return "I wasn't able to transfer the call. Please call us directly on 9330 6400."
+
+    async def handle_transfer_to_human_telnyx(params: FunctionCallParams):
+        result = await transfer_telnyx_call_to_human()
+        await params.result_callback({"result": result or "Transferring you now. Please hold."})
+
+    llm.register_function("transfer_to_human", handle_transfer_to_human_telnyx)
+
+    async def handle_get_future_events_telnyx(params: FunctionCallParams):
+        result = await asyncio.to_thread(get_future_events, 30)
+        await params.result_callback({"result": result})
+
+    llm.register_function("get_future_events", handle_get_future_events_telnyx)
+
+    get_bin_collection_day_schema = FunctionSchema(
+        name="get_bin_collection_day",
+        description=(
+            "Look up the bin collection day for a resident's address. "
+            "Only call this tool once the resident has provided a specific street address. "
+            "Do NOT call this tool if you only have a vague question — ask for the address first."
+        ),
+        properties={"address": {"type": "string", "description": "Full street address within the Georges River LGA."}},
+        required=["address"],
+    )
+    transfer_to_human_schema = FunctionSchema(
+        name="transfer_to_human",
+        description=(
+            "Transfer the caller to a human council officer. "
+            "Call this when the user says they want to speak to a person, a human, an agent, "
+            "or requests to be transferred or escalated."
+        ),
+        properties={},
+        required=[],
+    )
+    get_future_events_schema = FunctionSchema(
+        name="get_future_events",
+        description=(
+            "Fetch GRC events beyond the next 30 days. Call this when the user asks about "
+            "events further in the future. Do NOT call this for events within the next 30 days."
+        ),
+        properties={},
+        required=[],
+    )
+    context = LLMContext(
+        tools=ToolsSchema(standard_tools=[
+            get_bin_collection_day_schema,
+            transfer_to_human_schema,
+            get_future_events_schema,
+        ])
+    )
+
+    user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
+        context,
+        user_params=LLMUserAggregatorParams(
+            vad_analyzer=SileroVADAnalyzer(),
+            user_mute_strategies=[MuteUntilFirstBotCompleteUserMuteStrategy()],
+        ),
+    )
+    lang_switch = LanguageSwitchProcessor(
+        tts=tts,
+        voice_id=_env("ELEVENLABS_VOICE_ID"),
+        filler_tts=filler_tts,
+        context=context,
+    )
+    transfer_processor = TransferRequestProcessor(
+        on_transfer_request=transfer_telnyx_call_to_human,
+        immediate_message="Transferring you now. Please hold.",
+    )
+
+    pipeline = Pipeline([
+        transport.input(),
+        stt,
+        transfer_processor,
+        lang_switch,
+        user_aggregator,
+        llm,
+        filler_tts,
+        tts,
+        transport.output(),
+        assistant_aggregator,
+    ])
+
+    task = PipelineTask(
+        pipeline,
+        params=PipelineParams(enable_metrics=True, enable_usage_metrics=True),
+        observers=[LatencyObserver()],
+    )
+
+    @transport.event_handler("on_client_connected")
+    async def on_client_connected(transport, client):
+        logger.info("Telnyx client connected")
+        context.add_message({
+            "role": "system",
+            "content": (
+                "Greet the caller and ask for their language preference. Say exactly: "
+                "'Hi, I'm Maya from Georges River Council — would you like to continue in English or Mandarin?'"
+            ),
+        })
+        await task.queue_frames([LLMRunFrame()])
+
+    @transport.event_handler("on_client_disconnected")
+    async def on_client_disconnected(transport, client):
+        logger.info("Telnyx client disconnected")
+        await task.cancel()
+
+    runner = PipelineRunner(handle_sigint=False)
+    await runner.run(task)
+
+
+@app.post("/telnyx/voice")
+async def telnyx_voice(request: Request):
+    """Telnyx Call Control webhook.
+
+    Call Control apps send JSON events and expect commands back via the REST API
+    (they do NOT execute returned XML). On an inbound call.initiated we answer the
+    call and start bidirectional media streaming to /telnyx/ws in one command.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return {"ok": True}
+
+    data = body.get("data", {})
+    event_type = data.get("event_type")
+    payload = data.get("payload", {})
+    call_control_id = payload.get("call_control_id")
+    logger.info(f"[Telnyx] webhook event={event_type} call_control_id={call_control_id}")
+
+    if event_type == "call.initiated" and payload.get("direction") == "incoming" and call_control_id:
+        host = request.headers.get("host", "")
+        ws_url = f"wss://{host}/telnyx/ws"
+        api_key = os.getenv("TELNYX_API_KEY", "")
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"https://api.telnyx.com/v2/calls/{call_control_id}/actions/answer",
+                    json={
+                        "stream_url": ws_url,
+                        "stream_track": "inbound_track",
+                        "stream_bidirectional_mode": "rtp",
+                        "stream_bidirectional_codec": "PCMU",
+                    },
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {api_key}",
+                    },
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status in (200, 202):
+                        logger.info(f"[Telnyx] answered + streaming started → {ws_url}")
+                    else:
+                        text = await resp.text()
+                        logger.error(f"[Telnyx] answer failed: {resp.status} {text}")
+        except Exception as e:
+            logger.error(f"[Telnyx] answer exception: {e}")
+
+    return {"ok": True}
+
+
+@app.websocket("/telnyx/ws")
+async def telnyx_ws(websocket: WebSocket):
+    """WebSocket endpoint for Telnyx Media Streams."""
+    await run_telnyx_bot(websocket)
+
+
+# ---------------------------------------------------------------------------
 # Live Translation Mode
 # ---------------------------------------------------------------------------
 
@@ -2200,7 +2565,7 @@ async def run_translation_participant(
     from pipecat.services.cerebras.llm import CerebrasLLMService
     translation_llm = CerebrasLLMService(
         api_key=os.getenv("CEREBRAS_API_KEY"),
-        settings=CerebrasLLMService.Settings(model="gpt-oss-120b"),
+        settings=CerebrasLLMService.Settings(model=os.getenv("CEREBRAS_MODEL", "gpt-oss-120b")),
     )
 
     # TTS: voice only — no language/model override so ElevenLabs uses its
@@ -2651,7 +3016,7 @@ async def run_auto_translation(
     from pipecat.services.cerebras.llm import CerebrasLLMService
     translation_llm = CerebrasLLMService(
         api_key=os.getenv("CEREBRAS_API_KEY"),
-        settings=CerebrasLLMService.Settings(model="llama3.1-8b"),
+        settings=CerebrasLLMService.Settings(model=os.getenv("CEREBRAS_MODEL", "gpt-oss-120b")),
     )
 
     # Use a multilingual voice — handles both languages without voice-switching

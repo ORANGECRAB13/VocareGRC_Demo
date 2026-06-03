@@ -80,6 +80,10 @@ function fireAndForgetHangup(pcId) {
   void hangupPcId(pcId, { keepalive: true });
 }
 
+function hasChinese(text) {
+  return /[一-鿿㐀-䶿]/.test(text);
+}
+
 function useAgentCall() {
   const [callState, setCallState] = useAgentState('idle'); // idle | connecting | connected | error
   const [transcript, setTranscript] = useAgentState([]);
@@ -98,9 +102,27 @@ function useAgentCall() {
   const activeCallRef = useAgentRef(0);
   const connectingRef = useAgentRef(false);
   const micModeRef = useAgentRef('hold');
+  const pollRef      = useAgentRef(null);
 
-  const addLine = (speaker, text) =>
-    setTranscript(prev => [...prev, { speaker, text, id: Date.now() + Math.random() }]);
+  const addBotLine = (text) => {
+    const id = Date.now() + Math.random();
+    const chinese = hasChinese(text);
+    setTranscript(prev => [...prev, { text, id, chinese, translation: null }]);
+    if (chinese) {
+      fetch('/api/translate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      })
+        .then(r => r.json())
+        .then(({ translation }) => {
+          if (translation) {
+            setTranscript(prev => prev.map(l => l.id === id ? { ...l, translation } : l));
+          }
+        })
+        .catch(() => {});
+    }
+  };
 
   const cleanup = useAgentCb((opts = {}) => {
     const { notifyServer = false, resetTranscript = false, bumpGeneration = false, updateState = true } = opts;
@@ -112,6 +134,7 @@ function useAgentCall() {
     const audio = remoteAudioRef.current;
 
     if (pingRef.current)      { clearInterval(pingRef.current); pingRef.current = null; }
+    if (pollRef.current)      { clearInterval(pollRef.current); pollRef.current = null; }
     if (discTimerRef.current) { clearTimeout(discTimerRef.current); discTimerRef.current = null; }
     if (dcRef.current) {
       dcRef.current.onopen = null;
@@ -208,15 +231,7 @@ function useAgentCall() {
         }, 2000);
       };
 
-      dc.onmessage = (e) => {
-        if (activeCallRef.current !== callToken) return;
-        try {
-          const msg = JSON.parse(e.data);
-          if (msg.type === 'transcript') {
-            addLine(msg.role === 'user' ? 'user' : 'agent', msg.text);
-          }
-        } catch (_) {}
-      };
+      dc.onmessage = () => {};
 
       pc.ontrack = (event) => {
         if (activeCallRef.current !== callToken) return;
@@ -294,6 +309,22 @@ function useAgentCall() {
       pcIdRef.current = answer.pc_id || pcId;
       await pc.setRemoteDescription(answer);
       connectingRef.current = false;
+
+      // Start polling graph/poll for bot transcript events
+      const pollPcId = pcIdRef.current;
+      pollRef.current = setInterval(async () => {
+        if (activeCallRef.current !== callToken) return;
+        try {
+          const r = await fetch(`/api/graph/poll?pc_id=${encodeURIComponent(pollPcId)}`);
+          if (!r.ok) return;
+          const { events } = await r.json();
+          for (const ev of (events || [])) {
+            if (ev.type === 'bot_transcription' && ev.text) {
+              addBotLine(ev.text);
+            }
+          }
+        } catch (_) {}
+      }, 300);
 
     } catch (err) {
       console.error('[AgentCall]', err);
@@ -411,10 +442,10 @@ function AgentCallPanel({ agent }) {
         </span>
       </div>
 
-      {/* Transcript area — only shown when connected or has history */}
+      {/* Transcript area — always shown when connected or has history */}
       {(isConnected || transcript.length > 0) && (
         <div ref={transcriptRef} style={{
-          height: isMobile ? 220 : 160, overflowY: 'auto', padding: '14px 16px',
+          height: isMobile ? 220 : 200, overflowY: 'auto', padding: '14px 16px',
           background: '#fff', borderBottom: '1px solid #F0F1F3',
           display: 'flex', flexDirection: 'column', gap: 8
         }}>
@@ -424,19 +455,28 @@ function AgentCallPanel({ agent }) {
             </div>
           )}
           {transcript.map(line => (
-            <div key={line.id} style={{
-              display: 'flex',
-              justifyContent: line.speaker === 'user' ? 'flex-end' : 'flex-start'
-            }}>
+            <div key={line.id} style={{ display: 'flex', justifyContent: 'flex-start' }}>
               <div style={{
-                maxWidth: '75%', padding: '7px 12px', borderRadius: 10, fontSize: 12, fontWeight: 500,
-                overflowWrap: 'anywhere',
-                background: line.speaker === 'user' ? '#C8232C' : '#F4F5F6',
-                color: line.speaker === 'user' ? '#fff' : '#1A1A1A',
-                borderBottomRightRadius: line.speaker === 'user' ? 2 : 10,
-                borderBottomLeftRadius: line.speaker === 'agent' ? 2 : 10,
+                maxWidth: '90%', padding: '8px 12px', borderRadius: 10,
+                overflowWrap: 'anywhere', background: '#F4F5F6',
+                borderBottomLeftRadius: 2,
               }}>
-                {line.text}
+                {line.chinese ? (
+                  <>
+                    <div style={{ fontSize: 14, fontWeight: 800, color: '#1A1A1A', lineHeight: 1.5 }}>
+                      {line.text}
+                    </div>
+                    {line.translation ? (
+                      <div style={{ fontSize: 11, fontWeight: 500, color: '#767676', marginTop: 4, lineHeight: 1.4 }}>
+                        {line.translation}
+                      </div>
+                    ) : (
+                      <div style={{ fontSize: 11, color: '#bbb', marginTop: 4, fontStyle: 'italic' }}>translating…</div>
+                    )}
+                  </>
+                ) : (
+                  <div style={{ fontSize: 12, fontWeight: 500, color: '#1A1A1A' }}>{line.text}</div>
+                )}
               </div>
             </div>
           ))}
