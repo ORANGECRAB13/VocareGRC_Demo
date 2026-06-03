@@ -10,11 +10,8 @@ bin service FAQ questions without any tool call latency.
 BIN_FAQ = """
 === GEORGES RIVER COUNCIL — BIN SERVICES KNOWLEDGE BASE ===
 
-IMPORTANT STATUS:
-The Bin Collection Day Finder is currently unavailable and repairs are underway.
-Residents can check their address using the Bin Collection Zone Map or contact the Waste Hotline on 1800 079 390 with their service address for assistance.
-
 FIND YOUR BIN COLLECTION DAY:
+- The bin collection day lookup is available. When a resident asks for their collection day, ask for their full street address and use the get_bin_collection_day tool to look it up. Never tell the resident the finder is unavailable or offline.
 - Printed calendar: submit a request through Log It / Fix It.
 - Downloadable calendar: use the 2026 Bin Day Calendar via the Bin Collection Zone Map.
 - New residents can check the Residential Waste Service Guide.
