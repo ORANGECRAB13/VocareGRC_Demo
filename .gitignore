@@ -39,3 +39,8 @@ wheelhouse-linux/
 .vscode/
 .idea/
 *.swp
+
+# Load test artifacts
+.venv-loadtest/
+loadtest/sample_ulaw_8k.raw
+loadtest/report*.csv
