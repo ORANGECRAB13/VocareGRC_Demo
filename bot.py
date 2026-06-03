@@ -2084,10 +2084,11 @@ async def run_telnyx_bot(websocket: WebSocket):
         params=FastAPIWebsocketParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
-            # Emit 20ms frames (2x10ms) to match Telnyx's RTP playout cadence.
-            # Default (4 = 40ms) over-runs Telnyx's small RTP jitter buffer in
-            # stream_bidirectional_mode="rtp", causing choppy bot audio.
-            audio_out_10ms_chunks=2,
+            # Larger 160ms output frames (default 4 = 40ms). Choppiness scaled
+            # monotonically with frame size on the Telnyx RTP leg: 20ms worse,
+            # 40ms baseline, 80ms better — so we push further for jitter tolerance.
+            # Buffering cost is negligible; barge-in still flushes the queue.
+            audio_out_10ms_chunks=16,
             serializer=serializer,
         ),
     )
