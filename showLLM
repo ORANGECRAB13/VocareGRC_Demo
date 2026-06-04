@@ -28,7 +28,21 @@ az containerapp show \
   --name "$APP_NAME" \
   --resource-group "$RESOURCE_GROUP" \
   --query "properties.template.containers[0].env[?contains(name, 'LLM') || contains(name, 'OPENAI') || contains(name, 'CEREBRAS') || contains(name, 'GROQ') || contains(name, 'MISTRAL') || contains(name, 'DEEPSEEK')]" \
-  --output table
+  --output json | python3 -c '
+import json
+import sys
+
+rows = json.load(sys.stdin)
+print("{:<22} {:<40} {}".format("Name", "Value", "SecretRef"))
+print("{:<22} {:<40} {}".format("-" * 22, "-" * 40, "-" * 20))
+for row in rows:
+    name = row.get("name", "")
+    secret = row.get("secretRef", "") or ""
+    value = row.get("value", "") or ""
+    sensitive = any(token in name.upper() for token in ("API", "KEY", "SECRET", "TOKEN"))
+    shown = "<set>" if sensitive and value else value
+    print("{:<22} {:<40} {}".format(name, shown, secret))
+'
 
 echo
 echo "Secret names:"

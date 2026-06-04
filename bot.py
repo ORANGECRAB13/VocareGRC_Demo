@@ -218,6 +218,16 @@ def _llm_api_key(provider: str) -> str:
     return _env(f"{provider.upper()}_API_KEY") or _env(f"{provider.upper()}_API")
 
 
+def _validate_llm_key(provider: str, api_key: str) -> None:
+    if not api_key:
+        raise RuntimeError(f"{provider.upper()} API key is not set")
+    if provider != "openai" and api_key.startswith("sk-proj-"):
+        raise RuntimeError(
+            f"LLM_PROVIDER={provider} is configured with an OpenAI project key. "
+            f"Set {provider.upper()}_API_KEY to a real {provider} key."
+        )
+
+
 def _float_env(name: str, default: float) -> float:
     raw = _env(name)
     if not raw:
@@ -785,6 +795,8 @@ def create_llm(name: str, system_instruction: str = ""):
     """Create an LLM service by name."""
     provider = _llm_provider(name)
     model = _llm_model(provider)
+    api_key = _llm_api_key(provider)
+    _validate_llm_key(provider, api_key)
     logger.info(f"Creating LLM provider={provider} model={model}")
 
     if provider == "openai":
@@ -792,7 +804,7 @@ def create_llm(name: str, system_instruction: str = ""):
         if _env("LLM_BASE_URL") or _env("OPENAI_BASE_URL"):
             kwargs["base_url"] = _env("LLM_BASE_URL") or _env("OPENAI_BASE_URL")
         return OpenAILLMService(
-            api_key=_llm_api_key(provider),
+            api_key=api_key,
             settings=OpenAILLMService.Settings(
                 model=model,
                 system_instruction=system_instruction,
@@ -801,7 +813,7 @@ def create_llm(name: str, system_instruction: str = ""):
         )
     if provider == "deepseek":
         return OpenAILLMService(
-            api_key=_llm_api_key(provider),
+            api_key=api_key,
             base_url=_env("LLM_BASE_URL") or _env("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
             settings=OpenAILLMService.Settings(
                 model=model,
@@ -818,7 +830,7 @@ def create_llm(name: str, system_instruction: str = ""):
         from pipecat.services.cerebras.llm import CerebrasLLMService, CerebrasLLMSettings
 
         return CerebrasLLMService(
-            api_key=_llm_api_key(provider),
+            api_key=api_key,
             settings=CerebrasLLMSettings(
                 model=model,
                 system_instruction=system_instruction,
@@ -828,7 +840,7 @@ def create_llm(name: str, system_instruction: str = ""):
         from pipecat.services.mistral.llm import MistralLLMService
 
         return MistralLLMService(
-            api_key=_llm_api_key(provider),
+            api_key=api_key,
             settings=MistralLLMService.Settings(
                 model=model,
                 system_instruction=system_instruction,
@@ -838,7 +850,7 @@ def create_llm(name: str, system_instruction: str = ""):
         from pipecat.services.groq.llm import GroqLLMService
 
         return GroqLLMService(
-            api_key=_llm_api_key(provider),
+            api_key=api_key,
             settings=GroqLLMService.Settings(
                 model=model,
                 system_instruction=system_instruction,
