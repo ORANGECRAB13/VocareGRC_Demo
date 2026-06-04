@@ -47,5 +47,5 @@ az containerapp logs show -n vocare-grc-bot -g vocare-grc --tail 200 | grep -iE 
   only reacts under **sustained** load — use `--listen-secs 90` to see replicas climb.
 - Each synthetic call uses a fake `call_control_id`; the serializer's auto-hangup
   REST call fails harmlessly at end-of-call (just a log line).
-- Runs against the LIVE app and spends ElevenLabs/Cerebras credits — cap concurrency
+- Runs against the LIVE app and spends ElevenLabs/OpenAI credits — cap concurrency
   and watch the provider dashboards.

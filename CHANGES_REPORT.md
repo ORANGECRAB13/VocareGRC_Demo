@@ -20,18 +20,17 @@ image. To build/run locally without ACR access:
 
 Run: `docker compose -f docker-compose.local.yml up --build`
 
-## 2. Cerebras model read from env (no hardcoded models)
+## 2. LLM model read from env (no hardcoded models)
 
-`bot.py` — replaced all three hardcoded model names (`qwen-3-235b-a22b-instruct-2507`,
-`llama3.1-8b`, `gpt-oss-120b`) with `os.getenv("CEREBRAS_MODEL", "gpt-oss-120b")`.
-Fixes a 404 where a decommissioned model was hardcoded. Set `CEREBRAS_MODEL` in env.
+`bot.py` — LLM model selection is now driven by `OPENAI_MODEL`, with API access via
+`OPENAI_API`. Earlier provider-specific model settings have been superseded.
 
 ## 3. Agents-tab live transcript UI
 
 - **`static/grc-agents.jsx`** — the call panel now polls `/api/graph/poll` and renders
   **bot-only** transcripts. Chinese replies render as **bold Chinese** with the English
   translation beneath (via a new translate endpoint); user speech is not shown.
-- **`bot.py`** — new `POST /api/translate` (Cerebras) for Chinese→English.
+- **`bot.py`** — new `POST /api/translate` (OpenAI) for Chinese→English.
 
 ## 4. Telnyx phone integration (Call Control)
 
@@ -45,7 +44,7 @@ answer the call and start streaming via the REST API — returning TeXML does no
 - `POST /telnyx/voice` — on `call.initiated` (incoming), calls
   `/v2/calls/{id}/actions/answer` with `stream_url`, `stream_bidirectional_mode=rtp`,
   `stream_bidirectional_codec=PCMU` → answers + starts bidirectional streaming.
-- `run_telnyx_bot()` + `/telnyx/ws` — runs the GRC agent (ElevenLabs STT/TTS, Cerebras
+- `run_telnyx_bot()` + `/telnyx/ws` — runs the GRC agent (ElevenLabs STT/TTS, OpenAI
   LLM, language switching, bin lookup, transfer) over the native Telnyx WS protocol.
   Self-contained per connection (no shared in-memory state) → replica-independent.
 - Transfer uses `/v2/calls/{call_control_id}/actions/transfer`.
@@ -112,7 +111,7 @@ Applied via `az` (infra, not code) on the live app:
 - **Horizontal scaling works**, but the HTTP-concurrency autoscaler (30 s poll, 300 s
   cooldown) only reacts under **sustained** load — short bursts ran on 1–2 replicas.
 - **Upstream APIs were not the bottleneck** at this level (no 429s) — ElevenLabs/
-  Cerebras tiers are sufficient for ~40 concurrent in these tests.
+  OpenAI capacity was sufficient for ~40 concurrent in these tests.
 
 ### Recommendations
 - For spiky telephony traffic, consider `min-replicas 2–3` to cut cold-start latency,
@@ -120,7 +119,7 @@ Applied via `az` (infra, not code) on the live app:
 - Per-replica (1 vCPU/2 GiB) handles ~5–10 concurrent calls before TTFA noticeably
   climbs; bump to 2 vCPU/4 GiB if you want more headroom per replica.
 - Re-run sustained tests at higher concurrency (e.g. 40–60 held for several minutes)
-  to find the true ElevenLabs/Cerebras concurrency ceiling.
+  to find the true ElevenLabs/OpenAI concurrency ceiling.
 
 ## Deployment
 

@@ -10,7 +10,7 @@ bypassing the /telnyx/voice webhook and real Telnyx. Each synthetic call:
   4. sends `stop` and closes
 
 The orchestrator ramps concurrency and AUTO-STOPS at the failure wall (error
-rate / TTFA blow-up), so you don't need exact ElevenLabs/Cerebras quotas — the
+rate / TTFA blow-up), so you don't need exact ElevenLabs/OpenAI quotas — the
 ramp discovers them. 429s show up as WS close/handshake errors here and in the
 container logs.
 

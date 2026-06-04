@@ -24,7 +24,7 @@ GRC PRESENTATION DEMO/
 ├── .env.example              # Environment variable template
 │
 ├── GRC_pilot/                # Core agent logic
-│   ├── tools.py              # Bin collection tool (Wastetrack + polygon fallback)
+│   ├── tools.py              # Direct Wastetrack bin collection tool
 │   ├── grc_wastetrack.py     # GRC Wastetrack API scraper (persistent session)
 │   ├── grc_events.py         # GRC What's On RSS feed parser + 30-min cache
 │   ├── bin_zones.py          # Polygon zone definitions + point-in-polygon lookup
@@ -33,7 +33,7 @@ GRC PRESENTATION DEMO/
 │   ├── benchmark_correction.py
 │   ├── main.py               # ElevenLabs SDK version (standalone alternative)
 │   ├── schedules/            # Bin schedule data
-│   └── api/                  # Node.js geographic microservice (polygon fallback)
+│   └── api/                  # Legacy Node.js geographic microservice
 │       ├── bin-zone-api.js
 │       ├── package.json
 │       └── zones/            # GeoJSON polygon files per collection day
@@ -57,30 +57,47 @@ GRC PRESENTATION DEMO/
 ### Pipeline (bot.py)
 
 ```
-Deepgram STT → ThinkerProcessor → ContextEnricher → LLM (Cerebras) → ElevenLabs TTS
+Deepgram STT → ThinkerProcessor → ContextEnricher → LLM (`LLM_PROVIDER`) → ElevenLabs TTS
                      ↓
               Wastetrack prefetch
               (async, fires on intent detection)
 ```
 
-- **ThinkerProcessor** — Runs a fast background LLM (Cerebras `llama3.1-8b`) to classify intent and extract entities. If bin collection intent + address is detected, it immediately starts the Wastetrack HTTP call in the background, so the result is often ready before the main LLM even calls the tool.
+- **ThinkerProcessor** — Runs a fast background LLM to classify intent and extract entities. If bin collection intent + address is detected, it immediately starts the Wastetrack HTTP call in the background, so the result is often ready before the main LLM even calls the tool.
 - **ContextEnricherProcessor** — Injects thinker state into the LLM context. Skips injection for generic events intent so the LLM naturally asks a clarifying question instead of dumping the full list.
 - **LanguageSwitchProcessor** — Detects language changes and hot-swaps both the TTS voice and the LLM model without reconnecting.
 - **FillerTTSProcessor** — Plays short filler phrases ("One moment…") while tool calls are in flight to keep conversation natural.
 - **CAG (Cache Augmented Generation)** — Events are fetched from the GRC RSS feed at session start and embedded directly into the system prompt. No tool call needed for events questions.
 
-### LLM Models (Cerebras)
+### LLM Provider
 
-| Context | Model |
-|---|---|
-| English conversations | `gpt-oss-120b` |
-| Non-English conversations | `qwen-3-235b-a22b-instruct-2507` |
-| Thinker (intent classifier) | `llama3.1-8b` |
+All LLM-backed flows use `LLM_PROVIDER` and `LLM_MODEL`. Supported providers include
+`openai`, `cerebras`, `groq`, `mistral`, and `deepseek`. Provider-specific model env vars
+such as `OPENAI_MODEL` or `CEREBRAS_MODEL` are used when `LLM_MODEL` is not set.
+
+Quick Azure LLM switches:
+
+```bash
+./changeLLM openai gpt-4o-mini
+./changeLLM cerebras gpt-oss-120b
+./setLLMKey openai
+./showLLM
+```
+
+Voice expressiveness is controlled through ElevenLabs TTS env vars. Lower stability is
+more expressive; higher stability is flatter but more consistent.
+
+```env
+ELEVENLABS_TTS_STABILITY=0.35
+ELEVENLABS_TTS_SIMILARITY_BOOST=0.75
+ELEVENLABS_TTS_EN_STABILITY=0.35
+ELEVENLABS_TTS_ZH_STABILITY=0.55
+```
 
 ### Bin Collection Lookup
 
 1. **Primary** — GRC Wastetrack API (`v2.wastetrack.net`): returns exact next collection date per service type.
-2. **Fallback** — Google Geocoding + local GeoJSON polygon lookup, returning the collection zone and weekly schedule.
+2. **No geocoding fallback in the live bot** — phone-call bin lookups use the direct Wastetrack council lookup only.
 
 ---
 
@@ -89,8 +106,8 @@ Deepgram STT → ThinkerProcessor → ContextEnricher → LLM (Cerebras) → Ele
 ### Requirements
 
 - Python 3.11+
-- Node.js 20+ (for the polygon fallback API)
-- API keys: Cerebras, ElevenLabs, Deepgram, Google Maps
+- Node.js 20+ (only needed for legacy API utilities)
+- API keys: your selected LLM provider, ElevenLabs, Deepgram
 
 ### 1. Clone and install dependencies
 
@@ -107,10 +124,11 @@ cd ../..
 Copy `.env.example` to `.env` and fill in your keys:
 
 ```env
-CEREBRAS_API_KEY=your_cerebras_key
+OPENAI_API=your_openai_key
+LLM_PROVIDER=openai
+LLM_MODEL=gpt-4o-mini
 ELEVENLABS_API_KEY=your_elevenlabs_key
 DEEPGRAM_API_KEY=your_deepgram_key
-GOOGLE_MAPS_API_KEY=your_google_maps_key
 
 # ElevenLabs voice IDs
 ELEVENLABS_VOICE_ID_EN=...

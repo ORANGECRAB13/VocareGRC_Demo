@@ -1,0 +1,98 @@
+#!/bin/bash
+set -euo pipefail
+
+APP_NAME="${APP_NAME:-vocare-grc-bot}"
+RESOURCE_GROUP="${RESOURCE_GROUP:-vocare-grc}"
+ENV_FILE="${ENV_FILE:-.env}"
+
+usage() {
+  cat <<EOF
+Usage: ./setLLMKey <provider> [api-key]
+
+If api-key is omitted, the script reads it from $ENV_FILE.
+
+Examples:
+  ./setLLMKey openai
+  ./setLLMKey cerebras "\$CEREBRAS_API_KEY"
+
+Environment overrides:
+  APP_NAME=$APP_NAME
+  RESOURCE_GROUP=$RESOURCE_GROUP
+  ENV_FILE=$ENV_FILE
+EOF
+}
+
+if [[ $# -lt 1 ]]; then
+  usage
+  exit 1
+fi
+
+PROVIDER="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+KEY_VALUE="${2:-}"
+
+case "$PROVIDER" in
+  openai)
+    ENV_NAME="OPENAI_API"
+    ALT_ENV_NAME="OPENAI_API_KEY"
+    SECRET_NAME="openai-api"
+    ;;
+  cerebras)
+    ENV_NAME="CEREBRAS_API_KEY"
+    ALT_ENV_NAME="CEREBRAS_API"
+    SECRET_NAME="cerebras-api-key"
+    ;;
+  groq)
+    ENV_NAME="GROQ_API_KEY"
+    ALT_ENV_NAME="GROQ_API"
+    SECRET_NAME="groq-api-key"
+    ;;
+  mistral)
+    ENV_NAME="MISTRAL_API_KEY"
+    ALT_ENV_NAME="MISTRAL_API"
+    SECRET_NAME="mistral-api-key"
+    ;;
+  deepseek)
+    ENV_NAME="DEEPSEEK_API_KEY"
+    ALT_ENV_NAME="DEEPSEEK_API"
+    SECRET_NAME="deepseek-api-key"
+    ;;
+  -h|--help)
+    usage
+    exit 0
+    ;;
+  *)
+    echo "Unsupported provider: $PROVIDER" >&2
+    echo "Supported providers: openai, cerebras, groq, mistral, deepseek" >&2
+    exit 1
+    ;;
+esac
+
+read_env_value() {
+  local key="$1"
+  [[ -f "$ENV_FILE" ]] || return 0
+  grep -E "^${key}=" "$ENV_FILE" | tail -n 1 | cut -d= -f2-
+}
+
+if [[ -z "$KEY_VALUE" ]]; then
+  KEY_VALUE="$(read_env_value "$ENV_NAME")"
+fi
+if [[ -z "$KEY_VALUE" ]]; then
+  KEY_VALUE="$(read_env_value "$ALT_ENV_NAME")"
+fi
+if [[ -z "$KEY_VALUE" ]]; then
+  echo "No key provided and neither $ENV_NAME nor $ALT_ENV_NAME is set in $ENV_FILE." >&2
+  exit 1
+fi
+
+echo "Setting Azure secret '$SECRET_NAME' and mapping env var '$ENV_NAME'..."
+az containerapp secret set \
+  --name "$APP_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --secrets "$SECRET_NAME=$KEY_VALUE"
+
+az containerapp update \
+  --name "$APP_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --set-env-vars "$ENV_NAME=secretref:$SECRET_NAME"
+
+echo "Done. $ENV_NAME is now mapped to secretref:$SECRET_NAME"
