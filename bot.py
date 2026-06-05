@@ -315,6 +315,85 @@ def _is_transfer_request(text: str) -> bool:
     return bool(TRANSFER_REQUEST_RE.search(text or ""))
 
 
+_HESITATION_FILLER_RE = re.compile(
+    r"^[\s,\.!\?，。！？、]*(?:"
+    r"u+h+|u+m+|a+h+|h+m+|h+u+h+|e+r+|o+h+|"
+    r"嗯+|啊+|呃+|哦+|唔+|诶+"
+    r")(?:[\s,\.!\?，。！？、]+(?:"
+    r"u+h+|u+m+|a+h+|h+m+|h+u+h+|e+r+|o+h+|"
+    r"嗯+|啊+|呃+|哦+|唔+|诶+"
+    r"))*[\s,\.!\?，。！？、]*$",
+    re.IGNORECASE,
+)
+
+_HESITATION_WAIT_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:sorry\s+)?(?:hold\s+on|hang\s+on|wait|one\s+(?:sec|second|moment)|"
+    r"just\s+(?:a\s+)?(?:sec|second|moment)|give\s+me\s+(?:a\s+)?(?:sec|second|moment)|"
+    r"let\s+me\s+(?:think|see|check))"
+    r"|(?:等一下|稍等|等等|等一等|请稍等|让我想一下|我想一下)"
+    r")\s*(?:please|thanks|谢谢|麻烦你)?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _hesitation_turn_delay(text: str) -> float:
+    """Return a holdoff delay when text means the caller is still thinking."""
+    stripped = (text or "").strip()
+    if not stripped:
+        return 0.0
+    if _HESITATION_FILLER_RE.match(stripped):
+        return _float_env("HESITATION_FILLER_HOLDOFF_SECS", 1.4)
+    if _HESITATION_WAIT_RE.match(stripped):
+        return _float_env("HESITATION_WAIT_HOLDOFF_SECS", 2.6)
+    return 0.0
+
+
+class HesitationTurnGateProcessor(FrameProcessor):
+    """Prevents filler/hold-on utterances from becoming completed user turns."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._pending_drop_task: asyncio.Task | None = None
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        if direction == FrameDirection.DOWNSTREAM and isinstance(frame, TranscriptionFrame):
+            delay = _hesitation_turn_delay(frame.text)
+            if delay > 0:
+                await self._cancel_pending_drop()
+                self._pending_drop_task = self.create_task(
+                    self._drop_after_delay(frame.text, delay),
+                    "hesitation_turn_drop",
+                )
+                logger.info(f"[TURN GATE] Holding hesitation transcript for {delay:.1f}s: {frame.text!r}")
+                return
+
+            await self._cancel_pending_drop()
+
+        elif direction == FrameDirection.DOWNSTREAM and isinstance(frame, InterimTranscriptionFrame):
+            if self._pending_drop_task and not self._pending_drop_task.done():
+                text = (frame.text or "").strip()
+                if text and _hesitation_turn_delay(text) == 0:
+                    await self._cancel_pending_drop()
+                    logger.info(f"[TURN GATE] Caller continued after hesitation: {text[:80]!r}")
+
+        await self.push_frame(frame, direction)
+
+    async def _cancel_pending_drop(self):
+        if self._pending_drop_task and not self._pending_drop_task.done():
+            await self.cancel_task(self._pending_drop_task)
+        self._pending_drop_task = None
+
+    async def _drop_after_delay(self, text: str, delay: float):
+        try:
+            await asyncio.sleep(delay)
+            logger.info(f"[TURN GATE] Dropped hesitation-only transcript: {text!r}")
+        except asyncio.CancelledError:
+            raise
+
+
 class TransferRequestProcessor(FrameProcessor):
     """Deterministically handles human-transfer requests before the LLM."""
 
@@ -1553,6 +1632,7 @@ async def run_bot(
     transfer_processor = TransferRequestProcessor(
         on_transfer_request=transfer_to_human_webrtc,
     )
+    hesitation_gate = HesitationTurnGateProcessor()
 
     pipeline = Pipeline(
         [
@@ -1561,6 +1641,7 @@ async def run_bot(
             transfer_processor,
             # thinker_processor,  # disabled
             lang_switch,
+            hesitation_gate,
             user_aggregator,
             # context_enricher,   # disabled
             llm,
@@ -2071,6 +2152,7 @@ async def run_twilio_bot(websocket: WebSocket):
         on_transfer_request=transfer_twilio_call_to_human,
         immediate_message="Transferring you now. Please hold.",
     )
+    hesitation_gate = HesitationTurnGateProcessor()
 
     pipeline = Pipeline(
         [
@@ -2079,6 +2161,7 @@ async def run_twilio_bot(websocket: WebSocket):
             transfer_processor,
             # thinker_processor,  # disabled
             lang_switch,
+            hesitation_gate,
             user_aggregator,
             # context_enricher,   # disabled
             llm,
@@ -2354,12 +2437,14 @@ async def run_telnyx_bot(websocket: WebSocket):
         on_transfer_request=transfer_telnyx_call_to_human,
         immediate_message="Transferring you now. Please hold.",
     )
+    hesitation_gate = HesitationTurnGateProcessor()
 
     pipeline = Pipeline([
         transport.input(),
         stt,
         transfer_processor,
         lang_switch,
+        hesitation_gate,
         user_aggregator,
         llm,
         filler_tts,
@@ -2504,18 +2589,9 @@ class AudioProbeProcessor(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
-import re as _re
-
-_FILLER_PATTERN = _re.compile(
-    r"^[\s,\.]*"
-    r"(u+h+|u+m+|a+h+|h+m+|h+u+h+|o+h+|e+r+|嗯+|啊+|哦+|呃+)"
-    r"[\s,\.]*$",
-    _re.IGNORECASE,
-)
-
 def _is_filler_only(text: str) -> bool:
     """Return True when the transcript is nothing but filler/hesitation sounds."""
-    return bool(_FILLER_PATTERN.match(text.strip()))
+    return bool(_HESITATION_FILLER_RE.match(text.strip()))
 
 
 class TranslationProcessor(FrameProcessor):
