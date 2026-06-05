@@ -1,0 +1,53 @@
+#!/bin/bash
+set -euo pipefail
+
+APP_NAME="${APP_NAME:-vocare-grc-bot}"
+RESOURCE_GROUP="${RESOURCE_GROUP:-vocare-grc}"
+
+usage() {
+  cat <<EOF
+Usage: ./showLLM
+
+Shows LLM-related Azure Container App env vars and secret names.
+
+Environment overrides:
+  APP_NAME=$APP_NAME
+  RESOURCE_GROUP=$RESOURCE_GROUP
+EOF
+}
+
+case "${1:-}" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+esac
+
+echo "Container App env vars:"
+az containerapp show \
+  --name "$APP_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --query "properties.template.containers[0].env[?contains(name, 'LLM') || contains(name, 'OPENAI') || contains(name, 'CEREBRAS') || contains(name, 'GROQ') || contains(name, 'MISTRAL') || contains(name, 'DEEPSEEK')]" \
+  --output json | python3 -c '
+import json
+import sys
+
+rows = json.load(sys.stdin)
+print("{:<22} {:<40} {}".format("Name", "Value", "SecretRef"))
+print("{:<22} {:<40} {}".format("-" * 22, "-" * 40, "-" * 20))
+for row in rows:
+    name = row.get("name", "")
+    secret = row.get("secretRef", "") or ""
+    value = row.get("value", "") or ""
+    sensitive = any(token in name.upper() for token in ("API", "KEY", "SECRET", "TOKEN"))
+    shown = "<set>" if sensitive and value else value
+    print("{:<22} {:<40} {}".format(name, shown, secret))
+'
+
+echo
+echo "Secret names:"
+az containerapp secret list \
+  --name "$APP_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --query "[?contains(name, 'openai') || contains(name, 'cerebras') || contains(name, 'groq') || contains(name, 'mistral') || contains(name, 'deepseek')]" \
+  --output table

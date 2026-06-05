@@ -6,5 +6,6 @@ loguru
 requests
 beautifulsoup4
 twilio
+openai
 cerebras-cloud-sdk
 neo4j

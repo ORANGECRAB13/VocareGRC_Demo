@@ -20,7 +20,7 @@ from elevenlabs.conversational_ai.conversation import (
 from elevenlabs.conversational_ai.default_audio_interface import DefaultAudioInterface
 
 from da_knowledge import DA_KNOWLEDGE
-from tools import get_bin_collection_zone
+from tools import get_bin_collection_details
 
 load_dotenv()
 
@@ -50,7 +50,7 @@ CONCISENESS - CRITICAL:
 GENERAL WASTE (Bins):
 If a resident asks "when is my bin collected" or "what is my collection zone", ask for their street address.
 BEFORE using any tools, verbally confirm the address with the caller (e.g. "Did you say 50 Vine Street?"). Wait for confirmation.
-Once confirmed, call the 'get_bin_collection_zone' tool with their full address. Read back the response naturally.
+Once confirmed, call the 'get_bin_collection_details' tool with their full address. Read back the response naturally.
 
 DEVELOPMENT APPLICATIONS:
 - You provide information only. You cannot lodge a DA or track statuses.
@@ -72,8 +72,8 @@ FIRST_MESSAGE = (
 
 CLIENT_TOOL_DECLARATIONS = [
     {
-        "name": "get_bin_collection_zone",
-        "description": "Get the general waste bin collection zone and schedule for an address.",
+        "name": "get_bin_collection_details",
+        "description": "Get the exact bin collection schedule for an address from the council bin lookup.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -162,7 +162,7 @@ def main() -> None:
         ensure_agent_up_to_date(client, agent_id)
 
     client_tools = ClientTools()
-    client_tools.register("get_bin_collection_zone", get_bin_collection_zone, is_async=False)
+    client_tools.register("get_bin_collection_details", get_bin_collection_details, is_async=False)
 
     config = ConversationInitiationData(
         conversation_config_override={

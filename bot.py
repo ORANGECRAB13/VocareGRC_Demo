@@ -13,6 +13,7 @@ import os
 import re
 import sys
 import random
+import time
 from datetime import datetime
 from dataclasses import dataclass, field
 from contextlib import asynccontextmanager
@@ -20,7 +21,7 @@ from pathlib import Path
 from typing import Awaitable, Callable, Dict
 
 sys.path.insert(0, str(Path(__file__).parent / "GRC_pilot"))
-from tools import get_bin_collection_zone, _correct_address  # noqa: E402
+from tools import _correct_address  # noqa: E402
 from grc_events import get_events, format_events_for_system_prompt, get_future_events  # noqa: E402
 from da_knowledge import DA_KNOWLEDGE  # noqa: E402
 from bin_faq import BIN_FAQ  # noqa: E402
@@ -173,12 +174,11 @@ from pipecat.processors.aggregators.llm_response_universal import (
 from pipecat.turns.user_mute.mute_until_first_bot_complete_user_mute_strategy import (
     MuteUntilFirstBotCompleteUserMuteStrategy,
 )
-from pipecat.turns.user_start import TranscriptionUserTurnStartStrategy
+from pipecat.turns.user_start import MinWordsUserTurnStartStrategy, TranscriptionUserTurnStartStrategy
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
-from pipecat.services.cerebras.llm import CerebrasLLMService, CerebrasLLMSettings
-from pipecat.services.groq.llm import GroqLLMService
 from pipecat.services.llm_service import LLMService, FunctionCallParams
+from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.serializers.twilio import TwilioFrameSerializer
 from pipecat.serializers.telnyx import TelnyxFrameSerializer
 from pipecat.transports.base_transport import TransportParams
@@ -191,6 +191,59 @@ load_dotenv(override=True)
 
 def _env(name: str, default: str = "") -> str:
     return os.getenv(name, default).strip()
+
+
+def _llm_provider(name: str | None = None) -> str:
+    provider = (name or _env("LLM_PROVIDER")).strip().lower()
+    if not provider:
+        raise RuntimeError("LLM_PROVIDER is not set")
+    return provider
+
+
+def _llm_model(provider: str) -> str:
+    return (
+        _env("LLM_MODEL")
+        or _env(f"{provider.upper()}_MODEL")
+        or {
+            "openai": "gpt-4o-mini",
+            "cerebras": "gpt-oss-120b",
+            "deepseek": "deepseek-v4-pro",
+        }.get(provider, "")
+    )
+
+
+def _llm_api_key(provider: str) -> str:
+    if provider == "openai":
+        return _env("OPENAI_API") or _env("OPENAI_API_KEY")
+    return _env(f"{provider.upper()}_API_KEY") or _env(f"{provider.upper()}_API")
+
+
+def _validate_llm_key(provider: str, api_key: str) -> None:
+    if not api_key:
+        raise RuntimeError(f"{provider.upper()} API key is not set")
+    if provider != "openai" and api_key.startswith("sk-proj-"):
+        raise RuntimeError(
+            f"LLM_PROVIDER={provider} is configured with an OpenAI project key. "
+            f"Set {provider.upper()}_API_KEY to a real {provider} key."
+        )
+
+
+def _float_env(name: str, default: float) -> float:
+    raw = _env(name)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(f"Invalid float for {name}={raw!r}; using {default}")
+        return default
+
+
+def _tts_float_env(language: str, setting: str, default: float) -> float:
+    return _float_env(
+        f"ELEVENLABS_TTS_{language.upper()}_{setting.upper()}",
+        _float_env(f"ELEVENLABS_TTS_{setting.upper()}", default),
+    )
 
 # Suppress pipecat internal DEBUG/TRACE noise — keep only INFO and above.
 # Re-enable temporarily by setting VOCARE_LOG_LEVEL=DEBUG in the environment.
@@ -262,6 +315,111 @@ def _is_transfer_request(text: str) -> bool:
     return bool(TRANSFER_REQUEST_RE.search(text or ""))
 
 
+_HESITATION_FILLER_RE = re.compile(
+    r"^[\s,\.!\?，。！？、]*(?:"
+    r"u+h+|u+m+|a+h+|h+m+|h+u+h+|e+r+|o+h+|"
+    r"嗯+|啊+|呃+|哦+|唔+|诶+"
+    r")(?:[\s,\.!\?，。！？、]+(?:"
+    r"u+h+|u+m+|a+h+|h+m+|h+u+h+|e+r+|o+h+|"
+    r"嗯+|啊+|呃+|哦+|唔+|诶+"
+    r"))*[\s,\.!\?，。！？、]*$",
+    re.IGNORECASE,
+)
+
+_HESITATION_WAIT_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:sorry\s+)?(?:hold\s+on|hang\s+on|wait|one\s+(?:sec|second|moment)|"
+    r"just\s+(?:a\s+)?(?:sec|second|moment)|give\s+me\s+(?:a\s+)?(?:sec|second|moment)|"
+    r"let\s+me\s+(?:think|see|check))"
+    r"|(?:等一下|稍等|等等|等一等|请稍等|让我想一下|我想一下)"
+    r")\s*(?:please|thanks|谢谢|麻烦你)?\s*$",
+    re.IGNORECASE,
+)
+
+_HESITATION_PARTIAL_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:u+h+|u+m+|a+h+|h+m+|h+u+h+|e+r+|o+h+)\b|"
+    r"(?:yeah|yes|okay|ok|right)\s+(?:u+h+|u+m+|a+h+|h+m+|e+r+)\b|"
+    r"(?:嗯+|啊+|呃+|哦+|唔+|诶+)"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _wordish_count(text: str) -> int:
+    words = re.findall(r"[A-Za-z0-9']+|[\u4e00-\u9fff]", text or "")
+    return len(words)
+
+
+def _hesitation_turn_action(text: str) -> tuple[str, float]:
+    """Return ('drop'|'release'|'', delay) for caller hesitation handling."""
+    stripped = (text or "").strip()
+    if not stripped:
+        return ("", 0.0)
+    if _HESITATION_FILLER_RE.match(stripped):
+        return ("drop", _float_env("HESITATION_FILLER_HOLDOFF_SECS", 1.4))
+    if _HESITATION_WAIT_RE.match(stripped):
+        return ("drop", _float_env("HESITATION_WAIT_HOLDOFF_SECS", 2.6))
+    if _wordish_count(stripped) <= 6 and _HESITATION_PARTIAL_RE.search(stripped):
+        return ("release", _float_env("HESITATION_PARTIAL_HOLDOFF_SECS", 1.6))
+    return ("", 0.0)
+
+
+def _hesitation_turn_delay(text: str) -> float:
+    return _hesitation_turn_action(text)[1]
+
+
+class HesitationTurnGateProcessor(FrameProcessor):
+    """Prevents filler/hold-on utterances from becoming completed user turns."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._pending_drop_task: asyncio.Task | None = None
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        if direction == FrameDirection.DOWNSTREAM and isinstance(frame, TranscriptionFrame):
+            action, delay = _hesitation_turn_action(frame.text)
+            if delay > 0:
+                await self._cancel_pending_drop()
+                self._pending_drop_task = self.create_task(
+                    self._complete_after_delay(frame, action, delay),
+                    "hesitation_turn_drop",
+                )
+                logger.info(
+                    f"[TURN GATE] Holding {action} hesitation transcript for {delay:.1f}s: {frame.text!r}"
+                )
+                return
+
+            await self._cancel_pending_drop()
+
+        elif direction == FrameDirection.DOWNSTREAM and isinstance(frame, InterimTranscriptionFrame):
+            if self._pending_drop_task and not self._pending_drop_task.done():
+                text = (frame.text or "").strip()
+                if text and _hesitation_turn_delay(text) == 0:
+                    await self._cancel_pending_drop()
+                    logger.info(f"[TURN GATE] Caller continued after hesitation: {text[:80]!r}")
+
+        await self.push_frame(frame, direction)
+
+    async def _cancel_pending_drop(self):
+        if self._pending_drop_task and not self._pending_drop_task.done():
+            await self.cancel_task(self._pending_drop_task)
+        self._pending_drop_task = None
+
+    async def _complete_after_delay(self, frame: TranscriptionFrame, action: str, delay: float):
+        try:
+            await asyncio.sleep(delay)
+            if action == "release":
+                logger.info(f"[TURN GATE] Releasing delayed partial transcript: {frame.text!r}")
+                await self.push_frame(frame, FrameDirection.DOWNSTREAM)
+            else:
+                logger.info(f"[TURN GATE] Dropped hesitation-only transcript: {frame.text!r}")
+        except asyncio.CancelledError:
+            raise
+
+
 class TransferRequestProcessor(FrameProcessor):
     """Deterministically handles human-transfer requests before the LLM."""
 
@@ -321,7 +479,7 @@ class ThinkerProcessor(FrameProcessor):
 
     Sits between STT and user_aggregator. Intercepts InterimTranscriptionFrame
     (with 200ms debounce) and TranscriptionFrame (immediately) to fire an
-    out-of-pipeline Groq inference. The result is stored in thinker_state and
+    out-of-pipeline LLM inference. The result is stored in thinker_state and
     later injected by ContextEnricherProcessor. All frames pass through unchanged.
     """
 
@@ -571,20 +729,20 @@ class LanguageSwitchProcessor(FrameProcessor):
         if is_english:
             tts_delta = ElevenLabsTTSService.Settings(
                 voice=self._voice_id,
-                model="eleven_turbo_v2_5",
+                model=_env("ELEVENLABS_TTS_MODEL", "eleven_turbo_v2_5"),
                 language="en",
-                speed=1.0,
-                stability=0.5,
-                similarity_boost=0.75,
+                speed=_tts_float_env("en", "speed", 1.0),
+                stability=_tts_float_env("en", "stability", 0.35),
+                similarity_boost=_tts_float_env("en", "similarity_boost", 0.75),
             )
         else:
             tts_delta = ElevenLabsTTSService.Settings(
                 voice=self._voice_id,
-                model="eleven_turbo_v2_5",
+                model=_env("ELEVENLABS_TTS_MODEL", "eleven_turbo_v2_5"),
                 language="zh",
-                speed=0.8,
-                stability=1,
-                similarity_boost=1,
+                speed=_tts_float_env("zh", "speed", 0.9),
+                stability=_tts_float_env("zh", "stability", 0.55),
+                similarity_boost=_tts_float_env("zh", "similarity_boost", 0.85),
             )
         await self.push_frame(
             TTSUpdateSettingsFrame(delta=tts_delta, service=self._tts),
@@ -607,7 +765,7 @@ class LanguageSwitchProcessor(FrameProcessor):
                     "LANGUAGE SWITCH — ACTIVE LANGUAGE IS NOW: MANDARIN CHINESE (普通话). "
                     "你必须用中文回答每一个问题，不论用户用什么语言提问。 "
                     "You MUST write every word of every response in Chinese characters from this point forward. "
-                    "Zero English words are permitted except street addresses (e.g. '50 Vine Street Hurstville'). "
+                    "Zero English words are permitted except street addresses. "
                     "Do NOT write pinyin, romanisation, or mixed-language sentences. "
                     "If you are about to write English, stop and rewrite in Chinese."
                 )
@@ -626,6 +784,10 @@ SYSTEM_INSTRUCTION_GRC = (
     "Speak naturally, warmly, and concisely — one or two sentences at a time. "
     "Never use lists, bullet points, or emojis. "
     "Do not use filler phrases like 'Certainly!' or 'Of course!'. "
+    "Never backchannel while the caller is thinking or speaking. "
+    "Do NOT say phrases like 'I understand', 'go on', 'take your time', "
+    "'I'm listening', 'continue', or similar acknowledgements. "
+    "If the caller only says a filler sound, hesitation, or asks you to wait, stay silent. "
 
     # --- HIGHEST PRIORITY: Human transfer ---
     "CRITICAL OVERRIDE — this rule takes priority over everything else: "
@@ -700,7 +862,6 @@ SYSTEM_INSTRUCTION_GRC = (
     "  • Write ALL output in simplified Chinese characters (普通话). "
     "  • Do NOT produce any English words, romanisation, or pinyin. "
     "  • The ONLY permitted English is a street address token embedded inside an otherwise fully Chinese sentence "
-    "    (e.g. '您在 50 Vine Street Hurstville 的垃圾收集日是...'). "
     "  • If you are about to write English, stop and rewrite in Chinese. "
     "If the active language is English: write ALL output in English only. "
     "Switching languages or mixing languages mid-response is strictly forbidden. "
@@ -741,32 +902,70 @@ def create_stt(name: str):
 
 def create_llm(name: str, system_instruction: str = ""):
     """Create an LLM service by name."""
-    if name == "cerebras":
+    provider = _llm_provider(name)
+    model = _llm_model(provider)
+    api_key = _llm_api_key(provider)
+    _validate_llm_key(provider, api_key)
+    logger.info(f"Creating LLM provider={provider} model={model}")
+
+    if provider == "openai":
+        kwargs = {}
+        if _env("LLM_BASE_URL") or _env("OPENAI_BASE_URL"):
+            kwargs["base_url"] = _env("LLM_BASE_URL") or _env("OPENAI_BASE_URL")
+        return OpenAILLMService(
+            api_key=api_key,
+            settings=OpenAILLMService.Settings(
+                model=model,
+                system_instruction=system_instruction,
+            ),
+            **kwargs,
+        )
+    if provider == "deepseek":
+        return OpenAILLMService(
+            api_key=api_key,
+            base_url=_env("LLM_BASE_URL") or _env("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+            settings=OpenAILLMService.Settings(
+                model=model,
+                system_instruction=system_instruction,
+                extra={
+                    "thinking": {
+                        "type": _env("DEEPSEEK_THINKING_TYPE", "enabled"),
+                        "reasoning_effort": _env("DEEPSEEK_REASONING_EFFORT", "max"),
+                    },
+                },
+            ),
+        )
+    if provider == "cerebras":
+        from pipecat.services.cerebras.llm import CerebrasLLMService, CerebrasLLMSettings
+
         return CerebrasLLMService(
-            api_key=_env("CEREBRAS_API_KEY"),
+            api_key=api_key,
             settings=CerebrasLLMSettings(
-                model=os.getenv("CEREBRAS_MODEL", "gpt-oss-120b"),
+                model=model,
                 system_instruction=system_instruction,
             ),
         )
-    elif name == "mistral":
+    if provider == "mistral":
         from pipecat.services.mistral.llm import MistralLLMService
 
         return MistralLLMService(
-            api_key=_env("MISTRAL_API_KEY"),
+            api_key=api_key,
             settings=MistralLLMService.Settings(
+                model=model,
                 system_instruction=system_instruction,
             ),
         )
-    elif name == "groq":
+    if provider == "groq":
+        from pipecat.services.groq.llm import GroqLLMService
+
         return GroqLLMService(
-            api_key=_env("GROQ_API_KEY"),
+            api_key=api_key,
             settings=GroqLLMService.Settings(
+                model=model,
                 system_instruction=system_instruction,
             ),
         )
-    else:
-        raise ValueError(f"Unknown LLM service: {name}")
+    raise ValueError(f"Unknown LLM provider: {provider}")
 
 
 def create_tts(name: str):
@@ -789,8 +988,11 @@ def create_tts(name: str):
             api_key=api_key,
             settings=ElevenLabsTTSService.Settings(
                 voice=voice,
-                model="eleven_turbo_v2_5",
+                model=_env("ELEVENLABS_TTS_MODEL", "eleven_turbo_v2_5"),
                 language="en",
+                speed=_tts_float_env("en", "speed", 1.0),
+                stability=_tts_float_env("en", "stability", 0.35),
+                similarity_boost=_tts_float_env("en", "similarity_boost", 0.75),
             ),
         )
     else:
@@ -1135,7 +1337,7 @@ class LatencyObserver(BaseObserver):
         TTS latency   = t_tts_start    - t_llm_first
         TOTAL TTFB    = t_tts_start    - t_vad_stop
 
-    Tool calls (e.g. geocoding) sit inside the LLM interval and are flagged
+    Tool calls (e.g. direct council bin lookup) sit inside the LLM interval and are flagged
     in the log row.
     """
 
@@ -1298,13 +1500,7 @@ async def run_bot(
     llm = create_llm(llm_name, system_instruction=system_instruction)
     tts = create_tts(tts_name)
 
-    # thinker_llm = CerebrasLLMService(
-    #     api_key=os.getenv("CEREBRAS_API_KEY"),
-    #     settings=CerebrasLLMSettings(
-    #         model="llama3.1-8b",
-    #         extra={"response_format": {"type": "json_object"}},
-    #     ),
-    # )
+    # thinker_llm = create_llm(_env("LLM_PROVIDER"))
     # thinker_processor = ThinkerProcessor(thinker_llm=thinker_llm)
     # context_enricher = ContextEnricherProcessor(thinker_processor=thinker_processor)
     filler_tts = FillerTTSProcessor()
@@ -1319,6 +1515,7 @@ async def run_bot(
         observers.append(transcript_observer)
 
     async def handle_get_bin_collection_day(params: FunctionCallParams):
+        tool_t0 = time.perf_counter()
         address = _correct_address(params.arguments.get("address", "").strip())
         logger.info(f"Function call: get_bin_collection_day({address})")
 
@@ -1357,19 +1554,24 @@ async def run_bot(
 
             # ── Direct Wastetrack call ────────────────────────────────────────────
             from grc_wastetrack import get_bin_collection_details as _wt, format_voice_response as _wt_fmt
+            wt_t0 = time.perf_counter()
             wt_result = await asyncio.to_thread(_wt, address)
+            logger.info(f"[BIN TOOL] Wastetrack elapsed {((time.perf_counter() - wt_t0) * 1000):.0f} ms")
             voice = _wt_fmt(wt_result)
             if voice:
-                logger.info(f"[BIN TOOL] Wastetrack SUCCESS — answering immediately")
+                logger.info(f"[BIN TOOL] Wastetrack SUCCESS — total tool {((time.perf_counter() - tool_t0) * 1000):.0f} ms")
                 await params.result_callback({"result": voice})
                 return
-            # Wastetrack failed — inject filler before the slower polygon fallback
-            logger.warning(f"[BIN TOOL] Wastetrack failed: {wt_result.get('error')} — using polygon fallback")
-            _filler = FILLERS[filler_tts._filler_index % len(FILLERS)]
-            filler_tts._filler_index += 1
-            await llm.push_frame(TTSSpeakFrame(text=_filler), FrameDirection.DOWNSTREAM)
-            result = await asyncio.to_thread(get_bin_collection_zone, {"address": address})
-            await params.result_callback({"result": result})
+            logger.warning(
+                f"[BIN TOOL] Wastetrack failed after {((time.perf_counter() - tool_t0) * 1000):.0f} ms: "
+                f"{wt_result.get('error')}"
+            )
+            await params.result_callback({
+                "result": (
+                    "I couldn't find a bin collection record for that address in the council bin lookup. "
+                    "Could you please repeat the full street address?"
+                )
+            })
         except Exception as e:
             logger.error(f"get_bin_collection_day failed: {e}")
             await params.result_callback(
@@ -1397,7 +1599,7 @@ async def run_bot(
     get_bin_collection_day_schema = FunctionSchema(
         name="get_bin_collection_day",
         description=(
-            "Look up the bin collection day for a resident's address. "
+            "Look up the bin collection day for a resident's address using the direct council bin lookup. "
             "Only call this tool once the resident has provided a specific street address "
             "Do NOT call this tool if you only have a vague question — ask for the address first."
         ),
@@ -1405,7 +1607,7 @@ async def run_bot(
             "address": {
                 "type": "string",
                 "description": (
-                    "Full street address within the Georges River LGA, "
+                    "Full street address within the Georges River LGA for the direct council bin lookup, "
                     "Must be a real address, not a question or vague phrase."
                 ),
             },
@@ -1443,6 +1645,11 @@ async def run_bot(
         context,
         user_params=LLMUserAggregatorParams(
             vad_analyzer=SileroVADAnalyzer(),
+            user_turn_strategies=UserTurnStrategies(
+                start=[
+                    MinWordsUserTurnStartStrategy(min_words=3, use_interim=False),
+                ],
+            ),
             user_mute_strategies=[MuteUntilFirstBotCompleteUserMuteStrategy()],
         ),
     )
@@ -1455,6 +1662,7 @@ async def run_bot(
     transfer_processor = TransferRequestProcessor(
         on_transfer_request=transfer_to_human_webrtc,
     )
+    hesitation_gate = HesitationTurnGateProcessor()
 
     pipeline = Pipeline(
         [
@@ -1463,6 +1671,7 @@ async def run_bot(
             transfer_processor,
             # thinker_processor,  # disabled
             lang_switch,
+            hesitation_gate,
             user_aggregator,
             # context_enricher,   # disabled
             llm,
@@ -1538,7 +1747,7 @@ async def offer(request: dict, background_tasks: BackgroundTasks):
 
     # Extract service selections (defaults if not provided)
     stt_name = request.get("stt", "elevenlabs")
-    llm_name = request.get("llm", "cerebras")
+    llm_name = request.get("llm") or _env("LLM_PROVIDER")
     tts_name = request.get("tts", "elevenlabs")
     mode = request.get("mode", "indiv")
 
@@ -1639,7 +1848,7 @@ async def graph_poll(pc_id: str):
 
 @app.post("/api/translate")
 async def translate_text(request: Request):
-    """Translate Chinese text to English using Cerebras."""
+    """Translate Chinese text to English using the configured LLM provider."""
     try:
         data = await request.json()
     except Exception:
@@ -1648,10 +1857,9 @@ async def translate_text(request: Request):
     if not text:
         return {"translation": ""}
     try:
-        from cerebras.cloud.sdk import Cerebras as _Cerebras
-        client = _Cerebras(api_key=os.getenv("CEREBRAS_API_KEY"))
-        resp = client.chat.completions.create(
-            model=os.getenv("CEREBRAS_MODEL", "gpt-oss-120b"),
+        llm = create_llm(_env("LLM_PROVIDER"))
+        resp = await llm._client.chat.completions.create(
+            model=llm._settings.model,
             messages=[
                 {"role": "system", "content": "Translate the following Chinese text to English. Output only the English translation, nothing else."},
                 {"role": "user", "content": text},
@@ -1749,24 +1957,20 @@ async def run_twilio_bot(websocket: WebSocket):
     _events_block = format_events_for_system_prompt(_events)
     system_instruction = SYSTEM_INSTRUCTION_GRC + "\n\n" + _events_block
     logger.info(f"[CAG] Embedded {len(_events)} events into system instruction")
+    logger.info(f"[Twilio] LLM env provider={_env('LLM_PROVIDER')} model={_llm_model(_llm_provider())}")
 
     stt = create_stt("elevenlabs")
-    llm = create_llm("cerebras", system_instruction=system_instruction)
+    llm = create_llm(_env("LLM_PROVIDER"), system_instruction=system_instruction)
     tts = create_tts("elevenlabs")
 
-    # thinker_llm = CerebrasLLMService(
-    #     api_key=os.getenv("CEREBRAS_API_KEY"),
-    #     settings=CerebrasLLMSettings(
-    #         model="llama3.1-8b",
-    #         extra={"response_format": {"type": "json_object"}},
-    #     ),
-    # )
+    # thinker_llm = create_llm(_env("LLM_PROVIDER"))
     # thinker_processor = ThinkerProcessor(thinker_llm=thinker_llm)
     # context_enricher = ContextEnricherProcessor(thinker_processor=thinker_processor)
     filler_tts = FillerTTSProcessor()
 
     # Register GRC tools
     async def handle_get_bin_collection_day(params: FunctionCallParams):
+        tool_t0 = time.perf_counter()
         address = _correct_address(params.arguments.get("address", "").strip())
         logger.info(f"[Twilio] get_bin_collection_day({address})")
 
@@ -1802,18 +2006,24 @@ async def run_twilio_bot(websocket: WebSocket):
 
             # ── Direct Wastetrack call ────────────────────────────────────────────
             from grc_wastetrack import get_bin_collection_details as _wt, format_voice_response as _wt_fmt
+            wt_t0 = time.perf_counter()
             wt_result = await asyncio.to_thread(_wt, address)
+            logger.info(f"[BIN TOOL] Wastetrack elapsed {((time.perf_counter() - wt_t0) * 1000):.0f} ms")
             voice = _wt_fmt(wt_result)
             if voice:
-                logger.info(f"[BIN TOOL] Wastetrack SUCCESS — answering immediately")
+                logger.info(f"[BIN TOOL] Wastetrack SUCCESS — total tool {((time.perf_counter() - tool_t0) * 1000):.0f} ms")
                 await params.result_callback({"result": voice})
                 return
-            logger.warning(f"[BIN TOOL] Wastetrack failed: {wt_result.get('error')} — using polygon fallback")
-            _filler = FILLERS[filler_tts._filler_index % len(FILLERS)]
-            filler_tts._filler_index += 1
-            await llm.push_frame(TTSSpeakFrame(text=_filler), FrameDirection.DOWNSTREAM)
-            result = await asyncio.to_thread(get_bin_collection_zone, {"address": address})
-            await params.result_callback({"result": result})
+            logger.warning(
+                f"[BIN TOOL] Wastetrack failed after {((time.perf_counter() - tool_t0) * 1000):.0f} ms: "
+                f"{wt_result.get('error')}"
+            )
+            await params.result_callback({
+                "result": (
+                    "I couldn't find a bin collection record for that address in the council bin lookup. "
+                    "Could you please repeat the full street address?"
+                )
+            })
         except Exception as e:
             logger.error(f"get_bin_collection_day failed: {e}")
             await params.result_callback(
@@ -1907,7 +2117,7 @@ async def run_twilio_bot(websocket: WebSocket):
     get_bin_collection_day_schema = FunctionSchema(
         name="get_bin_collection_day",
         description=(
-            "Look up the bin collection day for a resident's address. "
+            "Look up the bin collection day for a resident's address using the direct council bin lookup. "
             "Only call this tool once the resident has provided a specific street address "
             "Do NOT call this tool if you only have a vague question — ask for the address first."
         ),
@@ -1915,7 +2125,7 @@ async def run_twilio_bot(websocket: WebSocket):
             "address": {
                 "type": "string",
                 "description": (
-                    "Full street address within the Georges River LGA, "
+                    "Full street address within the Georges River LGA for the direct council bin lookup, "
                     "Must be a real address, not a question or vague phrase."
                 ),
             },
@@ -1954,6 +2164,11 @@ async def run_twilio_bot(websocket: WebSocket):
         context,
         user_params=LLMUserAggregatorParams(
             vad_analyzer=SileroVADAnalyzer(),
+            user_turn_strategies=UserTurnStrategies(
+                start=[
+                    MinWordsUserTurnStartStrategy(min_words=3, use_interim=False),
+                ],
+            ),
             user_mute_strategies=[MuteUntilFirstBotCompleteUserMuteStrategy()],
         ),
     )
@@ -1967,6 +2182,7 @@ async def run_twilio_bot(websocket: WebSocket):
         on_transfer_request=transfer_twilio_call_to_human,
         immediate_message="Transferring you now. Please hold.",
     )
+    hesitation_gate = HesitationTurnGateProcessor()
 
     pipeline = Pipeline(
         [
@@ -1975,6 +2191,7 @@ async def run_twilio_bot(websocket: WebSocket):
             transfer_processor,
             # thinker_processor,  # disabled
             lang_switch,
+            hesitation_gate,
             user_aggregator,
             # context_enricher,   # disabled
             llm,
@@ -2097,13 +2314,15 @@ async def run_telnyx_bot(websocket: WebSocket):
     _events_block = format_events_for_system_prompt(_events)
     system_instruction = SYSTEM_INSTRUCTION_GRC + "\n\n" + _events_block
     logger.info(f"[Telnyx CAG] Embedded {len(_events)} events into system instruction")
+    logger.info(f"[Telnyx] LLM env provider={_env('LLM_PROVIDER')} model={_llm_model(_llm_provider())}")
 
     stt = create_stt("elevenlabs")
-    llm = create_llm("cerebras", system_instruction=system_instruction)
+    llm = create_llm(_env("LLM_PROVIDER"), system_instruction=system_instruction)
     tts = create_tts("elevenlabs")
     filler_tts = FillerTTSProcessor()
 
     async def handle_get_bin_collection_day_telnyx(params: FunctionCallParams):
+        tool_t0 = time.perf_counter()
         address = _correct_address(params.arguments.get("address", "").strip())
         logger.info(f"[Telnyx] get_bin_collection_day({address})")
         _STREET_TYPES = {"street","st","road","rd","avenue","ave","lane","ln",
@@ -2116,16 +2335,24 @@ async def run_telnyx_bot(websocket: WebSocket):
             return
         try:
             from grc_wastetrack import get_bin_collection_details as _wt, format_voice_response as _wt_fmt
+            wt_t0 = time.perf_counter()
             wt_result = await asyncio.to_thread(_wt, address)
+            logger.info(f"[BIN TOOL] Wastetrack elapsed {((time.perf_counter() - wt_t0) * 1000):.0f} ms")
             voice = _wt_fmt(wt_result)
             if voice:
+                logger.info(f"[BIN TOOL] Wastetrack SUCCESS — total tool {((time.perf_counter() - tool_t0) * 1000):.0f} ms")
                 await params.result_callback({"result": voice})
                 return
-            _filler = FILLERS[filler_tts._filler_index % len(FILLERS)]
-            filler_tts._filler_index += 1
-            await llm.push_frame(TTSSpeakFrame(text=_filler), FrameDirection.DOWNSTREAM)
-            result = await asyncio.to_thread(get_bin_collection_zone, {"address": address})
-            await params.result_callback({"result": result})
+            logger.warning(
+                f"[BIN TOOL] Wastetrack failed after {((time.perf_counter() - tool_t0) * 1000):.0f} ms: "
+                f"{wt_result.get('error')}"
+            )
+            await params.result_callback({
+                "result": (
+                    "I couldn't find a bin collection record for that address in the council bin lookup. "
+                    "Could you please repeat the full street address?"
+                )
+            })
         except Exception as e:
             logger.error(f"[Telnyx] get_bin_collection_day failed: {e}")
             await params.result_callback({"error": "I couldn't look up the bin collection day. Please try again."})
@@ -2184,11 +2411,11 @@ async def run_telnyx_bot(websocket: WebSocket):
     get_bin_collection_day_schema = FunctionSchema(
         name="get_bin_collection_day",
         description=(
-            "Look up the bin collection day for a resident's address. "
+            "Look up the bin collection day for a resident's address using the direct council bin lookup. "
             "Only call this tool once the resident has provided a specific street address. "
             "Do NOT call this tool if you only have a vague question — ask for the address first."
         ),
-        properties={"address": {"type": "string", "description": "Full street address within the Georges River LGA."}},
+        properties={"address": {"type": "string", "description": "Full street address within the Georges River LGA for the direct council bin lookup."}},
         required=["address"],
     )
     transfer_to_human_schema = FunctionSchema(
@@ -2222,6 +2449,11 @@ async def run_telnyx_bot(websocket: WebSocket):
         context,
         user_params=LLMUserAggregatorParams(
             vad_analyzer=SileroVADAnalyzer(),
+            user_turn_strategies=UserTurnStrategies(
+                start=[
+                    MinWordsUserTurnStartStrategy(min_words=3, use_interim=False),
+                ],
+            ),
             user_mute_strategies=[MuteUntilFirstBotCompleteUserMuteStrategy()],
         ),
     )
@@ -2235,12 +2467,14 @@ async def run_telnyx_bot(websocket: WebSocket):
         on_transfer_request=transfer_telnyx_call_to_human,
         immediate_message="Transferring you now. Please hold.",
     )
+    hesitation_gate = HesitationTurnGateProcessor()
 
     pipeline = Pipeline([
         transport.input(),
         stt,
         transfer_processor,
         lang_switch,
+        hesitation_gate,
         user_aggregator,
         llm,
         filler_tts,
@@ -2385,24 +2619,15 @@ class AudioProbeProcessor(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
-import re as _re
-
-_FILLER_PATTERN = _re.compile(
-    r"^[\s,\.]*"
-    r"(u+h+|u+m+|a+h+|h+m+|h+u+h+|o+h+|e+r+|嗯+|啊+|哦+|呃+)"
-    r"[\s,\.]*$",
-    _re.IGNORECASE,
-)
-
 def _is_filler_only(text: str) -> bool:
     """Return True when the transcript is nothing but filler/hesitation sounds."""
-    return bool(_FILLER_PATTERN.match(text.strip()))
+    return bool(_HESITATION_FILLER_RE.match(text.strip()))
 
 
 class TranslationProcessor(FrameProcessor):
     """Translates STT transcripts and injects them into the other participant's pipeline."""
 
-    def __init__(self, translation_llm: GroqLLMService, session: TranslationSession, my_pc_id: str, **kwargs):
+    def __init__(self, translation_llm: LLMService, session: TranslationSession, my_pc_id: str, **kwargs):
         super().__init__(**kwargs)
         self._llm = translation_llm
         self._session = session
@@ -2487,20 +2712,20 @@ class TranslationProcessor(FrameProcessor):
                 "Output ONLY the translation, nothing else. "
                 "If the input consists entirely of filler sounds (e.g. 'um', 'uh', 'ahh', 'hmm') with no meaningful content, output nothing."
             )
-            logger.info(f"[Translation] Calling Cerebras for translation...")
+            logger.info(f"[Translation] Calling configured LLM for translation...")
             response = await self._llm._client.chat.completions.create(
                 model=self._llm._settings.model,
                 messages=[
                     {"role": "system", "content": system_instruction},
                     {"role": "user", "content": text},
                 ],
-                max_completion_tokens=500,
+                max_tokens=500,
                 stream=False,
             )
             translated = response.choices[0].message.content
-            logger.info(f"[Translation] Cerebras result: {repr(translated)}")
+            logger.info(f"[Translation] LLM result: {repr(translated)}")
             if not translated:
-                logger.warning("[Translation] Empty result from Cerebras — skipping TTS injection")
+                logger.warning("[Translation] Empty result from LLM — skipping TTS injection")
                 return
 
             # Inject into other participant's pipeline
@@ -2562,11 +2787,7 @@ async def run_translation_participant(
         ),
     )
 
-    from pipecat.services.cerebras.llm import CerebrasLLMService
-    translation_llm = CerebrasLLMService(
-        api_key=os.getenv("CEREBRAS_API_KEY"),
-        settings=CerebrasLLMService.Settings(model=os.getenv("CEREBRAS_MODEL", "gpt-oss-120b")),
-    )
+    translation_llm = create_llm(_env("LLM_PROVIDER"))
 
     # TTS: voice only — no language/model override so ElevenLabs uses its
     # default multilingual model, which handles both English and Mandarin
@@ -2576,7 +2797,10 @@ async def run_translation_participant(
         api_key=os.getenv("ELEVENLABS_API_KEY"),
         settings=ElevenLabsTTSService.Settings(
             voice=participant.voice_config["voice_id"],
-            model="eleven_turbo_v2_5",
+            model=_env("ELEVENLABS_TTS_MODEL", "eleven_turbo_v2_5"),
+            speed=_tts_float_env(participant.language.value, "speed", 1.0),
+            stability=_tts_float_env(participant.language.value, "stability", 0.35),
+            similarity_boost=_tts_float_env(participant.language.value, "similarity_boost", 0.75),
         ),
     )
 
@@ -2641,7 +2865,7 @@ class AutoTranslationProcessor(FrameProcessor):
 
     def __init__(
         self,
-        translation_llm: GroqLLMService,
+        translation_llm: LLMService,
         lang_a: Language,
         lang_b: Language,
         **kwargs,
@@ -2721,7 +2945,7 @@ class AutoTranslationProcessor(FrameProcessor):
                     {"role": "system", "content": system_instruction},
                     {"role": "user", "content": text},
                 ],
-                max_completion_tokens=500,
+                max_tokens=500,
                 stream=False,
             )
             translated = response.choices[0].message.content
@@ -2729,7 +2953,7 @@ class AutoTranslationProcessor(FrameProcessor):
                 logger.info(f"[AutoTranslation] → '{translated.strip()[:60]}'")
                 await self.push_frame(TTSSpeakFrame(text=translated.strip()))
             else:
-                logger.warning("[AutoTranslation] Empty result from Cerebras")
+                logger.warning("[AutoTranslation] Empty result from LLM")
         except Exception as e:
             logger.exception("[AutoTranslation] Translation error")
 
@@ -2807,7 +3031,7 @@ class FixedAutoTranslationProcessor(AutoTranslationProcessor):
                     {"role": "system", "content": system_instruction},
                     {"role": "user", "content": text},
                 ],
-                max_completion_tokens=500,
+                max_tokens=500,
                 stream=False,
             )
             translated = response.choices[0].message.content
@@ -2815,7 +3039,7 @@ class FixedAutoTranslationProcessor(AutoTranslationProcessor):
                 logger.info(f"[AutoTranslation] -> '{translated.strip()[:60]}'")
                 await self.push_frame(TTSSpeakFrame(text=translated.strip()))
             else:
-                logger.warning("[AutoTranslation] Empty result from Cerebras")
+                logger.warning("[AutoTranslation] Empty result from LLM")
         except Exception:
             logger.exception("[AutoTranslation] Translation error")
 
@@ -2842,7 +3066,7 @@ class StrictAutoTranslationProcessor(FixedAutoTranslationProcessor):
             return self._lang_b
         return None
 
-    async def _translate_text(self, text: str, source_lang: Language | None, *, max_completion_tokens: int) -> tuple[str | None, Language | None]:
+    async def _translate_text(self, text: str, source_lang: Language | None, *, max_tokens: int) -> tuple[str | None, Language | None]:
         language_names = {
             "en": "English",
             "zh": "Chinese (Mandarin)",
@@ -2879,7 +3103,7 @@ class StrictAutoTranslationProcessor(FixedAutoTranslationProcessor):
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0,
-            max_completion_tokens=max_completion_tokens,
+            max_tokens=max_tokens,
             stream=False,
         )
         translated = response.choices[0].message.content
@@ -2889,7 +3113,7 @@ class StrictAutoTranslationProcessor(FixedAutoTranslationProcessor):
         if not self._session or source_lang is None:
             return
 
-        translated, target_lang = await self._translate_text(text, source_lang, max_completion_tokens=80)
+        translated, target_lang = await self._translate_text(text, source_lang, max_tokens=80)
         if not translated or target_lang is None:
             return
 
@@ -2960,7 +3184,7 @@ class StrictAutoTranslationProcessor(FixedAutoTranslationProcessor):
             logger.info(
                 f"[AutoTranslation] STT lang={source_lang.value if source_lang else 'unknown'} | '{text[:60]}'"
             )
-            translated, target_lang = await self._translate_text(text, source_lang, max_completion_tokens=200)
+            translated, target_lang = await self._translate_text(text, source_lang, max_tokens=200)
             if translated:
                 logger.info(f"[AutoTranslation] -> '{translated[:60]}'")
                 if self._session:
@@ -2981,7 +3205,7 @@ class StrictAutoTranslationProcessor(FixedAutoTranslationProcessor):
                     await self._session.event_queue.put(event)
                 await self.push_frame(TTSSpeakFrame(text=translated))
             else:
-                logger.warning("[AutoTranslation] Empty result from Cerebras")
+                logger.warning("[AutoTranslation] Empty result from LLM")
         except Exception:
             logger.exception("[AutoTranslation] Translation error")
 
@@ -3013,11 +3237,7 @@ async def run_auto_translation(
         ),
     )
 
-    from pipecat.services.cerebras.llm import CerebrasLLMService
-    translation_llm = CerebrasLLMService(
-        api_key=os.getenv("CEREBRAS_API_KEY"),
-        settings=CerebrasLLMService.Settings(model=os.getenv("CEREBRAS_MODEL", "gpt-oss-120b")),
-    )
+    translation_llm = create_llm(_env("LLM_PROVIDER"))
 
     # Use a multilingual voice — handles both languages without voice-switching
     from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
@@ -3028,7 +3248,10 @@ async def run_auto_translation(
                 "ELEVENLABS_MULTILINGUAL_VOICE_ID",
                 os.getenv("ELEVENLABS_VOICE_ID", ""),
             ),
-            model="eleven_turbo_v2_5",
+            model=_env("ELEVENLABS_TTS_MODEL", "eleven_turbo_v2_5"),
+            speed=_float_env("ELEVENLABS_TTS_SPEED", 1.0),
+            stability=_float_env("ELEVENLABS_TTS_STABILITY", 0.35),
+            similarity_boost=_float_env("ELEVENLABS_TTS_SIMILARITY_BOOST", 0.75),
         ),
     )
 

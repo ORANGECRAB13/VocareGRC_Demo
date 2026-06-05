@@ -4,33 +4,11 @@ tools.py — Client tool definitions for the GRC voice agent.
 ElevenLabs ClientTools passes a single `params` dict to each handler.
 """
 
-import os
 import re
-from functools import lru_cache
 
-import requests
 from loguru import logger
 
 import street_corrector as _sc
-import bin_zones
-
-
-@lru_cache(maxsize=128)
-def _geocode_address(address: str, api_key: str) -> tuple:
-    """Cached geocoding. Returns (lat, lng) or (None, None)."""
-    try:
-        resp = requests.get(
-            "https://maps.googleapis.com/maps/api/geocode/json",
-            params={"address": address + ", Georges River NSW", "key": api_key},
-            timeout=10,
-        )
-        results = resp.json().get("results", [])
-        if not results:
-            return (None, None)
-        loc = results[0]["geometry"]["location"]
-        return (loc["lat"], loc["lng"])
-    except Exception:
-        return (None, None)
 
 
 _STREET_TYPE_TOKENS = {
@@ -77,12 +55,7 @@ def _correct_address(address: str) -> str:
 
 
 def get_bin_collection_details(params: dict) -> str:
-    """Primary bin collection lookup.
-
-    Tries the GRC Wastetrack API first (live council data with exact next-date).
-    Falls back to the local polygon zone lookup if Wastetrack is unreachable or
-    returns no result.
-    """
+    """Direct GRC Wastetrack bin collection lookup."""
     address = params.get("address", "").strip()
     if not address:
         return "Please provide your full address."
@@ -98,34 +71,11 @@ def get_bin_collection_details(params: dict) -> str:
             logger.info(f"[BIN TOOL] Wastetrack SUCCESS for '{address}' → {result.get('address')}")
             return voice
         else:
-            logger.warning(f"[BIN TOOL] Wastetrack returned no usable data for '{address}': {result.get('error', 'empty response')} — falling back to polygon lookup")
+            logger.warning(f"[BIN TOOL] Wastetrack returned no usable data for '{address}': {result.get('error', 'empty response')}")
     except Exception as e:
-        logger.warning(f"[BIN TOOL] Wastetrack EXCEPTION for '{address}': {e} — falling back to polygon lookup")
+        logger.warning(f"[BIN TOOL] Wastetrack EXCEPTION for '{address}': {e}")
 
-    # ── Fallback: local polygon zone lookup ───────────────────────────────────
-    logger.info(f"[BIN TOOL] Using polygon fallback for '{address}'")
-    return get_bin_collection_zone(params)
-
-
-def get_bin_collection_zone(params: dict) -> str:
-    address = params.get("address", "").strip()
-    if not address:
-        return "Please provide your full address."
-
-    corrected = _sc.correct_street(address)
-    if corrected:
-        address = corrected[0]
-
-    api_key = os.environ.get("GOOGLE_MAPS_API_KEY", "").strip()
-    if not api_key:
-        return "The geocoding service is not configured. Please contact support."
-
-    lat, lng = _geocode_address(address, api_key)
-    if lat is None:
-        return "I couldn't verify that exact street name. Could you please double-check and tell me the correct street name again?"
-
-    zone = bin_zones.find_zone_for_point(lat, lng)
-    if not zone:
-        return "That address doesn't appear to be within a Georges River Council collection zone."
-
-    return bin_zones.format_voice_prompt(zone)
+    return (
+        "I couldn't find a bin collection record for that address in the council bin lookup. "
+        "Could you please repeat the full street address?"
+    )

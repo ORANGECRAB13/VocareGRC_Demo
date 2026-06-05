@@ -8,6 +8,4 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 COPY requirements.docker.txt .
-COPY wheelhouse-linux/ /wheelhouse/
-RUN pip install --no-index --find-links=/wheelhouse --no-deps --progress-bar off \
-      -r requirements.docker.txt
+RUN pip install --progress-bar off -r requirements.docker.txt

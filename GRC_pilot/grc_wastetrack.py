@@ -11,9 +11,12 @@ Public API:
 """
 
 import re
+import os
+import time
 import requests
 from datetime import datetime
 from bs4 import BeautifulSoup
+from loguru import logger
 
 BASE_URL = "https://v2.wastetrack.net/self_service"
 KEY      = "da1d834c-3d97-4f96-9d60-4107ef0a53e6"
@@ -154,6 +157,14 @@ def _parse_collection_html(html: str) -> dict:
 _SESSION = requests.Session()
 
 
+def _timeout() -> float:
+    raw = os.getenv("WASTETRACK_TIMEOUT_SECS", "5").strip()
+    try:
+        return float(raw)
+    except ValueError:
+        return 5.0
+
+
 def get_bin_collection_details(address: str) -> dict:
     """Look up GRC bin collection schedule for an address via Wastetrack.
 
@@ -165,19 +176,24 @@ def get_bin_collection_details(address: str) -> dict:
         On failure: {"success": False, "error": str, "address_query": str}
     """
     address = _normalize_address(address)
+    total_t0 = time.perf_counter()
+    timeout = _timeout()
 
     # Step 1: GET locator page with key param → extract fresh authenticity_token + cookies.
     # Wastetrack serves a council-specific page only when the key query param is present.
     # No Content-Type on GET requests — it causes a 500.
     try:
+        t0 = time.perf_counter()
         locator_resp = _SESSION.get(
             f"{BASE_URL}/locator",
             params={"key": KEY, "token": TOKEN},
             headers=_GET_HEADERS,
-            timeout=15,
+            timeout=timeout,
         )
         locator_resp.raise_for_status()
+        logger.info(f"[WASTETRACK] locator GET {((time.perf_counter() - t0) * 1000):.0f} ms")
     except Exception as e:
+        logger.warning(f"[WASTETRACK] locator GET failed after {((time.perf_counter() - total_t0) * 1000):.0f} ms: {e}")
         return {"success": False, "error": f"Could not reach Wastetrack: {e}", "address_query": address}
 
     auth_token = _extract_authenticity_token(locator_resp.text)
@@ -186,14 +202,17 @@ def get_bin_collection_details(address: str) -> dict:
 
     # Step 2: POST locator_search → extract wtss_site
     try:
+        t0 = time.perf_counter()
         search_resp = _SESSION.post(
             f"{BASE_URL}/locator_search",
             headers=_POST_HEADERS,
             data={**_COMMON_FORM, "authenticity_token": auth_token, "search": address},
-            timeout=15,
+            timeout=timeout,
         )
         search_resp.raise_for_status()
+        logger.info(f"[WASTETRACK] locator_search POST {((time.perf_counter() - t0) * 1000):.0f} ms")
     except Exception as e:
+        logger.warning(f"[WASTETRACK] locator_search POST failed after {((time.perf_counter() - total_t0) * 1000):.0f} ms: {e}")
         return {"success": False, "error": f"Address search failed: {e}", "address_query": address}
 
     # Refresh token from search response if a newer one is embedded
@@ -207,20 +226,24 @@ def get_bin_collection_details(address: str) -> dict:
 
     # Step 3: POST locator_show → parse collection table
     try:
+        t0 = time.perf_counter()
         show_resp = _SESSION.post(
             f"{BASE_URL}/locator_show",
             headers=_POST_HEADERS,
             data={**_COMMON_FORM, "authenticity_token": auth_token, "wtss_site": wtss_site},
-            timeout=15,
+            timeout=timeout,
         )
         show_resp.raise_for_status()
+        logger.info(f"[WASTETRACK] locator_show POST {((time.perf_counter() - t0) * 1000):.0f} ms")
     except Exception as e:
+        logger.warning(f"[WASTETRACK] locator_show POST failed after {((time.perf_counter() - total_t0) * 1000):.0f} ms: {e}")
         return {"success": False, "error": f"Collection detail request failed: {e}", "address_query": address}
 
     parsed = _parse_collection_html(show_resp.text)
     if not parsed["collections"]:
         return {"success": False, "error": "No collection data in response", "address_query": address}
 
+    logger.info(f"[WASTETRACK] total {((time.perf_counter() - total_t0) * 1000):.0f} ms")
     return {"success": True, **parsed}
 
 
