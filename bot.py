@@ -336,17 +336,37 @@ _HESITATION_WAIT_RE = re.compile(
     re.IGNORECASE,
 )
 
+_HESITATION_PARTIAL_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:u+h+|u+m+|a+h+|h+m+|h+u+h+|e+r+|o+h+)\b|"
+    r"(?:yeah|yes|okay|ok|right)\s+(?:u+h+|u+m+|a+h+|h+m+|e+r+)\b|"
+    r"(?:嗯+|啊+|呃+|哦+|唔+|诶+)"
+    r")",
+    re.IGNORECASE,
+)
 
-def _hesitation_turn_delay(text: str) -> float:
-    """Return a holdoff delay when text means the caller is still thinking."""
+
+def _wordish_count(text: str) -> int:
+    words = re.findall(r"[A-Za-z0-9']+|[\u4e00-\u9fff]", text or "")
+    return len(words)
+
+
+def _hesitation_turn_action(text: str) -> tuple[str, float]:
+    """Return ('drop'|'release'|'', delay) for caller hesitation handling."""
     stripped = (text or "").strip()
     if not stripped:
-        return 0.0
+        return ("", 0.0)
     if _HESITATION_FILLER_RE.match(stripped):
-        return _float_env("HESITATION_FILLER_HOLDOFF_SECS", 1.4)
+        return ("drop", _float_env("HESITATION_FILLER_HOLDOFF_SECS", 1.4))
     if _HESITATION_WAIT_RE.match(stripped):
-        return _float_env("HESITATION_WAIT_HOLDOFF_SECS", 2.6)
-    return 0.0
+        return ("drop", _float_env("HESITATION_WAIT_HOLDOFF_SECS", 2.6))
+    if _wordish_count(stripped) <= 6 and _HESITATION_PARTIAL_RE.search(stripped):
+        return ("release", _float_env("HESITATION_PARTIAL_HOLDOFF_SECS", 1.6))
+    return ("", 0.0)
+
+
+def _hesitation_turn_delay(text: str) -> float:
+    return _hesitation_turn_action(text)[1]
 
 
 class HesitationTurnGateProcessor(FrameProcessor):
@@ -360,14 +380,16 @@ class HesitationTurnGateProcessor(FrameProcessor):
         await super().process_frame(frame, direction)
 
         if direction == FrameDirection.DOWNSTREAM and isinstance(frame, TranscriptionFrame):
-            delay = _hesitation_turn_delay(frame.text)
+            action, delay = _hesitation_turn_action(frame.text)
             if delay > 0:
                 await self._cancel_pending_drop()
                 self._pending_drop_task = self.create_task(
-                    self._drop_after_delay(frame.text, delay),
+                    self._complete_after_delay(frame, action, delay),
                     "hesitation_turn_drop",
                 )
-                logger.info(f"[TURN GATE] Holding hesitation transcript for {delay:.1f}s: {frame.text!r}")
+                logger.info(
+                    f"[TURN GATE] Holding {action} hesitation transcript for {delay:.1f}s: {frame.text!r}"
+                )
                 return
 
             await self._cancel_pending_drop()
@@ -386,10 +408,14 @@ class HesitationTurnGateProcessor(FrameProcessor):
             await self.cancel_task(self._pending_drop_task)
         self._pending_drop_task = None
 
-    async def _drop_after_delay(self, text: str, delay: float):
+    async def _complete_after_delay(self, frame: TranscriptionFrame, action: str, delay: float):
         try:
             await asyncio.sleep(delay)
-            logger.info(f"[TURN GATE] Dropped hesitation-only transcript: {text!r}")
+            if action == "release":
+                logger.info(f"[TURN GATE] Releasing delayed partial transcript: {frame.text!r}")
+                await self.push_frame(frame, FrameDirection.DOWNSTREAM)
+            else:
+                logger.info(f"[TURN GATE] Dropped hesitation-only transcript: {frame.text!r}")
         except asyncio.CancelledError:
             raise
 
@@ -758,6 +784,10 @@ SYSTEM_INSTRUCTION_GRC = (
     "Speak naturally, warmly, and concisely — one or two sentences at a time. "
     "Never use lists, bullet points, or emojis. "
     "Do not use filler phrases like 'Certainly!' or 'Of course!'. "
+    "Never backchannel while the caller is thinking or speaking. "
+    "Do NOT say phrases like 'I understand', 'go on', 'take your time', "
+    "'I'm listening', 'continue', or similar acknowledgements. "
+    "If the caller only says a filler sound, hesitation, or asks you to wait, stay silent. "
 
     # --- HIGHEST PRIORITY: Human transfer ---
     "CRITICAL OVERRIDE — this rule takes priority over everything else: "
