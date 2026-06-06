@@ -815,14 +815,17 @@ class LanguageSwitchProcessor(FrameProcessor):
         if isinstance(frame, TranscriptionFrame) and direction == FrameDirection.DOWNSTREAM:
             switched = False
             text_lower = frame.text.strip().lower()
+            explicit_language_preference = None
 
             # 1. Text-based keyword detection (catches "Mandarin" spoken in English)
             if any(kw in text_lower for kw in self._MANDARIN_KEYWORDS):
+                explicit_language_preference = False
                 if self._is_english:
                     self._is_english = False
                     await self._switch_language(False)
                     switched = True
             elif any(kw in text_lower for kw in self._ENGLISH_KEYWORDS):
+                explicit_language_preference = True
                 if not self._is_english:
                     self._is_english = True
                     await self._switch_language(True)
@@ -839,6 +842,9 @@ class LanguageSwitchProcessor(FrameProcessor):
                         await self._switch_language(is_english)
                         switched = True
 
+            if explicit_language_preference is not None:
+                self._record_language_preference(explicit_language_preference, frame.text)
+
             if switched:
                 # ElevenLabs closes and reopens its WebSocket on a voice/language change.
                 # Wait for the reconnect before the LLM generates audio, otherwise the
@@ -846,6 +852,31 @@ class LanguageSwitchProcessor(FrameProcessor):
                 await asyncio.sleep(1.0)
 
         await self.push_frame(frame, direction)
+
+    def _record_language_preference(self, is_english: bool, transcript: str):
+        """Record closed-slot language intent so one-word answers cannot be missed."""
+        if self._context is None:
+            return
+
+        if is_english:
+            msg = (
+                "CALLER_LANGUAGE_SELECTION: The caller explicitly selected English. "
+                "Treat this as the complete answer to your language preference question. "
+                "Do not ask for the language again. Continue in English."
+            )
+        else:
+            msg = (
+                "CALLER_LANGUAGE_SELECTION: The caller explicitly selected Mandarin Chinese (普通话). "
+                "Treat this as the complete answer to your language preference question. "
+                "Do not ask for the language again. Acknowledge briefly in simplified Chinese "
+                "and continue using Mandarin Chinese only."
+            )
+
+        self._context.add_message({"role": "system", "content": msg})
+        logger.info(
+            f"Language preference intent captured → {'en' if is_english else 'zh'} | "
+            f"transcript={transcript!r}"
+        )
 
     async def _switch_language(self, is_english: bool):
         from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
