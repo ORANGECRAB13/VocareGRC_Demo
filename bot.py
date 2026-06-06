@@ -345,6 +345,63 @@ _HESITATION_PARTIAL_RE = re.compile(
     re.IGNORECASE,
 )
 
+_ACTIONABLE_HINT_RE = re.compile(
+    r"\b(?:bin|bins|rubbish|garbage|waste|recycling|collection|event|events|"
+    r"activity|activities|da|development|application|planner|address|street)\b|"
+    r"(?:垃圾|回收|活动|开发申请|地址|街)",
+    re.IGNORECASE,
+)
+
+_BACKCHANNEL_ONLY_RE = re.compile(
+    r"^\s*(?:"
+    r"i\s+(?:see|understand|get\s+it|hear\s+you|am\s+listening)|"
+    r"understood|got\s+it|okay|ok|right|sure|mm[-\s]?hmm|"
+    r"go\s+on|please\s+go\s+on|continue|please\s+continue|"
+    r"take\s+your\s+time|no\s+worries|"
+    r"(?:i(?:'m| am)\s+)?waiting\s+for\s+(?:the\s+)?caller\s+to\s+finish|"
+    r"(?:i(?:'m| am)\s+)?waiting\s+for\s+you\s+to\s+finish|"
+    r"我明白|明白|好的|好|请继续|继续说|慢慢来|我在听|我等您说完"
+    r")\s*[\.\!,，。！]*\s*$",
+    re.IGNORECASE,
+)
+
+_BACKCHANNEL_PREFIXES = (
+    "i see",
+    "i understand",
+    "i get it",
+    "i hear you",
+    "i am listening",
+    "i'm listening",
+    "understood",
+    "got it",
+    "okay",
+    "ok",
+    "right",
+    "sure",
+    "mm-hmm",
+    "mm hmm",
+    "go on",
+    "please go on",
+    "continue",
+    "please continue",
+    "take your time",
+    "no worries",
+    "waiting for caller to finish",
+    "waiting for the caller to finish",
+    "waiting for you to finish",
+    "i'm waiting for",
+    "i am waiting for",
+    "我明白",
+    "明白",
+    "好的",
+    "好",
+    "请继续",
+    "继续说",
+    "慢慢来",
+    "我在听",
+    "我等您说完",
+)
+
 
 def _wordish_count(text: str) -> int:
     words = re.findall(r"[A-Za-z0-9']+|[\u4e00-\u9fff]", text or "")
@@ -360,8 +417,12 @@ def _hesitation_turn_action(text: str) -> tuple[str, float]:
         return ("drop", _float_env("HESITATION_FILLER_HOLDOFF_SECS", 1.4))
     if _HESITATION_WAIT_RE.match(stripped):
         return ("drop", _float_env("HESITATION_WAIT_HOLDOFF_SECS", 2.6))
-    if _wordish_count(stripped) <= 6 and _HESITATION_PARTIAL_RE.search(stripped):
-        return ("release", _float_env("HESITATION_PARTIAL_HOLDOFF_SECS", 1.6))
+    if (
+        _wordish_count(stripped) <= 6
+        and _HESITATION_PARTIAL_RE.search(stripped)
+        and not _ACTIONABLE_HINT_RE.search(stripped)
+    ):
+        return ("drop", _float_env("HESITATION_PARTIAL_HOLDOFF_SECS", 1.6))
     return ("", 0.0)
 
 
@@ -418,6 +479,64 @@ class HesitationTurnGateProcessor(FrameProcessor):
                 logger.info(f"[TURN GATE] Dropped hesitation-only transcript: {frame.text!r}")
         except asyncio.CancelledError:
             raise
+
+
+def _is_backchannel_only(text: str) -> bool:
+    stripped = (text or "").strip()
+    return len(stripped) <= 120 and bool(_BACKCHANNEL_ONLY_RE.match(stripped))
+
+
+def _normalize_backchannel_candidate(text: str) -> str:
+    return re.sub(r"[\s\.,!\?，。！、]+", " ", (text or "").strip().lower()).strip()
+
+
+def _could_be_backchannel(text: str) -> bool:
+    normalized = _normalize_backchannel_candidate(text)
+    if not normalized:
+        return True
+    return any(prefix.startswith(normalized) or normalized.startswith(prefix) for prefix in _BACKCHANNEL_PREFIXES)
+
+
+class BackchannelSuppressorProcessor(FrameProcessor):
+    """Drops short LLM acknowledgement/status replies before they reach TTS."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._buffered_text_frames: list[LLMTextFrame] = []
+        self._passthrough_response = False
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        if direction == FrameDirection.DOWNSTREAM and isinstance(frame, LLMTextFrame):
+            if self._passthrough_response:
+                await self.push_frame(frame, direction)
+                return
+
+            self._buffered_text_frames.append(frame)
+            text = "".join(getattr(f, "text", "") for f in self._buffered_text_frames)
+            if len(text.strip()) > 120 or not _could_be_backchannel(text):
+                for buffered in self._buffered_text_frames:
+                    await self.push_frame(buffered, direction)
+                self._buffered_text_frames.clear()
+                self._passthrough_response = True
+            return
+
+        if direction == FrameDirection.DOWNSTREAM and isinstance(frame, LLMFullResponseEndFrame):
+            if self._buffered_text_frames:
+                text = "".join(getattr(f, "text", "") for f in self._buffered_text_frames)
+                if _is_backchannel_only(text):
+                    logger.info(f"[BACKCHANNEL] Suppressed LLM backchannel/status response: {text!r}")
+                    self._buffered_text_frames.clear()
+                    await self.push_frame(frame, direction)
+                    return
+
+                for buffered in self._buffered_text_frames:
+                    await self.push_frame(buffered, direction)
+                self._buffered_text_frames.clear()
+            self._passthrough_response = False
+
+        await self.push_frame(frame, direction)
 
 
 class TransferRequestProcessor(FrameProcessor):
@@ -786,7 +905,8 @@ SYSTEM_INSTRUCTION_GRC = (
     "Do not use filler phrases like 'Certainly!' or 'Of course!'. "
     "Never backchannel while the caller is thinking or speaking. "
     "Do NOT say phrases like 'I understand', 'go on', 'take your time', "
-    "'I'm listening', 'continue', or similar acknowledgements. "
+    "'I'm listening', 'continue', 'I see', 'waiting for caller to finish', "
+    "or similar acknowledgements/status messages. "
     "If the caller only says a filler sound, hesitation, or asks you to wait, stay silent. "
 
     # --- HIGHEST PRIORITY: Human transfer ---
@@ -1663,6 +1783,7 @@ async def run_bot(
         on_transfer_request=transfer_to_human_webrtc,
     )
     hesitation_gate = HesitationTurnGateProcessor()
+    backchannel_suppressor = BackchannelSuppressorProcessor()
 
     pipeline = Pipeline(
         [
@@ -1675,6 +1796,7 @@ async def run_bot(
             user_aggregator,
             # context_enricher,   # disabled
             llm,
+            backchannel_suppressor,
             filler_tts,
             tts,
             transport.output(),
@@ -2183,6 +2305,7 @@ async def run_twilio_bot(websocket: WebSocket):
         immediate_message="Transferring you now. Please hold.",
     )
     hesitation_gate = HesitationTurnGateProcessor()
+    backchannel_suppressor = BackchannelSuppressorProcessor()
 
     pipeline = Pipeline(
         [
@@ -2195,6 +2318,7 @@ async def run_twilio_bot(websocket: WebSocket):
             user_aggregator,
             # context_enricher,   # disabled
             llm,
+            backchannel_suppressor,
             filler_tts,
             tts,
             transport.output(),
@@ -2468,6 +2592,7 @@ async def run_telnyx_bot(websocket: WebSocket):
         immediate_message="Transferring you now. Please hold.",
     )
     hesitation_gate = HesitationTurnGateProcessor()
+    backchannel_suppressor = BackchannelSuppressorProcessor()
 
     pipeline = Pipeline([
         transport.input(),
@@ -2477,6 +2602,7 @@ async def run_telnyx_bot(websocket: WebSocket):
         hesitation_gate,
         user_aggregator,
         llm,
+        backchannel_suppressor,
         filler_tts,
         tts,
         transport.output(),
