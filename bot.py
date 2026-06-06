@@ -347,8 +347,9 @@ _HESITATION_PARTIAL_RE = re.compile(
 
 _ACTIONABLE_HINT_RE = re.compile(
     r"\b(?:bin|bins|rubbish|garbage|waste|recycling|collection|event|events|"
-    r"activity|activities|da|development|application|planner|address|street)\b|"
-    r"(?:垃圾|回收|活动|开发申请|地址|街)",
+    r"activity|activities|da|development|application|planner|address|street|"
+    r"english|mandarin|chinese|yes|no)\b|"
+    r"(?:垃圾|回收|活动|开发申请|地址|街|中文|普通话|国语|英文|英语|是|不是)",
     re.IGNORECASE,
 )
 
@@ -358,6 +359,7 @@ _BACKCHANNEL_ONLY_RE = re.compile(
     r"understood|got\s+it|okay|ok|right|sure|mm[-\s]?hmm|"
     r"go\s+on|please\s+go\s+on|continue|please\s+continue|"
     r"take\s+your\s+time|no\s+worries|"
+    r"silence|silent|no\s+response|"
     r"(?:i(?:'m| am)\s+)?waiting\s+for\s+(?:the\s+)?caller\s+to\s+finish|"
     r"(?:i(?:'m| am)\s+)?waiting\s+for\s+you\s+to\s+finish|"
     r"我明白|明白|好的|好|请继续|继续说|慢慢来|我在听|我等您说完"
@@ -386,6 +388,9 @@ _BACKCHANNEL_PREFIXES = (
     "please continue",
     "take your time",
     "no worries",
+    "silence",
+    "silent",
+    "no response",
     "waiting for caller to finish",
     "waiting for the caller to finish",
     "waiting for you to finish",
@@ -521,6 +526,11 @@ class BackchannelSuppressorProcessor(FrameProcessor):
                 self._buffered_text_frames.clear()
                 self._passthrough_response = True
             return
+
+        if direction == FrameDirection.DOWNSTREAM and isinstance(frame, TTSSpeakFrame):
+            if _is_backchannel_only(getattr(frame, "text", "")):
+                logger.info(f"[BACKCHANNEL] Suppressed TTSSpeakFrame status response: {frame.text!r}")
+                return
 
         if direction == FrameDirection.DOWNSTREAM and isinstance(frame, LLMFullResponseEndFrame):
             if self._buffered_text_frames:
@@ -906,8 +916,9 @@ SYSTEM_INSTRUCTION_GRC = (
     "Never backchannel while the caller is thinking or speaking. "
     "Do NOT say phrases like 'I understand', 'go on', 'take your time', "
     "'I'm listening', 'continue', 'I see', 'waiting for caller to finish', "
-    "or similar acknowledgements/status messages. "
-    "If the caller only says a filler sound, hesitation, or asks you to wait, stay silent. "
+    "'silence', or similar acknowledgements/status messages. "
+    "If the caller only says a filler sound, hesitation, or asks you to wait, produce no output at all. "
+    "Never write or say the word 'silence'. "
 
     # --- HIGHEST PRIORITY: Human transfer ---
     "CRITICAL OVERRIDE — this rule takes priority over everything else: "
@@ -1767,7 +1778,7 @@ async def run_bot(
             vad_analyzer=SileroVADAnalyzer(),
             user_turn_strategies=UserTurnStrategies(
                 start=[
-                    MinWordsUserTurnStartStrategy(min_words=3, use_interim=False),
+                    MinWordsUserTurnStartStrategy(min_words=1, use_interim=False),
                 ],
             ),
             user_mute_strategies=[MuteUntilFirstBotCompleteUserMuteStrategy()],
@@ -2288,7 +2299,7 @@ async def run_twilio_bot(websocket: WebSocket):
             vad_analyzer=SileroVADAnalyzer(),
             user_turn_strategies=UserTurnStrategies(
                 start=[
-                    MinWordsUserTurnStartStrategy(min_words=3, use_interim=False),
+                    MinWordsUserTurnStartStrategy(min_words=1, use_interim=False),
                 ],
             ),
             user_mute_strategies=[MuteUntilFirstBotCompleteUserMuteStrategy()],
@@ -2575,7 +2586,7 @@ async def run_telnyx_bot(websocket: WebSocket):
             vad_analyzer=SileroVADAnalyzer(),
             user_turn_strategies=UserTurnStrategies(
                 start=[
-                    MinWordsUserTurnStartStrategy(min_words=3, use_interim=False),
+                    MinWordsUserTurnStartStrategy(min_words=1, use_interim=False),
                 ],
             ),
             user_mute_strategies=[MuteUntilFirstBotCompleteUserMuteStrategy()],
