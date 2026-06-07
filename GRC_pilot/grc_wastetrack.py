@@ -15,6 +15,7 @@ import os
 import time
 import requests
 from datetime import datetime
+from difflib import SequenceMatcher
 from bs4 import BeautifulSoup
 from loguru import logger
 
@@ -131,6 +132,75 @@ def _extract_site_id(html: str) -> str | None:
     return inp.get("value") if inp else None
 
 
+def _normalize_match_text(text: str) -> str:
+    text = re.sub(r"\b(?:nsw|australia)\b|\b\d{4}\b", " ", text.lower())
+    text = re.sub(r"\bstreet\b", "st", text)
+    text = re.sub(r"\broad\b", "rd", text)
+    text = re.sub(r"\bavenue\b", "ave", text)
+    text = re.sub(r"\bplace\b", "pl", text)
+    text = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", text)).strip()
+    return text
+
+
+def _house_number(text: str) -> str | None:
+    match = re.search(r"\b\d+[a-z]?\b", text.lower())
+    return match.group(0) if match else None
+
+
+def _candidate_score(query: str, candidate_address: str) -> float:
+    query_norm = _normalize_match_text(query)
+    candidate_norm = _normalize_match_text(candidate_address)
+    if not query_norm or not candidate_norm:
+        return 0.0
+
+    score = SequenceMatcher(None, query_norm, candidate_norm).ratio()
+    query_house = _house_number(query_norm)
+    candidate_house = _house_number(candidate_norm)
+    if query_house and candidate_house:
+        if query_house == candidate_house:
+            score += 0.25
+        else:
+            score -= 0.35
+    return score
+
+
+def _extract_site_candidates(html: str, query: str) -> list[dict]:
+    soup = BeautifulSoup(html, "html.parser")
+    candidates = []
+    for inp in soup.select('input[name="wtss_site"]'):
+        site_id = inp.get("value")
+        label = soup.select_one(f'label[for="{inp.get("id")}"]') if inp.get("id") else None
+        address_node = label.select_one(".wtss-site-fullstreet") if label else None
+        address = re.sub(r"\s+", " ", address_node.get_text(" ", strip=True)) if address_node else ""
+        if site_id and address:
+            candidates.append({
+                "site_id": site_id,
+                "address": address,
+                "score": _candidate_score(query, address),
+            })
+    return sorted(candidates, key=lambda item: item["score"], reverse=True)
+
+
+def _best_site_candidate(html: str, query: str) -> dict | None:
+    candidates = _extract_site_candidates(html, query)
+    if not candidates:
+        return None
+    best = candidates[0]
+    query_house = _house_number(_normalize_match_text(query))
+    best_house = _house_number(_normalize_match_text(best["address"]))
+    if query_house and best_house and query_house != best_house and best["score"] < 0.8:
+        logger.warning(
+            f"[WASTETRACK] no confident address candidate for query={query!r}; "
+            f"best={best['address']!r} score={best['score']:.2f}"
+        )
+        return None
+    logger.info(
+        f"[WASTETRACK] best address candidate score={best['score']:.2f} "
+        f"query={query!r} candidate={best['address']!r}"
+    )
+    return best
+
+
 def _parse_collection_html(html: str) -> dict:
     soup = BeautifulSoup(html, "html.parser")
 
@@ -220,7 +290,8 @@ def get_bin_collection_details(address: str) -> dict:
     if new_token:
         auth_token = new_token
 
-    wtss_site = _extract_site_id(search_resp.text)
+    best_candidate = _best_site_candidate(search_resp.text, address)
+    wtss_site = best_candidate["site_id"] if best_candidate else _extract_site_id(search_resp.text)
     if not wtss_site:
         return {"success": False, "error": "No matching address found", "address_query": address}
 
@@ -244,7 +315,12 @@ def get_bin_collection_details(address: str) -> dict:
         return {"success": False, "error": "No collection data in response", "address_query": address}
 
     logger.info(f"[WASTETRACK] total {((time.perf_counter() - total_t0) * 1000):.0f} ms")
-    return {"success": True, **parsed}
+    return {
+        "success": True,
+        "address_query": address,
+        "matched_address": best_candidate["address"] if best_candidate else parsed.get("address"),
+        **parsed,
+    }
 
 
 def format_voice_response(result: dict) -> str | None:
