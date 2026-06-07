@@ -5,6 +5,7 @@ ElevenLabs ClientTools passes a single `params` dict to each handler.
 """
 
 import re
+from difflib import get_close_matches
 
 from loguru import logger
 
@@ -18,6 +19,38 @@ _STREET_TYPE_TOKENS = {
     # abbreviations
     "st", "rd", "ave", "av", "pde", "cres", "pl", "ct", "dr",
     "ln", "cl", "gr", "cct", "hwy", "blvd", "tce",
+}
+
+_GRC_SUBURBS = (
+    "Allawah",
+    "Beverley Park",
+    "Beverly Hills",
+    "Blakehurst",
+    "Carss Park",
+    "Connells Point",
+    "Hurstville",
+    "Hurstville Grove",
+    "Kingsgrove",
+    "Kogarah",
+    "Kogarah Bay",
+    "Kyle Bay",
+    "Lugarno",
+    "Mortdale",
+    "Narwee",
+    "Oatley",
+    "Peakhurst",
+    "Peakhurst Heights",
+    "Penshurst",
+    "Ramsgate",
+    "Riverwood",
+    "Sans Souci",
+    "South Hurstville",
+    "Warraba",
+)
+
+_SUBURB_ALIASES = {
+    "waratah": "Warraba",
+    "warratah": "Warraba",
 }
 
 
@@ -34,8 +67,38 @@ def _split_street_suburb(text: str) -> tuple[str, str]:
     return text, ""
 
 
+def _normalize_suburb_key(suburb: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", suburb.lower()).strip()
+
+
+def _correct_suburb(suburb: str) -> str:
+    """Correct STT suburb mistakes against known GRC locality names."""
+    stripped = suburb.strip()
+    if not stripped:
+        return ""
+
+    key = _normalize_suburb_key(stripped)
+    alias = _SUBURB_ALIASES.get(key)
+    if alias:
+        logger.info(f"[ADDRESS] Corrected suburb alias: {suburb!r} → {alias!r}")
+        return alias
+
+    suburb_by_key = {_normalize_suburb_key(name): name for name in _GRC_SUBURBS}
+    exact = suburb_by_key.get(key)
+    if exact:
+        return exact
+
+    matches = get_close_matches(key, suburb_by_key.keys(), n=1, cutoff=0.78)
+    if matches:
+        corrected = suburb_by_key[matches[0]]
+        logger.info(f"[ADDRESS] Corrected suburb fuzzy match: {suburb!r} → {corrected!r}")
+        return corrected
+
+    return stripped
+
+
 def _correct_address(address: str) -> str:
-    """Apply STT street-name correction while preserving house number and suburb."""
+    """Apply STT street-name and suburb correction for GRC address lookups."""
     _num_match = re.match(r'^(\d+)\s+(.+)$', address)
     if _num_match:
         _house, _rest = _num_match.group(1), _num_match.group(2)
@@ -43,13 +106,15 @@ def _correct_address(address: str) -> str:
         corrected = _sc.correct_street(_street_part)
         if corrected:
             corrected_street = corrected[0]
-            suffix = f" {_suburb_part}" if _suburb_part else ""
+            corrected_suburb = _correct_suburb(_suburb_part)
+            suffix = f" {corrected_suburb}" if corrected_suburb else ""
             return f"{_house} {corrected_street}{suffix}"
     else:
         _street_part, _suburb_part = _split_street_suburb(address)
         corrected = _sc.correct_street(_street_part)
         if corrected:
-            suffix = f" {_suburb_part}" if _suburb_part else ""
+            corrected_suburb = _correct_suburb(_suburb_part)
+            suffix = f" {corrected_suburb}" if corrected_suburb else ""
             return f"{corrected[0]}{suffix}"
     return address
 
