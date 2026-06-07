@@ -12,6 +12,7 @@ Usage: ./changeLLM <provider> [model] [--azure-only|--local-only]
 
 Examples:
   ./changeLLM openai gpt-4o-mini
+  ./changeLLM azure gpt-4.1-mini --key "$AZURE_OPENAI_API_KEY"
   ./changeLLM cerebras gpt-oss-120b
   ./changeLLM deepseek deepseek-v4-pro
   ./changeLLM cerebras gpt-oss-120b --key "\$CEREBRAS_API_KEY"
@@ -84,10 +85,10 @@ done
 
 PROVIDER="$(printf '%s' "$PROVIDER" | tr '[:upper:]' '[:lower:]')"
 case "$PROVIDER" in
-  openai|cerebras|groq|mistral|deepseek) ;;
+  openai|azure|azure_openai|foundry|cerebras|groq|mistral|deepseek) ;;
   *)
     echo "Unsupported provider: $PROVIDER" >&2
-    echo "Supported providers: openai, cerebras, groq, mistral, deepseek" >&2
+    echo "Supported providers: openai, azure, azure_openai, foundry, cerebras, groq, mistral, deepseek" >&2
     exit 1
     ;;
 esac
@@ -95,6 +96,7 @@ esac
 if [[ -z "$MODEL" ]]; then
   case "$PROVIDER" in
     openai) MODEL="gpt-4o-mini" ;;
+    azure|azure_openai|foundry) MODEL="gpt-4.1-mini" ;;
     cerebras) MODEL="gpt-oss-120b" ;;
     deepseek) MODEL="deepseek-v4-pro" ;;
     groq|mistral)
@@ -139,13 +141,27 @@ if [[ "$UPDATE_AZURE" == true ]]; then
     ./setLLMKey "$PROVIDER" "$KEY_VALUE"
   fi
 
+  AZURE_ENDPOINT_ARGS=()
+  if [[ "$PROVIDER" == "azure" || "$PROVIDER" == "azure_openai" || "$PROVIDER" == "foundry" ]]; then
+    ENDPOINT_VALUE="${AZURE_OPENAI_ENDPOINT:-${AZURE_AI_FOUNDRY_ENDPOINT:-}}"
+    if [[ -z "$ENDPOINT_VALUE" && -f "$ENV_FILE" ]]; then
+      ENDPOINT_VALUE="$(grep -E "^(AZURE_OPENAI_ENDPOINT|AZURE_AI_FOUNDRY_ENDPOINT)=" "$ENV_FILE" | tail -n 1 | cut -d= -f2-)"
+    fi
+    if [[ -n "$ENDPOINT_VALUE" ]]; then
+      AZURE_ENDPOINT_ARGS+=(AZURE_OPENAI_ENDPOINT="$ENDPOINT_VALUE")
+    else
+      echo "Warning: AZURE_OPENAI_ENDPOINT not set. Configure it before using provider=$PROVIDER." >&2
+    fi
+  fi
+
   echo "Updating Azure Container App $APP_NAME in $RESOURCE_GROUP..."
   az containerapp update \
     --name "$APP_NAME" \
     --resource-group "$RESOURCE_GROUP" \
     --set-env-vars \
       LLM_PROVIDER="$PROVIDER" \
-      LLM_MODEL="$MODEL"
+      LLM_MODEL="$MODEL" \
+      "${AZURE_ENDPOINT_ARGS[@]}"
   echo "Azure LLM config updated."
 
   if [[ "$RESTART_APP" == true ]]; then

@@ -145,6 +145,7 @@ for _name in ("aioice", "aiortc"):
 
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
+from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import (
     Frame,
@@ -206,6 +207,9 @@ def _llm_model(provider: str) -> str:
         or _env(f"{provider.upper()}_MODEL")
         or {
             "openai": "gpt-4o-mini",
+            "azure": "gpt-4.1-mini",
+            "azure_openai": "gpt-4.1-mini",
+            "foundry": "gpt-4.1-mini",
             "cerebras": "gpt-oss-120b",
             "deepseek": "deepseek-v4-pro",
         }.get(provider, "")
@@ -215,6 +219,12 @@ def _llm_model(provider: str) -> str:
 def _llm_api_key(provider: str) -> str:
     if provider == "openai":
         return _env("OPENAI_API") or _env("OPENAI_API_KEY")
+    if provider in {"azure", "azure_openai", "foundry"}:
+        return (
+            _env("AZURE_OPENAI_API_KEY")
+            or _env("AZURE_AI_FOUNDRY_API_KEY")
+            or _env("AZURE_API_KEY")
+        )
     return _env(f"{provider.upper()}_API_KEY") or _env(f"{provider.upper()}_API")
 
 
@@ -226,6 +236,15 @@ def _validate_llm_key(provider: str, api_key: str) -> None:
             f"LLM_PROVIDER={provider} is configured with an OpenAI project key. "
             f"Set {provider.upper()}_API_KEY to a real {provider} key."
         )
+
+
+def _azure_openai_base_url() -> str:
+    return (
+        _env("LLM_BASE_URL")
+        or _env("AZURE_OPENAI_ENDPOINT")
+        or _env("AZURE_AI_FOUNDRY_ENDPOINT")
+        or _env("AZURE_OPENAI_BASE_URL")
+    )
 
 
 def _float_env(name: str, default: float) -> float:
@@ -243,6 +262,17 @@ def _tts_float_env(language: str, setting: str, default: float) -> float:
     return _float_env(
         f"ELEVENLABS_TTS_{language.upper()}_{setting.upper()}",
         _float_env(f"ELEVENLABS_TTS_{setting.upper()}", default),
+    )
+
+
+def create_vad_analyzer() -> SileroVADAnalyzer:
+    return SileroVADAnalyzer(
+        params=VADParams(
+            confidence=0.7,
+            start_secs=0.2,
+            stop_secs=0.6,
+            min_volume=0.6,
+        )
     )
 
 # Suppress pipecat internal DEBUG/TRACE noise — keep only INFO and above.
@@ -1100,6 +1130,21 @@ def create_llm(name: str, system_instruction: str = ""):
             ),
             **kwargs,
         )
+    if provider in {"azure", "azure_openai", "foundry"}:
+        base_url = _azure_openai_base_url()
+        if not base_url:
+            raise RuntimeError(
+                "Azure AI Foundry endpoint is not set. "
+                "Set AZURE_OPENAI_ENDPOINT or AZURE_AI_FOUNDRY_ENDPOINT."
+            )
+        return OpenAILLMService(
+            api_key=api_key,
+            base_url=base_url,
+            settings=OpenAILLMService.Settings(
+                model=model,
+                system_instruction=system_instruction,
+            ),
+        )
     if provider == "deepseek":
         return OpenAILLMService(
             api_key=api_key,
@@ -1824,7 +1869,7 @@ async def run_bot(
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
-            vad_analyzer=SileroVADAnalyzer(),
+            vad_analyzer=create_vad_analyzer(),
             user_turn_strategies=UserTurnStrategies(
                 start=[
                     MinWordsUserTurnStartStrategy(min_words=1, use_interim=False),
@@ -1877,7 +1922,7 @@ async def run_bot(
     async def on_client_connected(transport, client):
         logger.info("Client connected")
         context.add_message({
-            "role": "system",
+            "role": "user",
             "content": (
                 "Greet the caller and ask for their language preference. Say exactly: "
                 "'Hi, I'm Maya from Georges River Council — would you like to continue in English or Mandarin?'"
@@ -2345,7 +2390,7 @@ async def run_twilio_bot(websocket: WebSocket):
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
-            vad_analyzer=SileroVADAnalyzer(),
+            vad_analyzer=create_vad_analyzer(),
             user_turn_strategies=UserTurnStrategies(
                 start=[
                     MinWordsUserTurnStartStrategy(min_words=1, use_interim=False),
@@ -2396,7 +2441,7 @@ async def run_twilio_bot(websocket: WebSocket):
     async def on_client_connected(transport, client):
         logger.info("Twilio client connected")
         context.add_message({
-            "role": "system",
+            "role": "user",
             "content": (
                 "Greet the caller and ask for their language preference. Say exactly: "
                 "'Hi, I'm Maya from Georges River Council — would you like to continue in English or Mandarin?'"
@@ -2632,7 +2677,7 @@ async def run_telnyx_bot(websocket: WebSocket):
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
-            vad_analyzer=SileroVADAnalyzer(),
+            vad_analyzer=create_vad_analyzer(),
             user_turn_strategies=UserTurnStrategies(
                 start=[
                     MinWordsUserTurnStartStrategy(min_words=1, use_interim=False),
@@ -2679,7 +2724,7 @@ async def run_telnyx_bot(websocket: WebSocket):
     async def on_client_connected(transport, client):
         logger.info("Telnyx client connected")
         context.add_message({
-            "role": "system",
+            "role": "user",
             "content": (
                 "Greet the caller and ask for their language preference. Say exactly: "
                 "'Hi, I'm Maya from Georges River Council — would you like to continue in English or Mandarin?'"

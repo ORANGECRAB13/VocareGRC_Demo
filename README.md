@@ -72,13 +72,16 @@ Deepgram STT → ThinkerProcessor → ContextEnricher → LLM (`LLM_PROVIDER`) �
 ### LLM Provider
 
 All LLM-backed flows use `LLM_PROVIDER` and `LLM_MODEL`. Supported providers include
-`openai`, `cerebras`, `groq`, `mistral`, and `deepseek`. Provider-specific model env vars
-such as `OPENAI_MODEL` or `CEREBRAS_MODEL` are used when `LLM_MODEL` is not set.
+`openai`, `azure`, `cerebras`, `groq`, `mistral`, and `deepseek`. Provider-specific model
+env vars such as `OPENAI_MODEL`, `AZURE_MODEL`, or `CEREBRAS_MODEL` are used when
+`LLM_MODEL` is not set.
 
 Quick Azure LLM switches:
 
 ```bash
 ./changeLLM openai gpt-4o-mini
+AZURE_OPENAI_ENDPOINT="https://vocare-resource.services.ai.azure.com/openai/v1" \
+  ./changeLLM azure gpt-4.1-mini --key "$AZURE_OPENAI_API_KEY"
 ./changeLLM cerebras gpt-oss-120b
 ./setLLMKey openai
 ./showLLM
@@ -129,6 +132,12 @@ LLM_PROVIDER=openai
 LLM_MODEL=gpt-4o-mini
 ELEVENLABS_API_KEY=your_elevenlabs_key
 DEEPGRAM_API_KEY=your_deepgram_key
+
+# Azure AI Foundry OpenAI-compatible endpoint
+AZURE_OPENAI_API_KEY=your_foundry_key
+AZURE_OPENAI_ENDPOINT=https://vocare-resource.services.ai.azure.com/openai/v1
+LLM_PROVIDER=azure
+LLM_MODEL=gpt-4.1-mini
 
 # ElevenLabs voice IDs
 ELEVENLABS_VOICE_ID_EN=...
