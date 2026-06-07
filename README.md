@@ -81,7 +81,7 @@ Quick Azure LLM switches:
 ```bash
 ./changeLLM openai gpt-4o-mini
 AZURE_OPENAI_ENDPOINT="https://vocare-resource.services.ai.azure.com/openai/v1" \
-  ./changeLLM azure gpt-4.1-mini --key "$AZURE_OPENAI_API_KEY"
+  ./changeLLM azure gpt-5.4-mini --key "$AZURE_OPENAI_API_KEY"
 ./changeLLM cerebras gpt-oss-120b
 ./setLLMKey openai
 ./showLLM
@@ -137,7 +137,7 @@ DEEPGRAM_API_KEY=your_deepgram_key
 AZURE_OPENAI_API_KEY=your_foundry_key
 AZURE_OPENAI_ENDPOINT=https://vocare-resource.services.ai.azure.com/openai/v1
 LLM_PROVIDER=azure
-LLM_MODEL=gpt-4.1-mini
+LLM_MODEL=gpt-5.4-mini
 
 # ElevenLabs voice IDs
 ELEVENLABS_VOICE_ID_EN=...

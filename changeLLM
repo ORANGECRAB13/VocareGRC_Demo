@@ -12,7 +12,7 @@ Usage: ./changeLLM <provider> [model] [--azure-only|--local-only]
 
 Examples:
   ./changeLLM openai gpt-4o-mini
-  ./changeLLM azure gpt-4.1-mini --key "$AZURE_OPENAI_API_KEY"
+  ./changeLLM azure gpt-5.4-mini --key "$AZURE_OPENAI_API_KEY"
   ./changeLLM cerebras gpt-oss-120b
   ./changeLLM deepseek deepseek-v4-pro
   ./changeLLM cerebras gpt-oss-120b --key "\$CEREBRAS_API_KEY"
@@ -96,7 +96,7 @@ esac
 if [[ -z "$MODEL" ]]; then
   case "$PROVIDER" in
     openai) MODEL="gpt-4o-mini" ;;
-    azure|azure_openai|foundry) MODEL="gpt-4.1-mini" ;;
+    azure|azure_openai|foundry) MODEL="gpt-5.4-mini" ;;
     cerebras) MODEL="gpt-oss-120b" ;;
     deepseek) MODEL="deepseek-v4-pro" ;;
     groq|mistral)

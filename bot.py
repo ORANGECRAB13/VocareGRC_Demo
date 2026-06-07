@@ -207,9 +207,9 @@ def _llm_model(provider: str) -> str:
         or _env(f"{provider.upper()}_MODEL")
         or {
             "openai": "gpt-4o-mini",
-            "azure": "gpt-4.1-mini",
-            "azure_openai": "gpt-4.1-mini",
-            "foundry": "gpt-4.1-mini",
+            "azure": "gpt-5.4-mini",
+            "azure_openai": "gpt-5.4-mini",
+            "foundry": "gpt-5.4-mini",
             "cerebras": "gpt-oss-120b",
             "deepseek": "deepseek-v4-pro",
         }.get(provider, "")
