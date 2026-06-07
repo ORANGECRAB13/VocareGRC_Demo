@@ -359,7 +359,7 @@ _BACKCHANNEL_ONLY_RE = re.compile(
     r"understood|got\s+it|okay|ok|right|sure|mm[-\s]?hmm|"
     r"go\s+on|please\s+go\s+on|continue|please\s+continue|"
     r"take\s+your\s+time|no\s+worries|"
-    r"silence|silent|no\s+(?:response|output)|none|null|n/?a|"
+    r"silence|silent|no\s+response|none|null|n/?a|"
     r"(?:i(?:'m| am)\s+)?waiting\s+for\s+(?:the\s+)?caller\s+to\s+finish|"
     r"(?:i(?:'m| am)\s+)?waiting\s+for\s+you\s+to\s+finish|"
     r"我明白|明白|好的|好|请继续|继续说|慢慢来|我在听|我等您说完"
@@ -391,7 +391,6 @@ _BACKCHANNEL_PREFIXES = (
     "silence",
     "silent",
     "no response",
-    "no output",
     "none",
     "null",
     "n/a",
@@ -1092,8 +1091,8 @@ SYSTEM_INSTRUCTION_GRC = (
     "Do NOT say phrases like 'I understand', 'go on', 'take your time', "
     "'I'm listening', 'continue', 'I see', 'waiting for caller to finish', "
     "'silence', or similar acknowledgements/status messages. "
-    "If the caller only says a filler sound, hesitation, or asks you to wait, do not respond. "
-    "Never write or say the words 'silence', 'no output', 'None', 'null', or 'N/A'. "
+    "If the caller only says a filler sound, hesitation, or asks you to wait, produce no output at all. "
+    "Never write or say the words 'silence', 'None', 'null', or 'N/A'. "
 
     # --- HIGHEST PRIORITY: Human transfer ---
     "CRITICAL OVERRIDE — this rule takes priority over everything else: "
