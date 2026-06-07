@@ -1872,7 +1872,7 @@ async def run_bot(
             vad_analyzer=create_vad_analyzer(),
             user_turn_strategies=UserTurnStrategies(
                 start=[
-                    MinWordsUserTurnStartStrategy(min_words=1, use_interim=False),
+                    MinWordsUserTurnStartStrategy(min_words=1, use_interim=True),
                 ],
             ),
             user_mute_strategies=[MuteUntilFirstBotCompleteUserMuteStrategy()],
@@ -2435,7 +2435,7 @@ async def run_twilio_bot(websocket: WebSocket):
             vad_analyzer=create_vad_analyzer(),
             user_turn_strategies=UserTurnStrategies(
                 start=[
-                    MinWordsUserTurnStartStrategy(min_words=1, use_interim=False),
+                    MinWordsUserTurnStartStrategy(min_words=1, use_interim=True),
                 ],
             ),
             user_mute_strategies=[MuteUntilFirstBotCompleteUserMuteStrategy()],
@@ -2722,7 +2722,7 @@ async def run_telnyx_bot(websocket: WebSocket):
             vad_analyzer=create_vad_analyzer(),
             user_turn_strategies=UserTurnStrategies(
                 start=[
-                    MinWordsUserTurnStartStrategy(min_words=1, use_interim=False),
+                    MinWordsUserTurnStartStrategy(min_words=1, use_interim=True),
                 ],
             ),
             user_mute_strategies=[MuteUntilFirstBotCompleteUserMuteStrategy()],
