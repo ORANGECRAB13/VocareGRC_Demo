@@ -27,7 +27,7 @@ echo "Container App env vars:"
 az containerapp show \
   --name "$APP_NAME" \
   --resource-group "$RESOURCE_GROUP" \
-  --query "properties.template.containers[0].env[?contains(name, 'LLM') || contains(name, 'OPENAI') || contains(name, 'CEREBRAS') || contains(name, 'GROQ') || contains(name, 'MISTRAL') || contains(name, 'DEEPSEEK')]" \
+  --query "properties.template.containers[0].env[?contains(name, 'LLM') || contains(name, 'OPENAI') || contains(name, 'AZURE') || contains(name, 'CEREBRAS') || contains(name, 'GROQ') || contains(name, 'MISTRAL') || contains(name, 'DEEPSEEK')]" \
   --output json | python3 -c '
 import json
 import sys
@@ -49,5 +49,5 @@ echo "Secret names:"
 az containerapp secret list \
   --name "$APP_NAME" \
   --resource-group "$RESOURCE_GROUP" \
-  --query "[?contains(name, 'openai') || contains(name, 'cerebras') || contains(name, 'groq') || contains(name, 'mistral') || contains(name, 'deepseek')]" \
+  --query "[?contains(name, 'openai') || contains(name, 'azure') || contains(name, 'cerebras') || contains(name, 'groq') || contains(name, 'mistral') || contains(name, 'deepseek')]" \
   --output table
