@@ -21,6 +21,18 @@ _STREET_TYPE_TOKENS = {
     "ln", "cl", "gr", "cct", "hwy", "blvd", "tce",
 }
 
+_STREET_TYPE_ALIASES = {
+    "steet": "street",
+    "stret": "street",
+    "strret": "street",
+    "sreet": "street",
+    "rod": "road",
+    "raod": "road",
+    "avenu": "avenue",
+    "avene": "avenue",
+    "plac": "place",
+}
+
 _GRC_SUBURBS = (
     "Allawah",
     "Beverley Park",
@@ -62,8 +74,12 @@ def _split_street_suburb(text: str) -> tuple[str, str]:
     """
     tokens = text.split()
     for i, tok in enumerate(tokens):
-        if tok.lower().rstrip(".,") in _STREET_TYPE_TOKENS:
-            return " ".join(tokens[: i + 1]), " ".join(tokens[i + 1 :])
+        cleaned = tok.lower().rstrip(".,")
+        street_type = _STREET_TYPE_ALIASES.get(cleaned, cleaned)
+        if street_type in _STREET_TYPE_TOKENS:
+            street_tokens = tokens[: i + 1]
+            street_tokens[-1] = street_type.title() if len(street_type) > 2 else street_type
+            return " ".join(street_tokens), " ".join(tokens[i + 1 :])
     return text, ""
 
 
