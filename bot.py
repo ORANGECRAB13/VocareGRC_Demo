@@ -438,6 +438,54 @@ def _hesitation_turn_delay(text: str) -> float:
     return _hesitation_turn_action(text)[1]
 
 
+_BIN_ADDRESS_STREET_TYPES = {
+    "street", "st", "road", "rd", "avenue", "ave", "lane", "ln",
+    "drive", "dr", "place", "pl", "court", "ct", "way", "crescent",
+    "cres", "close", "parade", "pde", "boulevard", "blvd", "terrace", "tce",
+}
+
+_ADDRESS_AFFIRMATIVE_RE = re.compile(
+    r"^\s*(?:(?:yes|yeah|yep)(?:\s+(?:that's\s+|that\s+is\s+|it\s+is\s+)?(?:right|correct))?|"
+    r"correct|that's\s+right|that\s+is\s+right|right|it\s+is|that's\s+correct|"
+    r"是|对|对的|正确)\s*[\.\!,，。！]*\s*$",
+    re.IGNORECASE,
+)
+
+_ADDRESS_NEGATIVE_RE = re.compile(
+    r"^\s*(?:no|nope|nah|not\s+quite|incorrect|wrong|不是|不对|错了)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_street_address(address: str) -> bool:
+    words = address.lower().split()
+    has_number = any(w and w[0].isdigit() for w in words)
+    has_street_type = bool(_BIN_ADDRESS_STREET_TYPES.intersection(words))
+    return len(words) >= 2 and (has_number or has_street_type)
+
+
+def _confirmation_address_from_result(wt_result: dict, fallback: str) -> str:
+    heard = (wt_result.get("address") or fallback or "").strip()
+    return re.sub(r"\s+", " ", heard)
+
+
+def _bin_address_confirmation_prompt(address: str) -> str:
+    return f"I heard {address}. Is that correct?"
+
+
+def _extract_corrected_address_candidate(text: str) -> str:
+    stripped = re.sub(r"^\s*(?:no|nope|nah|sorry|it's|it is|the address is|that is)\b[:,\s]*", "", text, flags=re.IGNORECASE).strip()
+    if not stripped:
+        return ""
+
+    digit_match = re.search(r"\d+\s+.+", stripped)
+    candidate = digit_match.group(0).strip() if digit_match else stripped
+    candidate = re.sub(r"\s+", " ", candidate).strip(" .,!，。！")
+    if not _looks_like_street_address(candidate):
+        return ""
+    return _correct_address(candidate)
+
+
 class HesitationTurnGateProcessor(FrameProcessor):
     """Prevents filler/hold-on utterances from becoming completed user turns."""
 
@@ -609,6 +657,93 @@ class TransferRequestProcessor(FrameProcessor):
                 ),
                 FrameDirection.DOWNSTREAM,
             )
+
+
+class BinAddressConfirmationProcessor(FrameProcessor):
+    """Confirms successful bin lookup addresses before speaking collection days."""
+
+    def __init__(self, label: str = "BIN", **kwargs):
+        super().__init__(**kwargs)
+        self._label = label
+        self._pending: dict | None = None
+
+    async def stage_lookup_confirmation(self, address: str, tool_t0: float) -> str:
+        from grc_wastetrack import get_bin_collection_details as _wt, format_voice_response as _wt_fmt
+
+        address = _correct_address(address)
+        if not _looks_like_street_address(address):
+            logger.warning(f"[{self._label}] Rejected non-address input: {address!r}")
+            self._pending = None
+            return "I need a street address to look that up — could you tell me your street address?"
+
+        wt_t0 = time.perf_counter()
+        wt_result = await asyncio.to_thread(_wt, address)
+        logger.info(f"[{self._label}] Wastetrack elapsed {((time.perf_counter() - wt_t0) * 1000):.0f} ms")
+        voice = _wt_fmt(wt_result)
+        if not voice:
+            logger.warning(
+                f"[{self._label}] Wastetrack failed after {((time.perf_counter() - tool_t0) * 1000):.0f} ms: "
+                f"{wt_result.get('error')}"
+            )
+            self._pending = None
+            return (
+                "I couldn't find a bin collection record for that address in the council bin lookup. "
+                "Could you please repeat the full street address?"
+            )
+
+        heard_address = _confirmation_address_from_result(wt_result, address)
+        self._pending = {
+            "address": heard_address,
+            "voice": voice,
+        }
+        logger.info(
+            f"[{self._label}] Wastetrack SUCCESS — awaiting address confirmation | "
+            f"total tool {((time.perf_counter() - tool_t0) * 1000):.0f} ms | address={heard_address!r}"
+        )
+        return _bin_address_confirmation_prompt(heard_address)
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        if (
+            direction == FrameDirection.DOWNSTREAM
+            and self._pending
+            and isinstance(frame, TranscriptionFrame)
+        ):
+            text = (frame.text or "").strip()
+            corrected_address = _extract_corrected_address_candidate(text)
+
+            if _ADDRESS_AFFIRMATIVE_RE.match(text):
+                voice = self._pending["voice"]
+                logger.info(f"[{self._label}] Caller confirmed address: {self._pending['address']!r}")
+                self._pending = None
+                await self.push_frame(TTSSpeakFrame(text=voice), FrameDirection.DOWNSTREAM)
+                return
+
+            if corrected_address:
+                logger.info(f"[{self._label}] Caller corrected address: {text!r} → {corrected_address!r}")
+                try:
+                    prompt = await self.stage_lookup_confirmation(corrected_address, time.perf_counter())
+                    await self.push_frame(TTSSpeakFrame(text=prompt), FrameDirection.DOWNSTREAM)
+                except Exception as e:
+                    logger.error(f"[{self._label}] Corrected bin lookup failed: {e}")
+                    self._pending = None
+                    await self.push_frame(
+                        TTSSpeakFrame(text="I couldn't look up that corrected address. Could you please repeat the full street address?"),
+                        FrameDirection.DOWNSTREAM,
+                    )
+                return
+
+            if _ADDRESS_NEGATIVE_RE.match(text):
+                logger.info(f"[{self._label}] Caller rejected heard address without full correction: {text!r}")
+                self._pending = None
+                await self.push_frame(
+                    TTSSpeakFrame(text="No problem — could you please repeat the full street address, including the suburb?"),
+                    FrameDirection.DOWNSTREAM,
+                )
+                return
+
+        await self.push_frame(frame, direction)
 
 
 class ThinkerProcessor(FrameProcessor):
@@ -973,6 +1108,9 @@ SYSTEM_INSTRUCTION_GRC = (
     # --- Service: Bin collection ---
     "For bin collection day lookups: ask for the resident's full street address if they haven't "
     "provided one. Only call get_bin_collection_day once you have a specific street address. "
+    "If get_bin_collection_day returns a question asking whether the heard address is correct, "
+    "ask that exact confirmation question and do not provide collection days yet. "
+    "Only provide bin collection days after the caller confirms the address is correct. "
     "Never call the tool with a vague phrase, question, or incomplete input. "
     "Never guess or invent a collection day. "
     "For bin service FAQ questions (bin types, what goes in each bin, missed collections, "
@@ -1684,64 +1822,16 @@ async def run_bot(
         transcript_observer = TranscriptionObserver(event_queue)
         observers.append(transcript_observer)
 
+    bin_confirmation = BinAddressConfirmationProcessor("BIN TOOL")
+
     async def handle_get_bin_collection_day(params: FunctionCallParams):
         tool_t0 = time.perf_counter()
         address = _correct_address(params.arguments.get("address", "").strip())
         logger.info(f"Function call: get_bin_collection_day({address})")
 
-        # Guard: reject if the address doesn't look like a real street address.
-        # A valid address has at least two words and contains at least one digit
-        # OR a recognised street-type word.
-        _STREET_TYPES = {"street","st","road","rd","avenue","ave","lane","ln",
-                         "drive","dr","place","pl","court","ct","way","crescent","cres","close"}
-        _words = address.lower().split()
-        _has_number = any(w[0].isdigit() for w in _words)
-        _has_street_type = bool(_STREET_TYPES.intersection(_words))
-        if len(_words) < 2 or not (_has_number or _has_street_type):
-            logger.warning(f"[BIN TOOL] Rejected non-address input: '{address}'")
-            await params.result_callback({
-                "result": "I need a street address to look that up — could you tell me your street address?"
-            })
-            return
-
         try:
-            # ── Fast path: Thinker prefetch (disabled) ───────────────────────────
-            # prefetch_future = thinker_processor.pop_prefetch(address)
-            # if prefetch_future is not None:
-            #     if not prefetch_future.done():
-            #         logger.info(f"[BIN TOOL] Prefetch still in flight — waiting up to 2s")
-            #         try:
-            #             await asyncio.wait_for(asyncio.shield(prefetch_future), timeout=2.0)
-            #         except asyncio.TimeoutError:
-            #             logger.warning(f"[BIN TOOL] Prefetch timeout — falling through to direct call")
-            #     if prefetch_future.done():
-            #         voice = prefetch_future.result()
-            #         if voice:
-            #             logger.info(f"[BIN TOOL] PREFETCH HIT — zero-latency answer")
-            #             await params.result_callback({"result": voice})
-            #             return
-            #         logger.warning(f"[BIN TOOL] Prefetch returned None — falling through to direct call")
-
-            # ── Direct Wastetrack call ────────────────────────────────────────────
-            from grc_wastetrack import get_bin_collection_details as _wt, format_voice_response as _wt_fmt
-            wt_t0 = time.perf_counter()
-            wt_result = await asyncio.to_thread(_wt, address)
-            logger.info(f"[BIN TOOL] Wastetrack elapsed {((time.perf_counter() - wt_t0) * 1000):.0f} ms")
-            voice = _wt_fmt(wt_result)
-            if voice:
-                logger.info(f"[BIN TOOL] Wastetrack SUCCESS — total tool {((time.perf_counter() - tool_t0) * 1000):.0f} ms")
-                await params.result_callback({"result": voice})
-                return
-            logger.warning(
-                f"[BIN TOOL] Wastetrack failed after {((time.perf_counter() - tool_t0) * 1000):.0f} ms: "
-                f"{wt_result.get('error')}"
-            )
-            await params.result_callback({
-                "result": (
-                    "I couldn't find a bin collection record for that address in the council bin lookup. "
-                    "Could you please repeat the full street address?"
-                )
-            })
+            prompt = await bin_confirmation.stage_lookup_confirmation(address, tool_t0)
+            await params.result_callback({"result": prompt})
         except Exception as e:
             logger.error(f"get_bin_collection_day failed: {e}")
             await params.result_callback(
@@ -1840,6 +1930,7 @@ async def run_bot(
             transport.input(),
             stt,
             transfer_processor,
+            bin_confirmation,
             # thinker_processor,  # disabled
             lang_switch,
             hesitation_gate,
@@ -2139,6 +2230,7 @@ async def run_twilio_bot(websocket: WebSocket):
     # thinker_processor = ThinkerProcessor(thinker_llm=thinker_llm)
     # context_enricher = ContextEnricherProcessor(thinker_processor=thinker_processor)
     filler_tts = FillerTTSProcessor()
+    bin_confirmation = BinAddressConfirmationProcessor("Twilio BIN TOOL")
 
     # Register GRC tools
     async def handle_get_bin_collection_day(params: FunctionCallParams):
@@ -2146,56 +2238,9 @@ async def run_twilio_bot(websocket: WebSocket):
         address = _correct_address(params.arguments.get("address", "").strip())
         logger.info(f"[Twilio] get_bin_collection_day({address})")
 
-        _STREET_TYPES = {"street","st","road","rd","avenue","ave","lane","ln",
-                         "drive","dr","place","pl","court","ct","way","crescent","cres","close"}
-        _words = address.lower().split()
-        _has_number = any(w[0].isdigit() for w in _words)
-        _has_street_type = bool(_STREET_TYPES.intersection(_words))
-        if len(_words) < 2 or not (_has_number or _has_street_type):
-            logger.warning(f"[BIN TOOL] Rejected non-address input: '{address}'")
-            await params.result_callback({
-                "result": "I need a street address to look that up — could you tell me your street address?"
-            })
-            return
-
         try:
-            # ── Fast path: Thinker prefetch (disabled) ───────────────────────────
-            # prefetch_future = thinker_processor.pop_prefetch(address)
-            # if prefetch_future is not None:
-            #     if not prefetch_future.done():
-            #         logger.info(f"[BIN TOOL] Prefetch still in flight — waiting up to 2s")
-            #         try:
-            #             await asyncio.wait_for(asyncio.shield(prefetch_future), timeout=2.0)
-            #         except asyncio.TimeoutError:
-            #             logger.warning(f"[BIN TOOL] Prefetch timeout — falling through to direct call")
-            #     if prefetch_future.done():
-            #         voice = prefetch_future.result()
-            #         if voice:
-            #             logger.info(f"[BIN TOOL] PREFETCH HIT — zero-latency answer")
-            #             await params.result_callback({"result": voice})
-            #             return
-            #         logger.warning(f"[BIN TOOL] Prefetch returned None — falling through to direct call")
-
-            # ── Direct Wastetrack call ────────────────────────────────────────────
-            from grc_wastetrack import get_bin_collection_details as _wt, format_voice_response as _wt_fmt
-            wt_t0 = time.perf_counter()
-            wt_result = await asyncio.to_thread(_wt, address)
-            logger.info(f"[BIN TOOL] Wastetrack elapsed {((time.perf_counter() - wt_t0) * 1000):.0f} ms")
-            voice = _wt_fmt(wt_result)
-            if voice:
-                logger.info(f"[BIN TOOL] Wastetrack SUCCESS — total tool {((time.perf_counter() - tool_t0) * 1000):.0f} ms")
-                await params.result_callback({"result": voice})
-                return
-            logger.warning(
-                f"[BIN TOOL] Wastetrack failed after {((time.perf_counter() - tool_t0) * 1000):.0f} ms: "
-                f"{wt_result.get('error')}"
-            )
-            await params.result_callback({
-                "result": (
-                    "I couldn't find a bin collection record for that address in the council bin lookup. "
-                    "Could you please repeat the full street address?"
-                )
-            })
+            prompt = await bin_confirmation.stage_lookup_confirmation(address, tool_t0)
+            await params.result_callback({"result": prompt})
         except Exception as e:
             logger.error(f"get_bin_collection_day failed: {e}")
             await params.result_callback(
@@ -2362,6 +2407,7 @@ async def run_twilio_bot(websocket: WebSocket):
             transport.input(),
             stt,
             transfer_processor,
+            bin_confirmation,
             # thinker_processor,  # disabled
             lang_switch,
             hesitation_gate,
@@ -2494,39 +2540,15 @@ async def run_telnyx_bot(websocket: WebSocket):
     llm = create_llm(_env("LLM_PROVIDER"), system_instruction=system_instruction)
     tts = create_tts("elevenlabs")
     filler_tts = FillerTTSProcessor()
+    bin_confirmation = BinAddressConfirmationProcessor("Telnyx BIN TOOL")
 
     async def handle_get_bin_collection_day_telnyx(params: FunctionCallParams):
         tool_t0 = time.perf_counter()
         address = _correct_address(params.arguments.get("address", "").strip())
         logger.info(f"[Telnyx] get_bin_collection_day({address})")
-        _STREET_TYPES = {"street","st","road","rd","avenue","ave","lane","ln",
-                         "drive","dr","place","pl","court","ct","way","crescent","cres","close"}
-        _words = address.lower().split()
-        _has_number = any(w[0].isdigit() for w in _words)
-        _has_street_type = bool(_STREET_TYPES.intersection(_words))
-        if len(_words) < 2 or not (_has_number or _has_street_type):
-            await params.result_callback({"result": "I need a street address to look that up — could you tell me your street address?"})
-            return
         try:
-            from grc_wastetrack import get_bin_collection_details as _wt, format_voice_response as _wt_fmt
-            wt_t0 = time.perf_counter()
-            wt_result = await asyncio.to_thread(_wt, address)
-            logger.info(f"[BIN TOOL] Wastetrack elapsed {((time.perf_counter() - wt_t0) * 1000):.0f} ms")
-            voice = _wt_fmt(wt_result)
-            if voice:
-                logger.info(f"[BIN TOOL] Wastetrack SUCCESS — total tool {((time.perf_counter() - tool_t0) * 1000):.0f} ms")
-                await params.result_callback({"result": voice})
-                return
-            logger.warning(
-                f"[BIN TOOL] Wastetrack failed after {((time.perf_counter() - tool_t0) * 1000):.0f} ms: "
-                f"{wt_result.get('error')}"
-            )
-            await params.result_callback({
-                "result": (
-                    "I couldn't find a bin collection record for that address in the council bin lookup. "
-                    "Could you please repeat the full street address?"
-                )
-            })
+            prompt = await bin_confirmation.stage_lookup_confirmation(address, tool_t0)
+            await params.result_callback({"result": prompt})
         except Exception as e:
             logger.error(f"[Telnyx] get_bin_collection_day failed: {e}")
             await params.result_callback({"error": "I couldn't look up the bin collection day. Please try again."})
@@ -2648,6 +2670,7 @@ async def run_telnyx_bot(websocket: WebSocket):
         transport.input(),
         stt,
         transfer_processor,
+        bin_confirmation,
         lang_switch,
         hesitation_gate,
         user_aggregator,
