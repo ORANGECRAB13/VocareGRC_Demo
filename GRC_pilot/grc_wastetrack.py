@@ -201,6 +201,32 @@ def _best_site_candidate(html: str, query: str) -> dict | None:
     return best
 
 
+def get_address_candidates(address: str, limit: int = 10) -> list[dict]:
+    """Return Wastetrack address candidates for a search string."""
+    address = _normalize_address(address)
+    timeout = _timeout()
+
+    locator_resp = _SESSION.get(
+        f"{BASE_URL}/locator",
+        params={"key": KEY, "token": TOKEN},
+        headers=_GET_HEADERS,
+        timeout=timeout,
+    )
+    locator_resp.raise_for_status()
+    auth_token = _extract_authenticity_token(locator_resp.text)
+    if not auth_token:
+        return []
+
+    search_resp = _SESSION.post(
+        f"{BASE_URL}/locator_search",
+        headers=_POST_HEADERS,
+        data={**_COMMON_FORM, "authenticity_token": auth_token, "search": address},
+        timeout=timeout,
+    )
+    search_resp.raise_for_status()
+    return _extract_site_candidates(search_resp.text, address)[:limit]
+
+
 def _parse_collection_html(html: str) -> dict:
     soup = BeautifulSoup(html, "html.parser")
 

@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GRC Address Lookup Test</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f8;
+      --panel: #ffffff;
+      --ink: #1d2939;
+      --muted: #667085;
+      --line: #d0d5dd;
+      --blue: #175cd3;
+      --green: #067647;
+      --red: #b42318;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    main {
+      width: min(1120px, calc(100vw - 32px));
+      margin: 32px auto;
+    }
+
+    h1 {
+      margin: 0 0 6px;
+      font-size: 28px;
+      line-height: 1.2;
+    }
+
+    p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    form {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
+      margin: 24px 0 16px;
+    }
+
+    input, button {
+      height: 44px;
+      border-radius: 6px;
+      font: inherit;
+    }
+
+    input {
+      border: 1px solid var(--line);
+      padding: 0 12px;
+      background: #fff;
+      color: var(--ink);
+      min-width: 0;
+    }
+
+    button {
+      border: 0;
+      padding: 0 18px;
+      background: var(--blue);
+      color: white;
+      font-weight: 650;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      opacity: 0.6;
+      cursor: wait;
+    }
+
+    .examples {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 20px;
+    }
+
+    .examples button {
+      height: 34px;
+      background: #eef4ff;
+      color: #1849a9;
+      border: 1px solid #b2ccff;
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      align-items: start;
+    }
+
+    section {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+    }
+
+    h2 {
+      margin: 0 0 12px;
+      font-size: 16px;
+      line-height: 1.3;
+    }
+
+    dl {
+      display: grid;
+      grid-template-columns: 150px 1fr;
+      gap: 8px 12px;
+      margin: 0;
+    }
+
+    dt {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    dd {
+      margin: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .status {
+      min-height: 24px;
+      margin: 12px 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .ok { color: var(--green); font-weight: 700; }
+    .bad { color: var(--red); font-weight: 700; }
+
+    ol {
+      display: grid;
+      gap: 8px;
+      margin: 0;
+      padding-left: 22px;
+    }
+
+    li {
+      padding-left: 4px;
+    }
+
+    code, pre {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      max-height: 420px;
+      overflow: auto;
+      background: #101828;
+      color: #f9fafb;
+      border-radius: 6px;
+      padding: 12px;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    @media (max-width: 800px) {
+      form, .grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>GRC Address Lookup Test</h1>
+    <p>Type a messy or misspelled address to see the corrected input, Wastetrack candidates, selected match, and bin response.</p>
+
+    <form id="lookup-form">
+      <input id="address" name="address" autocomplete="off" value="50 Vine Steet Hurtsville" />
+      <button id="submit" type="submit">Test Lookup</button>
+    </form>
+
+    <div class="examples">
+      <button type="button" data-address="50 Vine Steet Hurtsville">50 Vine Steet Hurtsville</button>
+      <button type="button" data-address="fifty vine street hurstville">fifty vine street hurstville</button>
+      <button type="button" data-address="12 sample street warratah">12 sample street warratah</button>
+      <button type="button" data-address="6 Gannons Av Oatley">6 Gannons Av Oatley</button>
+    </div>
+
+    <div id="status" class="status"></div>
+
+    <div class="grid">
+      <section>
+        <h2>Summary</h2>
+        <dl>
+          <dt>Input</dt><dd id="input">-</dd>
+          <dt>Corrected input</dt><dd id="corrected">-</dd>
+          <dt>Selected match</dt><dd id="matched">-</dd>
+          <dt>Lookup status</dt><dd id="success">-</dd>
+          <dt>Voice response</dt><dd id="voice">-</dd>
+        </dl>
+      </section>
+
+      <section>
+        <h2>Top Candidates</h2>
+        <ol id="candidates"></ol>
+      </section>
+
+      <section style="grid-column: 1 / -1;">
+        <h2>Raw API Result</h2>
+        <pre id="raw">{}</pre>
+      </section>
+    </div>
+  </main>
+
+  <script>
+    const form = document.getElementById("lookup-form");
+    const addressInput = document.getElementById("address");
+    const submit = document.getElementById("submit");
+    const statusEl = document.getElementById("status");
+
+    const setText = (id, value) => {
+      document.getElementById(id).textContent = value || "-";
+    };
+
+    async function runLookup(address) {
+      submit.disabled = true;
+      statusEl.textContent = "Calling Wastetrack...";
+      setText("input", "-");
+      setText("corrected", "-");
+      setText("matched", "-");
+      setText("success", "-");
+      setText("voice", "-");
+      document.getElementById("candidates").innerHTML = "";
+      document.getElementById("raw").textContent = "{}";
+
+      try {
+        const response = await fetch("/api/debug/address-lookup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ address }),
+        });
+
+        if (!response.ok) {
+          throw new Error(await response.text());
+        }
+
+        const data = await response.json();
+        const lookup = data.lookup || {};
+        statusEl.textContent = "Done.";
+        setText("input", data.input);
+        setText("corrected", data.corrected_input);
+        setText("matched", lookup.matched_address || lookup.address);
+        document.getElementById("success").innerHTML = lookup.success
+          ? '<span class="ok">success</span>'
+          : '<span class="bad">failed</span>';
+        setText("voice", data.voice_response);
+
+        const list = document.getElementById("candidates");
+        for (const item of data.candidates || []) {
+          const li = document.createElement("li");
+          li.textContent = `${item.address} | score ${Number(item.score || 0).toFixed(2)} | site ${item.site_id}`;
+          list.appendChild(li);
+        }
+        if (!list.children.length) {
+          const li = document.createElement("li");
+          li.textContent = "No candidates returned.";
+          list.appendChild(li);
+        }
+
+        document.getElementById("raw").textContent = JSON.stringify(data, null, 2);
+      } catch (error) {
+        statusEl.textContent = `Error: ${error.message}`;
+      } finally {
+        submit.disabled = false;
+      }
+    }
+
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      runLookup(addressInput.value.trim());
+    });
+
+    for (const button of document.querySelectorAll("[data-address]")) {
+      button.addEventListener("click", () => {
+        addressInput.value = button.dataset.address;
+        runLookup(addressInput.value);
+      });
+    }
+  </script>
+</body>
+</html>

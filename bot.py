@@ -1953,6 +1953,48 @@ async def index():
         return HTMLResponse(content=f.read())
 
 
+@app.get("/address-test", response_class=HTMLResponse)
+async def address_test():
+    html_path = os.path.join(os.path.dirname(__file__), "static", "address-test.html")
+    with open(html_path) as f:
+        return HTMLResponse(content=f.read())
+
+
+@app.post("/api/debug/address-lookup")
+async def debug_address_lookup(request: Request):
+    payload = await request.json()
+    raw_address = (payload.get("address") or "").strip()
+    if not raw_address:
+        return Response(status_code=400, content="Missing address")
+
+    corrected_address = _correct_address(raw_address)
+    try:
+        from grc_wastetrack import (
+            get_address_candidates,
+            get_bin_collection_details as _wt,
+            format_voice_response as _wt_fmt,
+        )
+
+        candidates = await asyncio.to_thread(get_address_candidates, corrected_address, 12)
+        result = await asyncio.to_thread(_wt, corrected_address)
+        return {
+            "input": raw_address,
+            "corrected_input": corrected_address,
+            "candidates": candidates,
+            "lookup": result,
+            "voice_response": _wt_fmt(result),
+        }
+    except Exception as e:
+        logger.error(f"[ADDRESS TEST] lookup failed for {corrected_address!r}: {e}")
+        return {
+            "input": raw_address,
+            "corrected_input": corrected_address,
+            "candidates": [],
+            "lookup": {"success": False, "error": str(e), "address_query": corrected_address},
+            "voice_response": None,
+        }
+
+
 @app.get("/api/ice")
 async def get_ice_servers():
     """Return fresh TURN/STUN credentials for the frontend RTCPeerConnection."""
