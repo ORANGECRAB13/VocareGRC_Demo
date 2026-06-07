@@ -359,7 +359,7 @@ _BACKCHANNEL_ONLY_RE = re.compile(
     r"understood|got\s+it|okay|ok|right|sure|mm[-\s]?hmm|"
     r"go\s+on|please\s+go\s+on|continue|please\s+continue|"
     r"take\s+your\s+time|no\s+worries|"
-    r"silence|silent|no\s+response|"
+    r"silence|silent|no\s+response|none|null|n/?a|"
     r"(?:i(?:'m| am)\s+)?waiting\s+for\s+(?:the\s+)?caller\s+to\s+finish|"
     r"(?:i(?:'m| am)\s+)?waiting\s+for\s+you\s+to\s+finish|"
     r"我明白|明白|好的|好|请继续|继续说|慢慢来|我在听|我等您说完"
@@ -391,6 +391,9 @@ _BACKCHANNEL_PREFIXES = (
     "silence",
     "silent",
     "no response",
+    "none",
+    "null",
+    "n/a",
     "waiting for caller to finish",
     "waiting for the caller to finish",
     "waiting for you to finish",
@@ -491,6 +494,11 @@ def _is_backchannel_only(text: str) -> bool:
     return len(stripped) <= 120 and bool(_BACKCHANNEL_ONLY_RE.match(stripped))
 
 
+def _is_unspeakable_status_text(text: str) -> bool:
+    stripped = (text or "").strip()
+    return not stripped or _is_backchannel_only(stripped)
+
+
 def _normalize_backchannel_candidate(text: str) -> str:
     return re.sub(r"[\s\.,!\?，。！、]+", " ", (text or "").strip().lower()).strip()
 
@@ -528,15 +536,15 @@ class BackchannelSuppressorProcessor(FrameProcessor):
             return
 
         if direction == FrameDirection.DOWNSTREAM and isinstance(frame, TTSSpeakFrame):
-            if _is_backchannel_only(getattr(frame, "text", "")):
-                logger.info(f"[BACKCHANNEL] Suppressed TTSSpeakFrame status response: {frame.text!r}")
+            if _is_unspeakable_status_text(getattr(frame, "text", "")):
+                logger.info(f"[BACKCHANNEL] Suppressed TTSSpeakFrame status/null response: {frame.text!r}")
                 return
 
         if direction == FrameDirection.DOWNSTREAM and isinstance(frame, LLMFullResponseEndFrame):
             if self._buffered_text_frames:
                 text = "".join(getattr(f, "text", "") for f in self._buffered_text_frames)
-                if _is_backchannel_only(text):
-                    logger.info(f"[BACKCHANNEL] Suppressed LLM backchannel/status response: {text!r}")
+                if _is_unspeakable_status_text(text):
+                    logger.info(f"[BACKCHANNEL] Suppressed LLM status/null response: {text!r}")
                     self._buffered_text_frames.clear()
                     await self.push_frame(frame, direction)
                     return
@@ -949,7 +957,7 @@ SYSTEM_INSTRUCTION_GRC = (
     "'I'm listening', 'continue', 'I see', 'waiting for caller to finish', "
     "'silence', or similar acknowledgements/status messages. "
     "If the caller only says a filler sound, hesitation, or asks you to wait, produce no output at all. "
-    "Never write or say the word 'silence'. "
+    "Never write or say the words 'silence', 'None', 'null', or 'N/A'. "
 
     # --- HIGHEST PRIORITY: Human transfer ---
     "CRITICAL OVERRIDE — this rule takes priority over everything else: "
