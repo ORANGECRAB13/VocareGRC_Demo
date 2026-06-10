@@ -7,6 +7,7 @@ for each session.
 
 import argparse
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -14,6 +15,7 @@ import re
 import sys
 import random
 import time
+import uuid
 from datetime import datetime
 from dataclasses import dataclass, field
 from contextlib import asynccontextmanager
@@ -145,11 +147,19 @@ for _name in ("aioice", "aiortc"):
 
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
+from pipecat.audio.dtmf.types import KeypadEntry
+from pipecat.audio.utils import create_stream_resampler, pcm_to_ulaw, ulaw_to_pcm
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import (
+    AudioRawFrame,
+    CancelFrame,
+    EndFrame,
     Frame,
     FunctionCallInProgressFrame,
+    InputAudioRawFrame,
+    InputDTMFFrame,
+    InterruptionFrame,
     OutputAudioRawFrame,
     InterimTranscriptionFrame,
     LLMContextFrame,
@@ -180,6 +190,7 @@ from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.services.llm_service import LLMService, FunctionCallParams
 from pipecat.services.openai.llm import OpenAILLMService
+from pipecat.serializers.base_serializer import FrameSerializer
 from pipecat.serializers.twilio import TwilioFrameSerializer
 from pipecat.serializers.telnyx import TelnyxFrameSerializer
 from pipecat.transports.base_transport import TransportParams
@@ -188,6 +199,111 @@ from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams, FastAPIWebsocketTransport
 
 load_dotenv(override=True)
+
+
+class VobizFrameSerializer(FrameSerializer):
+    """Vobiz bidirectional <Stream> websocket serializer.
+
+    Vobiz sends inbound audio as JSON `media` events and expects outbound bot
+    audio as `playAudio` events. We use 8 kHz PCMU because it is the common
+    phone-call codec and is supported by Vobiz's XML Stream API.
+    """
+
+    class InputParams(FrameSerializer.InputParams):
+        vobiz_sample_rate: int = 8000
+        vobiz_encoding: str = "audio/x-mulaw"
+        sample_rate: int | None = None
+
+    def __init__(self, stream_id: str, params: InputParams | None = None):
+        super().__init__(params or VobizFrameSerializer.InputParams())
+        self._stream_id = stream_id
+        self._vobiz_sample_rate = self._params.vobiz_sample_rate
+        self._vobiz_encoding = self._params.vobiz_encoding
+        self._sample_rate = 0
+        self._input_resampler = create_stream_resampler()
+        self._output_resampler = create_stream_resampler()
+
+    async def setup(self, frame):
+        self._sample_rate = self._params.sample_rate or frame.audio_in_sample_rate
+
+    async def serialize(self, frame: Frame) -> str | bytes | None:
+        if isinstance(frame, (EndFrame, CancelFrame)):
+            return None
+
+        if isinstance(frame, InterruptionFrame):
+            return json.dumps({"event": "clearAudio", "streamId": self._stream_id})
+
+        if isinstance(frame, AudioRawFrame):
+            if self._vobiz_encoding == "audio/x-mulaw":
+                encoded = await pcm_to_ulaw(
+                    frame.audio,
+                    frame.sample_rate,
+                    self._vobiz_sample_rate,
+                    self._output_resampler,
+                )
+            else:
+                encoded = await self._output_resampler.resample(
+                    frame.audio,
+                    frame.sample_rate,
+                    self._vobiz_sample_rate,
+                )
+            if not encoded:
+                return None
+
+            return json.dumps({
+                "event": "playAudio",
+                "streamId": self._stream_id,
+                "media": {
+                    "contentType": self._vobiz_encoding,
+                    "sampleRate": self._vobiz_sample_rate,
+                    "payload": base64.b64encode(encoded).decode("utf-8"),
+                },
+            })
+
+        return None
+
+    async def deserialize(self, data: str | bytes) -> Frame | None:
+        try:
+            message = json.loads(data)
+        except json.JSONDecodeError:
+            logger.warning(f"[Vobiz] Failed to parse websocket JSON: {data}")
+            return None
+
+        event = message.get("event")
+
+        if event == "media":
+            payload_base64 = (message.get("media") or {}).get("payload")
+            if not payload_base64:
+                return None
+
+            payload = base64.b64decode(payload_base64)
+            if self._vobiz_encoding == "audio/x-mulaw":
+                pcm = await ulaw_to_pcm(
+                    payload,
+                    self._vobiz_sample_rate,
+                    self._sample_rate,
+                    self._input_resampler,
+                )
+            else:
+                pcm = await self._input_resampler.resample(
+                    payload,
+                    self._vobiz_sample_rate,
+                    self._sample_rate,
+                )
+            if not pcm:
+                return None
+
+            return InputAudioRawFrame(audio=pcm, num_channels=1, sample_rate=self._sample_rate)
+
+        if event == "dtmf":
+            digit = (message.get("dtmf") or {}).get("digit")
+            if digit:
+                try:
+                    return InputDTMFFrame(KeypadEntry(digit))
+                except ValueError:
+                    logger.warning(f"[Vobiz] Ignoring invalid DTMF digit: {digit}")
+
+        return None
 
 
 def _env(name: str, default: str = "") -> str:
@@ -266,12 +382,18 @@ def _tts_float_env(language: str, setting: str, default: float) -> float:
 
 
 def create_vad_analyzer() -> SileroVADAnalyzer:
+    # Telephony audio (8 kHz µ-law) is companded and often low-gain, so the
+    # default min_volume=0.6 / confidence=0.7 reject the quiet onset of short
+    # phrases. With use_interim turn starts, that means STT still shows the text
+    # but VAD never fires a speech-stop, so the turn never closes and the bot
+    # doesn't reply until the caller speaks louder ("Hello?"). Lower, env-tunable
+    # thresholds fix that without making the VAD trigger on line noise.
     return SileroVADAnalyzer(
         params=VADParams(
-            confidence=0.7,
-            start_secs=0.2,
-            stop_secs=0.6,
-            min_volume=0.6,
+            confidence=_float_env("VAD_CONFIDENCE", 0.6),
+            start_secs=_float_env("VAD_START_SECS", 0.15),
+            stop_secs=_float_env("VAD_STOP_SECS", 0.6),
+            min_volume=_float_env("VAD_MIN_VOLUME", 0.3),
         )
     )
 
@@ -850,6 +972,18 @@ class LanguageSwitchProcessor(FrameProcessor):
         self._filler_tts = filler_tts
         self._context = context
         self._is_english: bool = True  # start English; flip on first non-EN utterance
+        # Dedup synthetic language-choice turns. Keyed on the *canonical* rewritten
+        # sentence (stable) rather than the raw STT text (which varies between
+        # "english", "in english", "english please"...), so repeats and the delayed
+        # final that follows an interim collapse to one turn. Reset when the caller
+        # says something unrelated, so a genuine later re-selection still works.
+        self._last_injected_canonical = ""
+        self._last_injected_language_at = 0.0
+
+    # How long a language choice stays deduped. Generous because the failure mode
+    # is a runaway re-greet loop; a real re-selection clears the guard via a normal
+    # turn anyway.
+    _LANGUAGE_DEDUP_SECS = 30.0
 
     # Keywords that signal a language preference regardless of the STT language tag.
     # "Mandarin" is an English word so ElevenLabs STT returns language="en" or None — we
@@ -857,23 +991,103 @@ class LanguageSwitchProcessor(FrameProcessor):
     _MANDARIN_KEYWORDS = frozenset({"mandarin", "chinese", "中文", "普通话", "国语"})
     _ENGLISH_KEYWORDS  = frozenset({"english", "英文", "英语"})
 
+    def _closed_slot_language_rewrite(self, text: str, is_english: bool) -> str | None:
+        """Turn one-word language choices into a full user turn for the LLM."""
+        normalized = re.sub(r"\s+", " ", re.sub(r"[^a-zA-Z\u4e00-\u9fff]+", " ", text).lower()).strip()
+        token_count = len(normalized.split())
+        if token_count > 4:
+            return None
+
+        if is_english and any(kw in normalized for kw in self._ENGLISH_KEYWORDS):
+            return "I would like to continue in English."
+        if not is_english and any(kw in normalized for kw in self._MANDARIN_KEYWORDS):
+            return "I would like to continue in Mandarin Chinese."
+        return None
+
+    def _detect_language_preference(self, text: str) -> tuple[bool | None, str | None]:
+        text_lower = (text or "").strip().lower()
+        if any(kw in text_lower for kw in self._MANDARIN_KEYWORDS):
+            return False, self._closed_slot_language_rewrite(text, False)
+        if any(kw in text_lower for kw in self._ENGLISH_KEYWORDS):
+            return True, self._closed_slot_language_rewrite(text, True)
+        return None, None
+
+    def _recently_injected_language_choice(self, canonical: str) -> bool:
+        """True if `canonical` matches the language turn we last emitted, recently."""
+        return (
+            bool(canonical)
+            and canonical == self._last_injected_canonical
+            and (time.monotonic() - self._last_injected_language_at) < self._LANGUAGE_DEDUP_SECS
+        )
+
+    async def _emit_language_choice_turn(self, frame, is_english: bool, rewritten_text: str):
+        original_text = getattr(frame, "text", "")
+        self._record_language_preference(is_english, original_text)
+        logger.info(
+            f"Language preference interim finalized for LLM: "
+            f"{original_text!r} -> {rewritten_text!r}"
+        )
+
+        self._last_injected_canonical = rewritten_text
+        self._last_injected_language_at = time.monotonic()
+
+        if is_english != self._is_english:
+            self._is_english = is_english
+            await self._switch_language(is_english)
+            await asyncio.sleep(1.0)
+
+        try:
+            language_turn = TranscriptionFrame(
+                text=rewritten_text,
+                user_id=getattr(frame, "user_id", ""),
+                timestamp=getattr(frame, "timestamp", _now_iso()),
+                language=getattr(frame, "language", None),
+            )
+        except TypeError:
+            language_turn = TranscriptionFrame(
+                text=rewritten_text,
+                user_id=getattr(frame, "user_id", ""),
+                timestamp=getattr(frame, "timestamp", _now_iso()),
+            )
+
+        await self.push_frame(language_turn, FrameDirection.DOWNSTREAM)
+
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
 
+        if isinstance(frame, InterimTranscriptionFrame) and direction == FrameDirection.DOWNSTREAM:
+            explicit_language_preference, rewritten_language_turn = self._detect_language_preference(frame.text)
+            if explicit_language_preference is not None and rewritten_language_turn:
+                if not self._recently_injected_language_choice(rewritten_language_turn):
+                    await self._emit_language_choice_turn(
+                        frame,
+                        explicit_language_preference,
+                        rewritten_language_turn,
+                    )
+                return
+
         if isinstance(frame, TranscriptionFrame) and direction == FrameDirection.DOWNSTREAM:
             switched = False
-            text_lower = frame.text.strip().lower()
-            explicit_language_preference = None
 
             # 1. Text-based keyword detection (catches "Mandarin" spoken in English)
-            if any(kw in text_lower for kw in self._MANDARIN_KEYWORDS):
-                explicit_language_preference = False
+            explicit_language_preference, rewritten_language_turn = self._detect_language_preference(frame.text)
+
+            # Suppress the delayed final that trails an interim we already turned
+            # into a synthetic turn, and any rapid repeat of the same choice — this
+            # is what stops the runaway re-greet loop.
+            if rewritten_language_turn and self._recently_injected_language_choice(rewritten_language_turn):
+                logger.info(f"Suppressing duplicate language transcript: {frame.text!r}")
+                return
+            # A genuine non-language turn clears the guard so a later re-selection works.
+            if explicit_language_preference is None:
+                self._last_injected_canonical = ""
+
+            if explicit_language_preference is False:
                 if self._is_english:
                     self._is_english = False
                     await self._switch_language(False)
                     switched = True
-            elif any(kw in text_lower for kw in self._ENGLISH_KEYWORDS):
-                explicit_language_preference = True
+            elif explicit_language_preference is True:
                 if not self._is_english:
                     self._is_english = True
                     await self._switch_language(True)
@@ -892,6 +1106,15 @@ class LanguageSwitchProcessor(FrameProcessor):
 
             if explicit_language_preference is not None:
                 self._record_language_preference(explicit_language_preference, frame.text)
+                if rewritten_language_turn:
+                    logger.info(
+                        f"Language preference transcript rewritten for LLM: "
+                        f"{frame.text!r} -> {rewritten_language_turn!r}"
+                    )
+                    frame.text = rewritten_language_turn
+                    # Dedup any repeat of this same choice that arrives shortly after.
+                    self._last_injected_canonical = rewritten_language_turn
+                    self._last_injected_language_at = time.monotonic()
 
             if switched:
                 # ElevenLabs closes and reopens its WebSocket on a voice/language change.
@@ -910,14 +1133,18 @@ class LanguageSwitchProcessor(FrameProcessor):
             msg = (
                 "CALLER_LANGUAGE_SELECTION: The caller explicitly selected English. "
                 "Treat this as the complete answer to your language preference question. "
-                "Do not ask for the language again. Continue in English."
+                "Do not ask for the language again. In one warm, natural sentence, tell them "
+                "you can help with bin collection days, development applications, and what's on "
+                "around the council, then ask what they'd like help with. Continue in English."
             )
         else:
             msg = (
                 "CALLER_LANGUAGE_SELECTION: The caller explicitly selected Mandarin Chinese (普通话). "
                 "Treat this as the complete answer to your language preference question. "
-                "Do not ask for the language again. Acknowledge briefly in simplified Chinese "
-                "and continue using Mandarin Chinese only."
+                "Do not ask for the language again. In one warm, natural sentence in simplified "
+                "Chinese, tell them you can help with bin collection days (垃圾收集日), development "
+                "applications (开发申请), and council events (社区活动), then ask what they'd like help "
+                "with. Continue using Mandarin Chinese only."
             )
 
         self._context.add_message({"role": "system", "content": msg})
@@ -1015,6 +1242,11 @@ SYSTEM_INSTRUCTION_GRC = (
     "provided one. Only call get_bin_collection_day once you have a specific street address. "
     "Never call the tool with a vague phrase, question, or incomplete input. "
     "Never guess or invent a collection day. "
+    "The bin lookup tool may correct a noisy or misspelled transcript to the closest council address. "
+    "If the tool asks you to confirm an address, ask only that confirmation question and wait. "
+    "If the resident confirms, call get_bin_collection_day again with confirmed=true and the address value set to the confirmation text. "
+    "Only tell the resident the collection days after the confirmation call returns them. "
+    "If the resident rejects the address, ask for the corrected full street address. "
     "For bin service FAQ questions (bin types, what goes in each bin, missed collections, "
     "bin placement rules, fees, public holidays, infirm service, bin tags, etc.): "
     "answer directly from the BIN SERVICES KNOWLEDGE BASE embedded below — no tool call needed. "
@@ -1230,10 +1462,122 @@ def create_tts(name: str):
 
 pcs_map: Dict[str, SmallWebRTCConnection] = {}
 graph_event_queues: Dict[str, asyncio.Queue] = {}
+live_call_sessions: Dict[str, dict] = {}
+LIVE_CALL_LIMIT = 80
+LIVE_TRANSCRIPT_LIMIT = 240
+synthetic_test_jobs: Dict[str, dict] = {}
+SYNTHETIC_JOB_LIMIT = 40
 
 # Demo mode shared state
 demo_events: list[dict] = []      # append-only list of graph events (fan-out to multiple viewers)
 demo_pc_id: str | None = None     # presenter's pc_id (None = no active demo)
+
+
+def _now_iso() -> str:
+    return datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
+
+
+def _live_call_key(provider: str, primary_id: str | None = None, fallback_id: str | None = None) -> str:
+    raw_id = primary_id or fallback_id or f"{int(time.time() * 1000)}-{random.randint(1000, 9999)}"
+    return f"{provider.lower()}:{raw_id}"
+
+
+def _trim_live_call_sessions() -> None:
+    if len(live_call_sessions) <= LIVE_CALL_LIMIT:
+        return
+    ordered = sorted(
+        live_call_sessions.items(),
+        key=lambda item: item[1].get("last_update") or item[1].get("started_at") or "",
+        reverse=True,
+    )
+    keep = {call_id for call_id, _ in ordered[:LIVE_CALL_LIMIT]}
+    for call_id in list(live_call_sessions):
+        if call_id not in keep:
+            live_call_sessions.pop(call_id, None)
+
+
+def _start_live_call(
+    provider: str,
+    call_id: str | None = None,
+    stream_id: str | None = None,
+    caller: str | None = None,
+    meta: dict | None = None,
+) -> str:
+    monitor_id = _live_call_key(provider, call_id, stream_id)
+    now = _now_iso()
+    session = live_call_sessions.get(monitor_id)
+    if not session:
+        session = {
+            "id": monitor_id,
+            "provider": provider,
+            "call_id": call_id,
+            "stream_id": stream_id,
+            "caller": caller or "Phone caller",
+            "status": "active",
+            "started_at": now,
+            "ended_at": None,
+            "last_update": now,
+            "meta": meta or {},
+            "transcript": [],
+        }
+        live_call_sessions[monitor_id] = session
+    else:
+        session.update({
+            "provider": provider,
+            "call_id": call_id or session.get("call_id"),
+            "stream_id": stream_id or session.get("stream_id"),
+            "caller": caller or session.get("caller") or "Phone caller",
+            "status": "active",
+            "ended_at": None,
+            "last_update": now,
+            "meta": {**session.get("meta", {}), **(meta or {})},
+        })
+    _trim_live_call_sessions()
+    logger.info(f"[LIVE_CALLS] Started {provider} session monitor_id={monitor_id}")
+    return monitor_id
+
+
+def _append_live_transcript(monitor_id: str | None, speaker: str, text: str) -> None:
+    if not monitor_id or not text:
+        return
+    now = _now_iso()
+    session = live_call_sessions.get(monitor_id)
+    if not session:
+        session = {
+            "id": monitor_id,
+            "provider": monitor_id.split(":", 1)[0].title(),
+            "call_id": None,
+            "stream_id": None,
+            "caller": "Phone caller",
+            "status": "active",
+            "started_at": now,
+            "ended_at": None,
+            "last_update": now,
+            "meta": {},
+            "transcript": [],
+        }
+        live_call_sessions[monitor_id] = session
+    session["last_update"] = now
+    session["transcript"].append({
+        "speaker": speaker,
+        "text": text,
+        "timestamp": now,
+    })
+    if len(session["transcript"]) > LIVE_TRANSCRIPT_LIMIT:
+        session["transcript"] = session["transcript"][-LIVE_TRANSCRIPT_LIMIT:]
+
+
+def _end_live_call(monitor_id: str | None) -> None:
+    if not monitor_id:
+        return
+    session = live_call_sessions.get(monitor_id)
+    if not session:
+        return
+    now = _now_iso()
+    session["status"] = "ended"
+    session["ended_at"] = now
+    session["last_update"] = now
+    logger.info(f"[LIVE_CALLS] Ended session monitor_id={monitor_id}")
 
 def _filter_relay_sdp(answer: dict) -> dict:
     """Strip non-relay ICE candidates from a WebRTC answer SDP.
@@ -1499,6 +1843,230 @@ async def _cleanup_webrtc_session(pc_id: str, reason: str = "cleanup", disconnec
     return True
 
 
+_BIN_STREET_TYPES = {
+    "street", "st", "road", "rd", "avenue", "ave", "lane", "ln",
+    "drive", "dr", "place", "pl", "court", "ct", "way", "crescent",
+    "cres", "close",
+}
+
+# Token-based, not exact-phrase, so natural confirmations like "yep that's correct"
+# or "yes that's the one" are recognised. Negation always wins over affirmation.
+_CONFIRM_YES_TOKENS = {
+    "yes", "yeah", "yep", "yup", "correct", "right", "confirmed", "confirm",
+    "sure", "ok", "okay", "perfect", "exactly", "definitely", "absolutely",
+    "对", "对的", "是", "是的", "正确", "没错",
+}
+_CONFIRM_NO_TOKENS = {
+    "no", "nope", "nah", "incorrect", "wrong", "不", "不是", "不对", "错",
+}
+# Multi-word negations that wouldn't survive single-token matching.
+_CONFIRM_NO_PHRASES = ("not correct", "not right", "not that", "not the")
+
+
+def _normalize_confirmation_text(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9'一-鿿]+", " ", text.lower())).strip()
+
+
+def _is_confirmation_no(text: str) -> bool:
+    normalized = _normalize_confirmation_text(text)
+    if any(phrase in normalized for phrase in _CONFIRM_NO_PHRASES):
+        return True
+    return bool(set(normalized.split()) & _CONFIRM_NO_TOKENS)
+
+
+def _is_confirmation_yes(text: str) -> bool:
+    # A negation anywhere ("no, that's wrong") must not read as a yes.
+    if _is_confirmation_no(text):
+        return False
+    normalized = _normalize_confirmation_text(text)
+    return bool(set(normalized.split()) & _CONFIRM_YES_TOKENS)
+
+
+def _looks_like_bin_address(address: str) -> bool:
+    words = address.lower().split()
+    has_number = any(w[0].isdigit() for w in words)
+    has_street_type = bool(_BIN_STREET_TYPES.intersection(words))
+    return len(words) >= 2 and (has_number or has_street_type)
+
+
+def _display_address(address: str) -> str:
+    cleaned = re.sub(r"\s+", " ", (address or "").replace(",", " ")).strip()
+    return cleaned.title() if cleaned else "that address"
+
+
+async def _select_bin_address_with_llm(llm, transcript: str, candidates: list[dict]) -> dict | None:
+    if not llm or not candidates:
+        return None
+
+    max_candidates = max(1, min(int(_env("ADDRESS_LLM_MAX_CANDIDATES", "8")), len(candidates)))
+    candidate_lines = []
+    for i, candidate in enumerate(candidates[:max_candidates], start=1):
+        candidate_lines.append(f"{i}. {candidate.get('address', '')}")
+
+    system = (
+        "You select the most likely Georges River Council address from a short candidate list. "
+        "The input transcript may contain severe speech-to-text errors, phonetic spellings, "
+        "misheard suburb names, or spoken number words. "
+        "Choose ONLY from the numbered candidate list. Do not invent an address. "
+        "If none are plausible, return index null. "
+        "Output ONLY JSON: {\"index\": number|null, \"confidence\": 0.0-1.0, \"reason\": \"short\"}."
+    )
+    user = (
+        f"Caller transcript: {transcript!r}\n\n"
+        "Candidate addresses:\n"
+        + "\n".join(candidate_lines)
+    )
+
+    try:
+        timeout = _float_env("ADDRESS_LLM_SELECTION_TIMEOUT_SECS", 4.0)
+        response = await asyncio.wait_for(
+            llm._client.chat.completions.create(
+                model=llm._settings.model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                max_tokens=120,
+            ),
+            timeout=timeout,
+        )
+        content = (response.choices[0].message.content or "").strip()
+        match = re.search(r"\{.*\}", content, flags=re.DOTALL)
+        data = json.loads(match.group(0) if match else content)
+        index = data.get("index")
+        confidence = float(data.get("confidence") or 0)
+        if index is None or confidence < _float_env("ADDRESS_LLM_MIN_CONFIDENCE", 0.55):
+            logger.info(
+                f"[ADDRESS LLM] No confident selection transcript={transcript!r} "
+                f"confidence={confidence:.2f} response={content!r}"
+            )
+            return None
+        index = int(index)
+        if not 1 <= index <= max_candidates:
+            logger.warning(f"[ADDRESS LLM] Invalid candidate index {index} response={content!r}")
+            return None
+        selected = candidates[index - 1]
+        logger.info(
+            f"[ADDRESS LLM] Selected candidate {index}/{max_candidates} "
+            f"confidence={confidence:.2f} transcript={transcript!r} "
+            f"address={selected.get('address')!r}"
+        )
+        return selected
+    except Exception as e:
+        logger.warning(f"[ADDRESS LLM] Selection failed; falling back to scoring: {e}")
+        return None
+
+
+async def _choose_bin_lookup_address(llm, address: str) -> str:
+    if _env("ADDRESS_LLM_SELECTION", "true").lower() in {"0", "false", "no", "off"}:
+        return address
+
+    try:
+        from grc_wastetrack import get_expanded_address_candidates
+
+        candidates = await asyncio.to_thread(
+            get_expanded_address_candidates,
+            address,
+            int(_env("ADDRESS_LLM_MAX_CANDIDATES", "8")),
+        )
+    except Exception as e:
+        logger.warning(f"[ADDRESS LLM] Could not fetch address candidates for {address!r}: {e}")
+        return address
+
+    if not candidates:
+        return address
+
+    selected = await _select_bin_address_with_llm(llm, address, candidates)
+    if selected and selected.get("address"):
+        return selected["address"]
+
+    logger.info(
+        f"[ADDRESS LLM] Falling back to top scored candidate "
+        f"score={candidates[0].get('score', 0):.2f} address={candidates[0].get('address')!r}"
+    )
+    return candidates[0].get("address") or address
+
+
+async def _handle_bin_collection_lookup(params: FunctionCallParams, pending_lookup: dict, label: str, llm=None):
+    """Lookup bin days, but require caller confirmation before releasing the schedule."""
+    tool_t0 = time.perf_counter()
+    raw_address = (params.arguments.get("address") or "").strip()
+    confirmed = bool(params.arguments.get("confirmed"))
+
+    if pending_lookup:
+        if confirmed or _is_confirmation_yes(raw_address):
+            pending = pending_lookup.pop("bin_collection", None)
+            if pending:
+                logger.info(f"[BIN TOOL] {label} confirmed address: {pending['address']}")
+                await params.result_callback({"result": pending["voice"]})
+                return
+
+        if _is_confirmation_no(raw_address):
+            pending_lookup.pop("bin_collection", None)
+            logger.info(f"[BIN TOOL] {label} caller rejected guessed address")
+            await params.result_callback({
+                "result": "Okay, what is the correct full street address?"
+            })
+            return
+
+    address = _correct_address(raw_address)
+    logger.info(f"{label} get_bin_collection_day({address})")
+
+    if not _looks_like_bin_address(address):
+        logger.warning(f"[BIN TOOL] Rejected non-address input: '{address}'")
+        await params.result_callback({
+            "result": "I need a street address to look that up — could you tell me your street address?"
+        })
+        return
+
+    try:
+        from grc_wastetrack import get_bin_collection_details as _wt, format_voice_response as _wt_fmt
+
+        lookup_address = await _choose_bin_lookup_address(llm, address)
+        if lookup_address != address:
+            logger.info(f"[BIN TOOL] Address selected for lookup: {address!r} -> {lookup_address!r}")
+            address = lookup_address
+
+        wt_t0 = time.perf_counter()
+        wt_result = await asyncio.to_thread(_wt, address)
+        logger.info(f"[BIN TOOL] Wastetrack elapsed {((time.perf_counter() - wt_t0) * 1000):.0f} ms")
+        voice = _wt_fmt(wt_result)
+        if voice:
+            matched_address = _display_address(
+                wt_result.get("matched_address") or wt_result.get("address") or address
+            )
+            pending_lookup["bin_collection"] = {
+                "address": matched_address,
+                "voice": voice,
+                "result": wt_result,
+            }
+            logger.info(
+                f"[BIN TOOL] Wastetrack SUCCESS; awaiting caller confirmation "
+                f"query={address!r} matched={matched_address!r} "
+                f"total={((time.perf_counter() - tool_t0) * 1000):.0f} ms"
+            )
+            await params.result_callback({
+                "result": f"I found {matched_address}. Is that the correct address?"
+            })
+            return
+
+        logger.warning(
+            f"[BIN TOOL] Wastetrack failed after {((time.perf_counter() - tool_t0) * 1000):.0f} ms: "
+            f"{wt_result.get('error')}"
+        )
+        await params.result_callback({
+            "result": (
+                "I couldn't find a bin collection record for that address in the council bin lookup. "
+                "Could you please repeat the full street address?"
+            )
+        })
+    except Exception as e:
+        logger.error(f"{label} get_bin_collection_day failed: {e}")
+        await params.result_callback(
+            {"error": "I couldn't look up the bin collection day. Please try again."}
+        )
+
+
 # ---------------------------------------------------------------------------
 # Graph highlight observer
 # ---------------------------------------------------------------------------
@@ -1509,12 +2077,33 @@ class TranscriptionObserver(BaseObserver):
 
     Pushes 'user_transcription' events on final TranscriptionFrames and
     'bot_transcription' events when the LLM finishes a full response.
+    Also logs transcript text so phone-call debugging works from Azure logs.
     """
 
-    def __init__(self, event_queue: asyncio.Queue):
+    def __init__(self, event_queue=None, monitor_id: str | None = None):
         super().__init__()
         self._event_queue = event_queue
+        self._monitor_id = monitor_id
         self._bot_buffer = ""
+        self._seen_transcription_frame_ids: set[int] = set()
+        self._recent_transcripts: dict[str, tuple[str, float]] = {}
+
+    def _is_duplicate_transcript(self, speaker: str, text: str, frame: Frame | None = None) -> bool:
+        if frame is not None:
+            frame_id = id(frame)
+            if frame_id in self._seen_transcription_frame_ids:
+                return True
+            self._seen_transcription_frame_ids.add(frame_id)
+            if len(self._seen_transcription_frame_ids) > 500:
+                self._seen_transcription_frame_ids = set(list(self._seen_transcription_frame_ids)[-250:])
+
+        now = time.monotonic()
+        normalized = re.sub(r"\s+", " ", text.lower()).strip()
+        last_text, last_time = self._recent_transcripts.get(speaker, ("", 0.0))
+        if normalized == last_text and (now - last_time) < 2.5:
+            return True
+        self._recent_transcripts[speaker] = (normalized, now)
+        return False
 
     async def on_push_frame(self, data: FramePushed):
         frame = data.frame
@@ -1523,10 +2112,15 @@ class TranscriptionObserver(BaseObserver):
 
         if isinstance(frame, TranscriptionFrame):
             text = frame.text.strip()
+            if text and self._is_duplicate_transcript("caller", text, frame):
+                return
             if text:
-                await _put_graph_event(
-                    self._event_queue, {"type": "user_transcription", "text": text}
-                )
+                logger.info(f"[CALL_TRANSCRIPT] Caller: {text}")
+                _append_live_transcript(self._monitor_id, "caller", text)
+                if self._event_queue:
+                    await _put_graph_event(
+                        self._event_queue, {"type": "user_transcription", "text": text}
+                    )
 
         elif isinstance(frame, LLMTextFrame) and isinstance(data.source, LLMService):
             self._bot_buffer += frame.text
@@ -1535,9 +2129,12 @@ class TranscriptionObserver(BaseObserver):
             text = self._bot_buffer.strip()
             self._bot_buffer = ""
             if text:
-                await _put_graph_event(
-                    self._event_queue, {"type": "bot_transcription", "text": text}
-                )
+                logger.info(f"[CALL_TRANSCRIPT] Agent: {text}")
+                _append_live_transcript(self._monitor_id, "agent", text)
+                if self._event_queue:
+                    await _put_graph_event(
+                        self._event_queue, {"type": "bot_transcription", "text": text}
+                    )
 
 
 # ---------------------------------------------------------------------------
@@ -1730,78 +2327,17 @@ async def run_bot(
     # context_enricher = ContextEnricherProcessor(thinker_processor=thinker_processor)
     filler_tts = FillerTTSProcessor()
 
-    # Attach transcript observer so the frontend can display live conversation
+    # Always attach transcript logging; frontend events are emitted when a queue exists.
     pc_id = webrtc_connection.pc_id
     event_queue = graph_event_queues.get(pc_id)
+    monitor_id = _start_live_call("WebRTC", call_id=pc_id, caller="Web caller")
     latency_observer = LatencyObserver()
-    observers = [latency_observer]
-    if event_queue:
-        transcript_observer = TranscriptionObserver(event_queue)
-        observers.append(transcript_observer)
+    transcript_observer = TranscriptionObserver(event_queue, monitor_id=monitor_id)
+    observers = [latency_observer, transcript_observer]
+    pending_bin_lookup = {}
 
     async def handle_get_bin_collection_day(params: FunctionCallParams):
-        tool_t0 = time.perf_counter()
-        address = _correct_address(params.arguments.get("address", "").strip())
-        logger.info(f"Function call: get_bin_collection_day({address})")
-
-        # Guard: reject if the address doesn't look like a real street address.
-        # A valid address has at least two words and contains at least one digit
-        # OR a recognised street-type word.
-        _STREET_TYPES = {"street","st","road","rd","avenue","ave","lane","ln",
-                         "drive","dr","place","pl","court","ct","way","crescent","cres","close"}
-        _words = address.lower().split()
-        _has_number = any(w[0].isdigit() for w in _words)
-        _has_street_type = bool(_STREET_TYPES.intersection(_words))
-        if len(_words) < 2 or not (_has_number or _has_street_type):
-            logger.warning(f"[BIN TOOL] Rejected non-address input: '{address}'")
-            await params.result_callback({
-                "result": "I need a street address to look that up — could you tell me your street address?"
-            })
-            return
-
-        try:
-            # ── Fast path: Thinker prefetch (disabled) ───────────────────────────
-            # prefetch_future = thinker_processor.pop_prefetch(address)
-            # if prefetch_future is not None:
-            #     if not prefetch_future.done():
-            #         logger.info(f"[BIN TOOL] Prefetch still in flight — waiting up to 2s")
-            #         try:
-            #             await asyncio.wait_for(asyncio.shield(prefetch_future), timeout=2.0)
-            #         except asyncio.TimeoutError:
-            #             logger.warning(f"[BIN TOOL] Prefetch timeout — falling through to direct call")
-            #     if prefetch_future.done():
-            #         voice = prefetch_future.result()
-            #         if voice:
-            #             logger.info(f"[BIN TOOL] PREFETCH HIT — zero-latency answer")
-            #             await params.result_callback({"result": voice})
-            #             return
-            #         logger.warning(f"[BIN TOOL] Prefetch returned None — falling through to direct call")
-
-            # ── Direct Wastetrack call ────────────────────────────────────────────
-            from grc_wastetrack import get_bin_collection_details as _wt, format_voice_response as _wt_fmt
-            wt_t0 = time.perf_counter()
-            wt_result = await asyncio.to_thread(_wt, address)
-            logger.info(f"[BIN TOOL] Wastetrack elapsed {((time.perf_counter() - wt_t0) * 1000):.0f} ms")
-            voice = _wt_fmt(wt_result)
-            if voice:
-                logger.info(f"[BIN TOOL] Wastetrack SUCCESS — total tool {((time.perf_counter() - tool_t0) * 1000):.0f} ms")
-                await params.result_callback({"result": voice})
-                return
-            logger.warning(
-                f"[BIN TOOL] Wastetrack failed after {((time.perf_counter() - tool_t0) * 1000):.0f} ms: "
-                f"{wt_result.get('error')}"
-            )
-            await params.result_callback({
-                "result": (
-                    "I couldn't find a bin collection record for that address in the council bin lookup. "
-                    "Could you please repeat the full street address?"
-                )
-            })
-        except Exception as e:
-            logger.error(f"get_bin_collection_day failed: {e}")
-            await params.result_callback(
-                {"error": "I couldn't look up the bin collection day. Please try again."}
-            )
+        await _handle_bin_collection_lookup(params, pending_bin_lookup, "[WebRTC]", llm)
 
     # Register GRC tools on the LLM and build schema
     llm.register_function("get_bin_collection_day", handle_get_bin_collection_day)
@@ -1833,7 +2369,15 @@ async def run_bot(
                 "type": "string",
                 "description": (
                     "Full street address within the Georges River LGA for the direct council bin lookup, "
-                    "Must be a real address, not a question or vague phrase."
+                    "Must be a real address, not a question or vague phrase. "
+                    "When confirming a pending matched address, this can be the user's confirmation text."
+                ),
+            },
+            "confirmed": {
+                "type": "boolean",
+                "description": (
+                    "Set true only when the previous tool result asked the resident to confirm a matched address "
+                    "and the resident has just confirmed it."
                 ),
             },
         },
@@ -1933,6 +2477,7 @@ async def run_bot(
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
         logger.info("Client disconnected")
+        _end_live_call(monitor_id)
         pc_id = webrtc_connection.pc_id
         await _cleanup_webrtc_session(pc_id, reason="client disconnected", disconnect=False)
         await task.cancel()
@@ -1971,16 +2516,24 @@ async def debug_address_lookup(request: Request):
     try:
         from grc_wastetrack import (
             get_address_candidates,
+            get_expanded_address_candidates,
             get_bin_collection_details as _wt,
             format_voice_response as _wt_fmt,
         )
 
         candidates = await asyncio.to_thread(get_address_candidates, corrected_address, 12)
-        result = await asyncio.to_thread(_wt, corrected_address)
+        expanded_candidates = await asyncio.to_thread(get_expanded_address_candidates, corrected_address, 12)
+        resolved_address = corrected_address
+        result = await asyncio.to_thread(_wt, resolved_address)
+        if not result.get("success") and expanded_candidates:
+            resolved_address = expanded_candidates[0].get("address") or corrected_address
+            result = await asyncio.to_thread(_wt, resolved_address)
         return {
             "input": raw_address,
             "corrected_input": corrected_address,
+            "resolved_input": resolved_address,
             "candidates": candidates,
+            "expanded_candidates": expanded_candidates,
             "lookup": result,
             "voice_response": _wt_fmt(result),
         }
@@ -1990,6 +2543,7 @@ async def debug_address_lookup(request: Request):
             "input": raw_address,
             "corrected_input": corrected_address,
             "candidates": [],
+            "expanded_candidates": [],
             "lookup": {"success": False, "error": str(e), "address_query": corrected_address},
             "voice_response": None,
         }
@@ -2115,6 +2669,248 @@ async def graph_poll(pc_id: str):
     return {"events": events, "closed": False}
 
 
+@app.get("/api/live-calls")
+async def live_calls():
+    """Return active/recent phone and WebRTC sessions with live transcript lines."""
+    calls = sorted(
+        live_call_sessions.values(),
+        key=lambda call: call.get("last_update") or call.get("started_at") or "",
+        reverse=True,
+    )
+    active_count = sum(1 for call in calls if call.get("status") == "active")
+    return {
+        "active_count": active_count,
+        "call_count": len(calls),
+        "calls": calls,
+        "server_time": _now_iso(),
+    }
+
+
+def _synthetic_scenario_path() -> Path:
+    return Path(__file__).parent / "voice_tests" / "scenarios" / "grc_smoke.json"
+
+
+def _load_synthetic_scenarios() -> dict:
+    path = _synthetic_scenario_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.error(f"[SYNTHETIC] Failed to load scenarios from {path}: {e}")
+        data = {"name": "grc_smoke", "scenarios": []}
+    return data
+
+
+def _trim_synthetic_jobs() -> None:
+    if len(synthetic_test_jobs) <= SYNTHETIC_JOB_LIMIT:
+        return
+    ordered = sorted(
+        synthetic_test_jobs.items(),
+        key=lambda item: item[1].get("updated_at") or item[1].get("created_at") or "",
+        reverse=True,
+    )
+    keep = {job_id for job_id, _ in ordered[:SYNTHETIC_JOB_LIMIT]}
+    for job_id in list(synthetic_test_jobs):
+        if job_id not in keep:
+            synthetic_test_jobs.pop(job_id, None)
+
+
+def _synthetic_public_target(request: Request) -> str:
+    configured = _env("VOICE_TEST_TARGET") or _env("PUBLIC_URL") or _env("PUBLIC_URL_TELNYX")
+    if configured:
+        return configured.rstrip("/")
+    return str(request.base_url).rstrip("/")
+
+
+def _synthetic_args(payload: dict, target: str):
+    from types import SimpleNamespace
+
+    options = payload.get("options") or {}
+    return SimpleNamespace(
+        target=target,
+        scenarios=str(_synthetic_scenario_path()),
+        only=None,
+        report_dir=str(Path(__file__).parent / "voice_tests" / "reports"),
+        audio_cache=str(Path(__file__).parent / "voice_tests" / "audio_cache"),
+        elevenlabs_api_key=_env("ELEVENLABS_API_KEY"),
+        voice_id=(
+            options.get("voice_id")
+            or _env("VOICE_TEST_ELEVENLABS_VOICE_ID")
+            or _env("ELEVENLABS_VOICE_ID")
+        ),
+        elevenlabs_model=options.get("elevenlabs_model") or _env("VOICE_TEST_ELEVENLABS_MODEL", "eleven_turbo_v2_5"),
+        force_audio=bool(options.get("force_audio", False)),
+        speed=float(options.get("speed", _env("VOICE_TEST_SPEED", "1.0"))),
+        stability=float(options.get("stability", _env("VOICE_TEST_STABILITY", "0.45"))),
+        similarity_boost=float(options.get("similarity_boost", _env("VOICE_TEST_SIMILARITY_BOOST", "0.75"))),
+        gain=float(options.get("gain", _env("VOICE_TEST_GAIN", "1.0"))),
+        noise=float(options.get("noise", _env("VOICE_TEST_NOISE", "0.0"))),
+        background_voice=options.get("background_voice", _env("VOICE_TEST_BACKGROUND_VOICE", "")),
+        background_gain=float(options.get("background_gain", _env("VOICE_TEST_BACKGROUND_GAIN", "0.25"))),
+        pre_silence=float(options.get("pre_silence", _env("VOICE_TEST_PRE_SILENCE", "0.25"))),
+        post_silence=float(options.get("post_silence", _env("VOICE_TEST_POST_SILENCE", "0.45"))),
+        between_utterances=float(options.get("between_utterances", _env("VOICE_TEST_BETWEEN_UTTERANCES", "1.2"))),
+        wait_for_greeting=bool(options.get("wait_for_greeting", True)),
+        greeting_timeout=float(options.get("greeting_timeout", _env("VOICE_TEST_GREETING_TIMEOUT", "8"))),
+        greeting_quiet_secs=float(options.get("greeting_quiet_secs", _env("VOICE_TEST_GREETING_QUIET_SECS", "0.9"))),
+        listen_secs=float(options.get("listen_secs", _env("VOICE_TEST_LISTEN_SECS", "14"))),
+        quiet_secs=float(options.get("quiet_secs", _env("VOICE_TEST_QUIET_SECS", "2.0"))),
+        evaluate=bool(payload.get("evaluate", False)),
+        openai_api_key=_env("OPENAI_API") or _env("OPENAI_API_KEY"),
+        openai_base_url=_env("OPENAI_BASE_URL") or _env("LLM_BASE_URL"),
+        evaluator_model=options.get("evaluator_model") or _env("VOICE_TEST_EVALUATOR_MODEL", "gpt-4o-mini"),
+    )
+
+
+async def _run_synthetic_job(job_id: str, scenarios: list[dict], target: str, payload: dict):
+    job = synthetic_test_jobs[job_id]
+    try:
+        from dataclasses import asdict
+        from voice_tests.run_voice_tests import normalize_target, run_scenario
+
+        args = _synthetic_args(payload, target)
+        if not args.elevenlabs_api_key:
+            raise RuntimeError("ELEVENLABS_API_KEY is not set")
+        if not args.voice_id:
+            raise RuntimeError("ELEVENLABS_VOICE_ID or VOICE_TEST_ELEVENLABS_VOICE_ID is not set")
+
+        ws_url, http_base = normalize_target(target)
+        job.update({
+            "status": "running",
+            "started_at": _now_iso(),
+            "updated_at": _now_iso(),
+            "ws_url": ws_url,
+            "http_base": http_base,
+        })
+
+        for index, scenario in enumerate(scenarios):
+            job["current_index"] = index
+            job["current_id"] = scenario.get("id")
+            job["updated_at"] = _now_iso()
+            result = await run_scenario(ws_url, http_base, scenario, args)
+            job["results"].append(asdict(result))
+            job["updated_at"] = _now_iso()
+
+        passed = sum(1 for result in job["results"] if result.get("status") == "PASS")
+        job.update({
+            "status": "complete",
+            "completed_at": _now_iso(),
+            "updated_at": _now_iso(),
+            "summary": {"passed": passed, "total": len(job["results"])},
+        })
+    except asyncio.CancelledError:
+        job.update({"status": "cancelled", "updated_at": _now_iso()})
+        raise
+    except Exception as e:
+        logger.error(f"[SYNTHETIC] Job {job_id} failed: {e}")
+        job.update({
+            "status": "failed",
+            "error": f"{type(e).__name__}: {e}",
+            "updated_at": _now_iso(),
+        })
+
+
+@app.get("/api/synthetic/scenarios")
+async def synthetic_scenarios():
+    data = _load_synthetic_scenarios()
+    return {
+        "suite": data.get("name", "grc_smoke"),
+        "description": data.get("description", ""),
+        "scenarios": data.get("scenarios", []),
+    }
+
+
+@app.get("/api/synthetic/jobs")
+async def synthetic_jobs():
+    jobs = sorted(
+        synthetic_test_jobs.values(),
+        key=lambda item: item.get("updated_at") or item.get("created_at") or "",
+        reverse=True,
+    )
+    return {"jobs": jobs}
+
+
+@app.get("/api/synthetic/jobs/{job_id}")
+async def synthetic_job(job_id: str):
+    job = synthetic_test_jobs.get(job_id)
+    if not job:
+        return Response(status_code=404, content="Synthetic test job not found")
+    return job
+
+
+@app.post("/api/synthetic/run")
+async def synthetic_run(request: Request):
+    payload = await request.json()
+    scenario_ids = set(payload.get("scenario_ids") or [])
+    custom_scenarios = payload.get("scenarios") or []
+    data = _load_synthetic_scenarios()
+    scenarios = custom_scenarios or [
+        scenario for scenario in data.get("scenarios", [])
+        if not scenario_ids or scenario.get("id") in scenario_ids
+    ]
+    if not scenarios:
+        return Response(status_code=400, content="No synthetic scenarios selected")
+
+    job_id = f"synthetic-{uuid.uuid4().hex[:10]}"
+    target = (payload.get("target") or _synthetic_public_target(request)).rstrip("/")
+    now = _now_iso()
+    synthetic_test_jobs[job_id] = {
+        "id": job_id,
+        "status": "queued",
+        "created_at": now,
+        "updated_at": now,
+        "target": target,
+        "evaluate": bool(payload.get("evaluate", False)),
+        "total": len(scenarios),
+        "current_index": None,
+        "current_id": None,
+        "results": [],
+        "summary": {"passed": 0, "total": len(scenarios)},
+    }
+    _trim_synthetic_jobs()
+    asyncio.create_task(_run_synthetic_job(job_id, scenarios, target, payload))
+    return synthetic_test_jobs[job_id]
+
+
+@app.post("/api/synthetic/generate")
+async def synthetic_generate(request: Request):
+    payload = await request.json()
+    prompt = (payload.get("prompt") or "").strip()
+    count = int(payload.get("count") or 3)
+    if not prompt:
+        return Response(status_code=400, content="Missing prompt")
+
+    system = (
+        "Generate synthetic phone-call test scenarios for the Georges River Council voice agent. "
+        "The agent handles bin collection lookups, DA questions, events, language selection, "
+        "turn-taking, noisy calls, short answers, and address correction. "
+        "Return JSON only with key scenarios. Each scenario must have id, description, utterances array, "
+        "and expectations array. Use concise utterances suitable for ElevenLabs text-to-speech."
+    )
+    try:
+        llm = create_llm(_env("LLM_PROVIDER"), system_instruction=system)
+        resp = await llm._client.chat.completions.create(
+            model=llm._settings.model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": f"Create {count} scenarios for: {prompt}"},
+            ],
+            max_tokens=1200,
+            response_format={"type": "json_object"},
+        )
+        content = resp.choices[0].message.content or "{}"
+        data = json.loads(content)
+        scenarios = data.get("scenarios") or []
+        for i, scenario in enumerate(scenarios):
+            scenario.setdefault("id", f"generated_{i + 1}")
+            scenario.setdefault("description", prompt)
+            scenario.setdefault("utterances", [])
+            scenario.setdefault("expectations", [])
+        return {"scenarios": scenarios[: max(1, min(count, 20))]}
+    except Exception as e:
+        logger.error(f"[SYNTHETIC] Scenario generation failed: {e}")
+        return Response(status_code=500, content=f"Scenario generation failed: {e}")
+
+
 @app.post("/api/translate")
 async def translate_text(request: Request):
     """Translate Chinese text to English using the configured LLM provider."""
@@ -2205,6 +3001,12 @@ async def run_twilio_bot(websocket: WebSocket):
     if not stream_sid:
         logger.warning("No Twilio start event received")
         return
+    monitor_id = _start_live_call(
+        "Twilio",
+        call_id=call_sid,
+        stream_id=stream_sid,
+        meta={"stream_sid": stream_sid, "call_sid": call_sid},
+    )
 
     serializer = TwilioFrameSerializer(
         stream_sid=stream_sid,
@@ -2236,68 +3038,11 @@ async def run_twilio_bot(websocket: WebSocket):
     # thinker_processor = ThinkerProcessor(thinker_llm=thinker_llm)
     # context_enricher = ContextEnricherProcessor(thinker_processor=thinker_processor)
     filler_tts = FillerTTSProcessor()
+    pending_bin_lookup = {}
 
     # Register GRC tools
     async def handle_get_bin_collection_day(params: FunctionCallParams):
-        tool_t0 = time.perf_counter()
-        address = _correct_address(params.arguments.get("address", "").strip())
-        logger.info(f"[Twilio] get_bin_collection_day({address})")
-
-        _STREET_TYPES = {"street","st","road","rd","avenue","ave","lane","ln",
-                         "drive","dr","place","pl","court","ct","way","crescent","cres","close"}
-        _words = address.lower().split()
-        _has_number = any(w[0].isdigit() for w in _words)
-        _has_street_type = bool(_STREET_TYPES.intersection(_words))
-        if len(_words) < 2 or not (_has_number or _has_street_type):
-            logger.warning(f"[BIN TOOL] Rejected non-address input: '{address}'")
-            await params.result_callback({
-                "result": "I need a street address to look that up — could you tell me your street address?"
-            })
-            return
-
-        try:
-            # ── Fast path: Thinker prefetch (disabled) ───────────────────────────
-            # prefetch_future = thinker_processor.pop_prefetch(address)
-            # if prefetch_future is not None:
-            #     if not prefetch_future.done():
-            #         logger.info(f"[BIN TOOL] Prefetch still in flight — waiting up to 2s")
-            #         try:
-            #             await asyncio.wait_for(asyncio.shield(prefetch_future), timeout=2.0)
-            #         except asyncio.TimeoutError:
-            #             logger.warning(f"[BIN TOOL] Prefetch timeout — falling through to direct call")
-            #     if prefetch_future.done():
-            #         voice = prefetch_future.result()
-            #         if voice:
-            #             logger.info(f"[BIN TOOL] PREFETCH HIT — zero-latency answer")
-            #             await params.result_callback({"result": voice})
-            #             return
-            #         logger.warning(f"[BIN TOOL] Prefetch returned None — falling through to direct call")
-
-            # ── Direct Wastetrack call ────────────────────────────────────────────
-            from grc_wastetrack import get_bin_collection_details as _wt, format_voice_response as _wt_fmt
-            wt_t0 = time.perf_counter()
-            wt_result = await asyncio.to_thread(_wt, address)
-            logger.info(f"[BIN TOOL] Wastetrack elapsed {((time.perf_counter() - wt_t0) * 1000):.0f} ms")
-            voice = _wt_fmt(wt_result)
-            if voice:
-                logger.info(f"[BIN TOOL] Wastetrack SUCCESS — total tool {((time.perf_counter() - tool_t0) * 1000):.0f} ms")
-                await params.result_callback({"result": voice})
-                return
-            logger.warning(
-                f"[BIN TOOL] Wastetrack failed after {((time.perf_counter() - tool_t0) * 1000):.0f} ms: "
-                f"{wt_result.get('error')}"
-            )
-            await params.result_callback({
-                "result": (
-                    "I couldn't find a bin collection record for that address in the council bin lookup. "
-                    "Could you please repeat the full street address?"
-                )
-            })
-        except Exception as e:
-            logger.error(f"get_bin_collection_day failed: {e}")
-            await params.result_callback(
-                {"error": "I couldn't look up the bin collection day. Please try again."}
-            )
+        await _handle_bin_collection_lookup(params, pending_bin_lookup, "[Twilio]", llm)
 
     llm.register_function("get_bin_collection_day", handle_get_bin_collection_day)
 
@@ -2395,7 +3140,15 @@ async def run_twilio_bot(websocket: WebSocket):
                 "type": "string",
                 "description": (
                     "Full street address within the Georges River LGA for the direct council bin lookup, "
-                    "Must be a real address, not a question or vague phrase."
+                    "Must be a real address, not a question or vague phrase. "
+                    "When confirming a pending matched address, this can be the user's confirmation text."
+                ),
+            },
+            "confirmed": {
+                "type": "boolean",
+                "description": (
+                    "Set true only when the previous tool result asked the resident to confirm a matched address "
+                    "and the resident has just confirmed it."
                 ),
             },
         },
@@ -2476,7 +3229,7 @@ async def run_twilio_bot(websocket: WebSocket):
     task = PipelineTask(
         pipeline,
         params=PipelineParams(enable_metrics=True, enable_usage_metrics=True),
-        observers=[LatencyObserver()],
+        observers=[LatencyObserver(), TranscriptionObserver(monitor_id=monitor_id)],
     )
 
     @transport.event_handler("on_client_connected")
@@ -2494,6 +3247,7 @@ async def run_twilio_bot(websocket: WebSocket):
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
         logger.info("Twilio client disconnected")
+        _end_live_call(monitor_id)
         await task.cancel()
 
     runner = PipelineRunner(handle_sigint=False)
@@ -2558,6 +3312,16 @@ async def run_telnyx_bot(websocket: WebSocket):
     if not stream_id:
         logger.warning("No Telnyx start event received")
         return
+    monitor_id = _start_live_call(
+        "Telnyx",
+        call_id=call_control_id,
+        stream_id=stream_id,
+        meta={
+            "stream_id": stream_id,
+            "call_control_id": call_control_id,
+            "outbound_encoding": outbound_encoding,
+        },
+    )
 
     serializer = TelnyxFrameSerializer(
         stream_id=stream_id,
@@ -2591,42 +3355,10 @@ async def run_telnyx_bot(websocket: WebSocket):
     llm = create_llm(_env("LLM_PROVIDER"), system_instruction=system_instruction)
     tts = create_tts("elevenlabs")
     filler_tts = FillerTTSProcessor()
+    pending_bin_lookup = {}
 
     async def handle_get_bin_collection_day_telnyx(params: FunctionCallParams):
-        tool_t0 = time.perf_counter()
-        address = _correct_address(params.arguments.get("address", "").strip())
-        logger.info(f"[Telnyx] get_bin_collection_day({address})")
-        _STREET_TYPES = {"street","st","road","rd","avenue","ave","lane","ln",
-                         "drive","dr","place","pl","court","ct","way","crescent","cres","close"}
-        _words = address.lower().split()
-        _has_number = any(w[0].isdigit() for w in _words)
-        _has_street_type = bool(_STREET_TYPES.intersection(_words))
-        if len(_words) < 2 or not (_has_number or _has_street_type):
-            await params.result_callback({"result": "I need a street address to look that up — could you tell me your street address?"})
-            return
-        try:
-            from grc_wastetrack import get_bin_collection_details as _wt, format_voice_response as _wt_fmt
-            wt_t0 = time.perf_counter()
-            wt_result = await asyncio.to_thread(_wt, address)
-            logger.info(f"[BIN TOOL] Wastetrack elapsed {((time.perf_counter() - wt_t0) * 1000):.0f} ms")
-            voice = _wt_fmt(wt_result)
-            if voice:
-                logger.info(f"[BIN TOOL] Wastetrack SUCCESS — total tool {((time.perf_counter() - tool_t0) * 1000):.0f} ms")
-                await params.result_callback({"result": voice})
-                return
-            logger.warning(
-                f"[BIN TOOL] Wastetrack failed after {((time.perf_counter() - tool_t0) * 1000):.0f} ms: "
-                f"{wt_result.get('error')}"
-            )
-            await params.result_callback({
-                "result": (
-                    "I couldn't find a bin collection record for that address in the council bin lookup. "
-                    "Could you please repeat the full street address?"
-                )
-            })
-        except Exception as e:
-            logger.error(f"[Telnyx] get_bin_collection_day failed: {e}")
-            await params.result_callback({"error": "I couldn't look up the bin collection day. Please try again."})
+        await _handle_bin_collection_lookup(params, pending_bin_lookup, "[Telnyx]", llm)
 
     llm.register_function("get_bin_collection_day", handle_get_bin_collection_day_telnyx)
 
@@ -2686,7 +3418,22 @@ async def run_telnyx_bot(websocket: WebSocket):
             "Only call this tool once the resident has provided a specific street address. "
             "Do NOT call this tool if you only have a vague question — ask for the address first."
         ),
-        properties={"address": {"type": "string", "description": "Full street address within the Georges River LGA for the direct council bin lookup."}},
+        properties={
+            "address": {
+                "type": "string",
+                "description": (
+                    "Full street address within the Georges River LGA for the direct council bin lookup. "
+                    "When confirming a pending matched address, this can be the user's confirmation text."
+                ),
+            },
+            "confirmed": {
+                "type": "boolean",
+                "description": (
+                    "Set true only when the previous tool result asked the resident to confirm a matched address "
+                    "and the resident has just confirmed it."
+                ),
+            },
+        },
         required=["address"],
     )
     transfer_to_human_schema = FunctionSchema(
@@ -2759,7 +3506,7 @@ async def run_telnyx_bot(websocket: WebSocket):
     task = PipelineTask(
         pipeline,
         params=PipelineParams(enable_metrics=True, enable_usage_metrics=True),
-        observers=[LatencyObserver()],
+        observers=[LatencyObserver(), TranscriptionObserver(monitor_id=monitor_id)],
     )
 
     @transport.event_handler("on_client_connected")
@@ -2777,6 +3524,7 @@ async def run_telnyx_bot(websocket: WebSocket):
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
         logger.info("Telnyx client disconnected")
+        _end_live_call(monitor_id)
         await task.cancel()
 
     runner = PipelineRunner(handle_sigint=False)
@@ -2838,6 +3586,378 @@ async def telnyx_voice(request: Request):
 async def telnyx_ws(websocket: WebSocket):
     """WebSocket endpoint for Telnyx Media Streams."""
     await run_telnyx_bot(websocket)
+
+
+# ---------------------------------------------------------------------------
+# Vobiz phone integration
+# ---------------------------------------------------------------------------
+
+
+def _vobiz_xml_for_host(host: str) -> str:
+    ws_url = f"wss://{host}/vobiz/ws"
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<Response>'
+        '<Stream bidirectional="true" audioTrack="inbound" streamTimeout="7200" '
+        'keepCallAlive="true" contentType="audio/x-l16;rate=16000">'
+        f'{ws_url}'
+        '</Stream>'
+        '</Response>'
+    )
+
+
+async def run_vobiz_bot(websocket: WebSocket):
+    """Run the GRC bot over a Vobiz bidirectional XML <Stream> websocket."""
+    await websocket.accept()
+
+    stream_id = None
+    call_id = None
+    vobiz_encoding = "audio/x-l16"
+    vobiz_sample_rate = 16000
+
+    async for raw in websocket.iter_text():
+        msg = json.loads(raw)
+        event = msg.get("event")
+        if event == "start":
+            start = msg.get("start", {})
+            media_format = start.get("mediaFormat") or start.get("media_format") or {}
+            vobiz_encoding = media_format.get("encoding") or vobiz_encoding
+            try:
+                vobiz_sample_rate = int(media_format.get("sampleRate") or media_format.get("sample_rate") or vobiz_sample_rate)
+            except (TypeError, ValueError):
+                vobiz_sample_rate = 16000
+            call_id = (
+                msg.get("callId")
+                or msg.get("call_id")
+                or start.get("callId")
+                or start.get("call_id")
+                or start.get("callUUID")
+                or start.get("CallUUID")
+                or start.get("call_uuid")
+            )
+            stream_id = (
+                msg.get("streamId")
+                or msg.get("stream_id")
+                or start.get("streamId")
+                or start.get("stream_id")
+                or start.get("streamSid")
+                or start.get("stream_sid")
+                or call_id
+                or "vobiz-stream"
+            )
+            logger.info(
+                f"Vobiz call started — stream_id={stream_id} call_id={call_id} "
+                f"encoding={vobiz_encoding} sample_rate={vobiz_sample_rate}"
+            )
+            break
+        if event == "stop":
+            logger.info("Vobiz call stopped before start event")
+            return
+
+    monitor_id = _start_live_call(
+        "Vobiz",
+        call_id=call_id,
+        stream_id=stream_id,
+        meta={
+            "stream_id": stream_id,
+            "call_id": call_id,
+            "encoding": vobiz_encoding,
+            "sample_rate": vobiz_sample_rate,
+        },
+    )
+
+    serializer = VobizFrameSerializer(
+        stream_id=stream_id,
+        params=VobizFrameSerializer.InputParams(
+            vobiz_encoding=vobiz_encoding,
+            vobiz_sample_rate=vobiz_sample_rate,
+        ),
+    )
+
+    transport = FastAPIWebsocketTransport(
+        websocket=websocket,
+        params=FastAPIWebsocketParams(
+            audio_in_enabled=True,
+            audio_out_enabled=True,
+            audio_out_10ms_chunks=16,
+            serializer=serializer,
+        ),
+    )
+
+    _events = await asyncio.to_thread(get_events)
+    _events_block = format_events_for_system_prompt(_events)
+    system_instruction = SYSTEM_INSTRUCTION_GRC + "\n\n" + _events_block
+    logger.info(f"[Vobiz CAG] Embedded {len(_events)} events into system instruction")
+    logger.info(f"[Vobiz] LLM env provider={_env('LLM_PROVIDER')} model={_llm_model(_llm_provider())}")
+
+    stt = create_stt("elevenlabs")
+    llm = create_llm(_env("LLM_PROVIDER"), system_instruction=system_instruction)
+    tts = create_tts("elevenlabs")
+    filler_tts = FillerTTSProcessor()
+    pending_bin_lookup = {}
+
+    async def handle_get_bin_collection_day_vobiz(params: FunctionCallParams):
+        await _handle_bin_collection_lookup(params, pending_bin_lookup, "[Vobiz]", llm)
+
+    llm.register_function("get_bin_collection_day", handle_get_bin_collection_day_vobiz)
+
+    async def transfer_vobiz_call_to_human() -> str | None:
+        transfer_number = os.getenv("TRANSFER_PHONE_NUMBER", "").strip()
+        if transfer_number:
+            logger.warning(
+                f"[Vobiz TRANSFER] Transfer requested for call_id={call_id}, "
+                "but Vobiz live transfer is not implemented in this bot yet"
+            )
+        return "I'm sorry, transfer is not available on this line right now. Please call us on 9330 6400."
+
+    async def handle_transfer_to_human_vobiz(params: FunctionCallParams):
+        result = await transfer_vobiz_call_to_human()
+        await params.result_callback({"result": result})
+
+    llm.register_function("transfer_to_human", handle_transfer_to_human_vobiz)
+
+    async def handle_get_future_events_vobiz(params: FunctionCallParams):
+        result = await asyncio.to_thread(get_future_events, 30)
+        await params.result_callback({"result": result})
+
+    llm.register_function("get_future_events", handle_get_future_events_vobiz)
+
+    get_bin_collection_day_schema = FunctionSchema(
+        name="get_bin_collection_day",
+        description=(
+            "Look up the bin collection day for a resident's address using the direct council bin lookup. "
+            "Only call this tool once the resident has provided a specific street address. "
+            "Do NOT call this tool if you only have a vague question — ask for the address first."
+        ),
+        properties={
+            "address": {
+                "type": "string",
+                "description": (
+                    "Full street address within the Georges River LGA for the direct council bin lookup. "
+                    "When confirming a pending matched address, this can be the user's confirmation text."
+                ),
+            },
+            "confirmed": {
+                "type": "boolean",
+                "description": (
+                    "Set true only when the previous tool result asked the resident to confirm a matched address "
+                    "and the resident has just confirmed it."
+                ),
+            },
+        },
+        required=["address"],
+    )
+    transfer_to_human_schema = FunctionSchema(
+        name="transfer_to_human",
+        description=(
+            "Transfer the caller to a human council officer. "
+            "Call this when the user says they want to speak to a person, a human, an agent, "
+            "or requests to be transferred or escalated."
+        ),
+        properties={},
+        required=[],
+    )
+    get_future_events_schema = FunctionSchema(
+        name="get_future_events",
+        description=(
+            "Fetch GRC events beyond the next 30 days. Call this when the user asks about "
+            "events further in the future. Do NOT call this for events within the next 30 days."
+        ),
+        properties={},
+        required=[],
+    )
+    context = LLMContext(
+        tools=ToolsSchema(standard_tools=[
+            get_bin_collection_day_schema,
+            transfer_to_human_schema,
+            get_future_events_schema,
+        ])
+    )
+
+    user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
+        context,
+        user_params=LLMUserAggregatorParams(
+            vad_analyzer=create_vad_analyzer(),
+            user_turn_strategies=UserTurnStrategies(
+                start=[
+                    MinWordsUserTurnStartStrategy(min_words=1, use_interim=True),
+                ],
+            ),
+            user_mute_strategies=[MuteUntilFirstBotCompleteUserMuteStrategy()],
+        ),
+    )
+    lang_switch = LanguageSwitchProcessor(
+        tts=tts,
+        voice_id=_env("ELEVENLABS_VOICE_ID"),
+        filler_tts=filler_tts,
+        context=context,
+    )
+    transfer_processor = TransferRequestProcessor(
+        on_transfer_request=transfer_vobiz_call_to_human,
+        immediate_message="Transferring you now. Please hold.",
+    )
+    hesitation_gate = HesitationTurnGateProcessor()
+    backchannel_suppressor = BackchannelSuppressorProcessor()
+
+    pipeline = Pipeline([
+        transport.input(),
+        stt,
+        transfer_processor,
+        lang_switch,
+        hesitation_gate,
+        user_aggregator,
+        llm,
+        backchannel_suppressor,
+        filler_tts,
+        tts,
+        transport.output(),
+        assistant_aggregator,
+    ])
+
+    task = PipelineTask(
+        pipeline,
+        params=PipelineParams(enable_metrics=True, enable_usage_metrics=True),
+        observers=[LatencyObserver(), TranscriptionObserver(monitor_id=monitor_id)],
+    )
+
+    @transport.event_handler("on_client_connected")
+    async def on_client_connected(transport, client):
+        logger.info("Vobiz client connected")
+        context.add_message({
+            "role": "user",
+            "content": (
+                "Greet the caller and ask for their language preference. Say exactly: "
+                "'Hi, I'm Maya from Georges River Council — would you like to continue in English or Mandarin?'"
+            ),
+        })
+        await task.queue_frames([LLMRunFrame()])
+
+    @transport.event_handler("on_client_disconnected")
+    async def on_client_disconnected(transport, client):
+        logger.info("Vobiz client disconnected")
+        _end_live_call(monitor_id)
+        await task.cancel()
+
+    runner = PipelineRunner(handle_sigint=False)
+    await runner.run(task)
+
+
+@app.api_route("/vobiz/answer", methods=["GET", "POST", "OPTIONS"])
+async def vobiz_answer(request: Request):
+    """Vobiz Answer URL — returns XML that streams call audio to this server."""
+    if request.method == "OPTIONS":
+        logger.info("[Vobiz] OPTIONS /vobiz/answer")
+        return _options_ok()
+    host = request.headers.get("host", "")
+    logger.info(f"[Vobiz] answer webhook from host={host}")
+    return Response(content=_vobiz_xml_for_host(host), media_type="application/xml")
+
+
+def _options_ok(methods: str = "GET, POST, OPTIONS") -> Response:
+    return Response(
+        status_code=204,
+        headers={
+            "Allow": methods,
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": methods,
+            "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Auth-ID, X-Auth-Token",
+            "Access-Control-Max-Age": "86400",
+        },
+    )
+
+
+@app.options("/vobiz/answer")
+async def vobiz_answer_options():
+    """OPTIONS-compatible Vobiz Answer URL for dashboard checks."""
+    logger.info("[Vobiz] OPTIONS /vobiz/answer")
+    return _options_ok()
+
+
+@app.post("/vobiz/stream-status")
+async def vobiz_stream_status(request: Request):
+    """Vobiz stream lifecycle callback for diagnosing websocket failures."""
+    try:
+        form = await request.form()
+        payload = dict(form)
+    except Exception:
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {"raw": (await request.body()).decode("utf-8", errors="replace")}
+    logger.info(f"[Vobiz] stream status callback: {payload}")
+    return {"ok": True}
+
+
+@app.get("/vobiz/stream-status")
+async def vobiz_stream_status_get(request: Request):
+    """GET-compatible Vobiz stream lifecycle callback."""
+    logger.info(f"[Vobiz] stream status GET callback: {dict(request.query_params)}")
+    return {"ok": True}
+
+
+@app.options("/vobiz/stream-status")
+async def vobiz_stream_status_options():
+    """OPTIONS-compatible Vobiz stream lifecycle callback."""
+    logger.info("[Vobiz] OPTIONS /vobiz/stream-status")
+    return _options_ok()
+
+
+@app.get("/vobiz/answer")
+async def vobiz_answer_get(request: Request):
+    """GET-compatible Vobiz Answer URL for provider config checks."""
+    return await vobiz_answer(request)
+
+
+@app.api_route("/answer", methods=["GET", "POST", "OPTIONS"])
+async def vobiz_answer_alias(request: Request):
+    """Compatibility alias for Vobiz examples that use /answer."""
+    if request.method == "OPTIONS":
+        logger.info("[Vobiz] OPTIONS /answer")
+        return _options_ok()
+    return await vobiz_answer(request)
+
+
+@app.get("/answer")
+async def vobiz_answer_alias_get(request: Request):
+    """GET-compatible compatibility alias for Vobiz examples that use /answer."""
+    return await vobiz_answer(request)
+
+
+@app.options("/answer")
+async def vobiz_answer_alias_options():
+    """OPTIONS-compatible compatibility alias for Vobiz examples that use /answer."""
+    logger.info("[Vobiz] OPTIONS /answer")
+    return _options_ok()
+
+
+@app.api_route("/telnyx/answer", methods=["GET", "POST", "OPTIONS"])
+async def legacy_telnyx_answer_alias(request: Request):
+    """Legacy/provider-side alias that returns the Vobiz stream XML."""
+    if request.method == "OPTIONS":
+        logger.warning("[Vobiz] Received legacy OPTIONS /telnyx/answer")
+        return _options_ok()
+    logger.warning(f"[Vobiz] Received legacy {request.method} /telnyx/answer webhook; returning Vobiz XML")
+    return await vobiz_answer(request)
+
+
+@app.get("/telnyx/answer")
+async def legacy_telnyx_answer_alias_get(request: Request):
+    """GET-compatible legacy/provider-side alias that returns the Vobiz stream XML."""
+    logger.warning("[Vobiz] Received legacy GET /telnyx/answer webhook; returning Vobiz XML")
+    return await vobiz_answer(request)
+
+
+@app.options("/telnyx/answer")
+async def legacy_telnyx_answer_alias_options():
+    """OPTIONS-compatible legacy/provider-side alias."""
+    logger.warning("[Vobiz] Received legacy OPTIONS /telnyx/answer")
+    return _options_ok()
+
+
+@app.websocket("/vobiz/ws")
+async def vobiz_ws(websocket: WebSocket):
+    """WebSocket endpoint for Vobiz XML Stream audio."""
+    await run_vobiz_bot(websocket)
 
 
 # ---------------------------------------------------------------------------

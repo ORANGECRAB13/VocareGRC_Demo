@@ -5,6 +5,7 @@ const { useState, useEffect } = React;
 const NAV = [
   { id: 'dashboard',  icon: 'dashboard',      label: 'Dashboard' },
   { id: 'live-calls', icon: 'headset_mic',     label: 'Live Calls',  badge: true },
+  { id: 'synthetic',  icon: 'science',         label: 'Synthetic' },
   { id: 'agents',     icon: 'smart_toy',       label: 'AI Agents' },
   { id: 'history',    icon: 'history',         label: 'History' },
   { id: 'translation', icon: 'g_translate',    label: 'Live Translation' },
@@ -193,6 +194,7 @@ function Header({ activePage }) {
   const pageLabels = {
     'dashboard': 'Dashboard',
     'live-calls': 'Live Calls Monitor',
+    'synthetic': 'Synthetic Call Lab',
     'agents': 'AI Agent Profiles',
     'history': 'History & Insights',
     'translation': 'Live Translation',

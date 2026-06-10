@@ -42,5 +42,6 @@ wheelhouse-linux/
 
 # Load test artifacts
 .venv-loadtest/
+.venv-voice-tests/
 loadtest/sample_ulaw_8k.raw
 loadtest/report*.csv

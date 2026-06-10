@@ -1,0 +1,61 @@
+{
+  "name": "grc_smoke",
+  "description": "Synthetic GRC phone-call checks for language choice, short turns, and noisy bin-address transcripts.",
+  "scenarios": [
+    {
+      "id": "language_english_please",
+      "description": "Short language preference should be accepted immediately.",
+      "utterances": ["English please"],
+      "expectations": [
+        "caller transcript contains English please or a rewritten English language preference",
+        "agent does not ask for language preference again",
+        "agent responds in English"
+      ]
+    },
+    {
+      "id": "language_single_word",
+      "description": "One-word language answer should not need extra words.",
+      "utterances": ["English"],
+      "expectations": [
+        "caller transcript contains English or a rewritten English language preference",
+        "agent continues without waiting for another caller phrase"
+      ]
+    },
+    {
+      "id": "warraba_clean",
+      "description": "Clean Warraba Street bin lookup path.",
+      "utterances": ["English please", "My address is fifty Warraba Street Hurstville"],
+      "expectations": [
+        "agent recognizes Warraba Street Hurstville",
+        "agent asks to confirm the matched address before giving bin collection days"
+      ]
+    },
+    {
+      "id": "warraba_warboss",
+      "description": "Common STT failure where Warraba becomes warboss.",
+      "utterances": ["English please", "My address is fifty warboss street Hurstville"],
+      "expectations": [
+        "agent corrects warboss street to Warraba Street",
+        "agent asks to confirm Warraba Street before giving bin collection days"
+      ]
+    },
+    {
+      "id": "short_repeated_hello",
+      "description": "Agent should hear ordinary short phrases without requiring multiple repeats.",
+      "utterances": ["Hello", "Can you hear me"],
+      "expectations": [
+        "caller transcript includes the short phrases as separate turns or a timely combined turn",
+        "agent responds rather than silently waiting for extra speech"
+      ]
+    },
+    {
+      "id": "hesitation_then_address",
+      "description": "Filler words should not make the real address disappear.",
+      "utterances": ["Um hold on", "It is fifty Vine Street Hurstville"],
+      "expectations": [
+        "agent stays silent or brief during hesitation",
+        "agent captures fifty Vine Street Hurstville after the hesitation"
+      ]
+    }
+  ]
+}

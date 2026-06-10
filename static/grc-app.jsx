@@ -35,6 +35,7 @@ function App() {
     switch (page) {
       case 'dashboard':  return <GRCDashboard onNavigate={navigate} />;
       case 'live-calls': return <LiveCallsPage onTakeover={() => {}} />;
+      case 'synthetic':  return <SyntheticCallsPage />;
       case 'agents':     return <AgentsPage />;
       case 'history':    return <HistoryPage />;
       case 'translation':return <TranslationPage />;

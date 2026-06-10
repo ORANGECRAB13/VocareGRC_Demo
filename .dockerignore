@@ -19,3 +19,6 @@ Dockerfile.base
 preview_server.py
 **/node_modules/
 wheelhouse-linux/
+.venv-voice-tests/
+voice_tests/audio_cache/
+voice_tests/reports/

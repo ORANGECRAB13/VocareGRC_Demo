@@ -1,0 +1,5 @@
+audio_cache/
+reports/
+*.pcm
+*.wav
+*.mp3

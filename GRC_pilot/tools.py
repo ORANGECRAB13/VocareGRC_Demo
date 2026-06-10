@@ -4,6 +4,8 @@ tools.py — Client tool definitions for the GRC voice agent.
 ElevenLabs ClientTools passes a single `params` dict to each handler.
 """
 
+from __future__ import annotations
+
 import re
 from difflib import get_close_matches
 
@@ -63,7 +65,105 @@ _GRC_SUBURBS = (
 _SUBURB_ALIASES = {
     "waratah": "Warraba",
     "warratah": "Warraba",
+    "warboss": "Warraba",
 }
+
+_STREET_PHRASE_ALIASES = {
+    "waratah street": "Warraba Street",
+    "warratah street": "Warraba Street",
+    "warata street": "Warraba Street",
+    "warrata street": "Warraba Street",
+    "waroba street": "Warraba Street",
+    "warboss street": "Warraba Street",
+    "warboss st": "Warraba Street",
+    "war boss street": "Warraba Street",
+    "war boss st": "Warraba Street",
+    "war ob a street": "Warraba Street",
+    "war ob a st": "Warraba Street",
+    "war raba street": "Warraba Street",
+    "war raba st": "Warraba Street",
+}
+
+_NUMBER_ONES = {
+    "zero": 0,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+}
+
+_NUMBER_TENS = {
+    "twenty": 20,
+    "thirty": 30,
+    "forty": 40,
+    "fifty": 50,
+    "sixty": 60,
+    "seventy": 70,
+    "eighty": 80,
+    "ninety": 90,
+}
+
+
+def _words_to_house_number(words: list[str]) -> tuple[int | None, int]:
+    """Parse a leading spoken house number like 'forty two' or 'one hundred five'."""
+    i = 0
+    total = 0
+    consumed = 0
+
+    if i < len(words) and words[i] in _NUMBER_ONES and _NUMBER_ONES[words[i]] >= 1:
+        if i + 1 < len(words) and words[i + 1] == "hundred":
+            total += _NUMBER_ONES[words[i]] * 100
+            i += 2
+            consumed = i
+            if i < len(words) and words[i] == "and":
+                i += 1
+
+    if i < len(words) and words[i] in _NUMBER_TENS:
+        total += _NUMBER_TENS[words[i]]
+        i += 1
+        consumed = i
+        if i < len(words) and words[i] in _NUMBER_ONES:
+            total += _NUMBER_ONES[words[i]]
+            i += 1
+            consumed = i
+    elif i < len(words) and words[i] in _NUMBER_ONES:
+        total += _NUMBER_ONES[words[i]]
+        i += 1
+        consumed = i
+
+    if consumed == 0 or total == 0:
+        return None, 0
+    return total, consumed
+
+
+def _normalize_spoken_house_number(address: str) -> str:
+    """Convert a leading word-form house number to digits before address lookup."""
+    tokens = address.strip().split()
+    if not tokens or tokens[0][0].isdigit():
+        return address
+
+    number, consumed = _words_to_house_number([t.lower().strip(".,") for t in tokens])
+    if number is None:
+        return address
+
+    normalized = " ".join([str(number)] + tokens[consumed:])
+    logger.info(f"[ADDRESS] Normalized spoken house number: {address!r} → {normalized!r}")
+    return normalized
 
 
 def _split_street_suburb(text: str) -> tuple[str, str]:
@@ -113,25 +213,48 @@ def _correct_suburb(suburb: str) -> str:
     return stripped
 
 
+def _normalize_street_alias_key(street: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", street.lower()).strip()
+
+
+def _correct_street_alias(street: str) -> str | None:
+    """Correct high-risk STT street aliases before generic fuzzy matching.
+
+    Warraba Street is repeatedly transcribed as Waratah/Warata/Warrata/Waroba.
+    The generic street corrector legitimately knows both Waratah Street and
+    Warraba Street, so without this alias the fuzzy layer can lock onto the
+    wrong real street.
+    """
+    key = _normalize_street_alias_key(street)
+    alias = _STREET_PHRASE_ALIASES.get(key)
+    if alias:
+        logger.info(f"[ADDRESS] Corrected street alias: {street!r} → {alias!r}")
+        return alias
+    return None
+
+
 def _correct_address(address: str) -> str:
     """Apply STT street-name and suburb correction for GRC address lookups."""
+    address = _normalize_spoken_house_number(address)
     _num_match = re.match(r'^(\d+)\s+(.+)$', address)
     if _num_match:
         _house, _rest = _num_match.group(1), _num_match.group(2)
         _street_part, _suburb_part = _split_street_suburb(_rest)
-        corrected = _sc.correct_street(_street_part)
-        if corrected:
-            corrected_street = corrected[0]
+        corrected_street = _correct_street_alias(_street_part)
+        corrected = None if corrected_street else _sc.correct_street(_street_part)
+        if corrected_street or corrected:
+            corrected_street = corrected_street or corrected[0]
             corrected_suburb = _correct_suburb(_suburb_part)
             suffix = f" {corrected_suburb}" if corrected_suburb else ""
             return f"{_house} {corrected_street}{suffix}"
     else:
         _street_part, _suburb_part = _split_street_suburb(address)
-        corrected = _sc.correct_street(_street_part)
-        if corrected:
+        corrected_street = _correct_street_alias(_street_part)
+        corrected = None if corrected_street else _sc.correct_street(_street_part)
+        if corrected_street or corrected:
             corrected_suburb = _correct_suburb(_suburb_part)
             suffix = f" {corrected_suburb}" if corrected_suburb else ""
-            return f"{corrected[0]}{suffix}"
+            return f"{corrected_street or corrected[0]}{suffix}"
     return address
 
 

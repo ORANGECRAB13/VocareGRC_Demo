@@ -85,9 +85,24 @@ else
 fi
 
 echo "==> Deploying to Azure Container Apps"
+# Deploy by digest, not by tag. Container Apps only rolls a new revision when the
+# image *reference string* changes — updating with a reused tag like ":latest"
+# leaves the old revision running the old image even though ACR has the new build.
+# Pinning the just-pushed digest forces a fresh revision that pulls the new image.
+DIGEST="$(az acr repository show \
+  --name "$ACR_NAME" \
+  --image "$APP_IMAGE_NAME:$TAG" \
+  --query digest -o tsv)"
+
+if [[ -z "$DIGEST" ]]; then
+  echo "ERROR: could not resolve digest for $APP_IMAGE_NAME:$TAG" >&2
+  exit 1
+fi
+
+echo "==> Deploying $APP_IMAGE@$DIGEST"
 az containerapp update \
   --name "$CONTAINER_APP" \
   --resource-group "$RESOURCE_GROUP" \
-  --image "$APP_IMAGE:$TAG"
+  --image "$APP_IMAGE@$DIGEST"
 
 echo "==> Done. Live at https://vocare-grc-bot.yellowtree-d62e92d2.australiaeast.azurecontainerapps.io"
