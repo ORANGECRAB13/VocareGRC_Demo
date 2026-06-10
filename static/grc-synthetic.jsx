@@ -9,6 +9,7 @@ function SyntheticCallsPage() {
   const [activeJobId, setActiveJobId] = React.useState(null);
   const [activeJob, setActiveJob] = React.useState(null);
   const [liveCall, setLiveCall] = React.useState(null);
+  const [audioTick, setAudioTick] = React.useState(0);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState('');
   const [prompt, setPrompt] = React.useState('Test short caller responses and noisy bin address pickup.');
@@ -163,6 +164,7 @@ function SyntheticCallsPage() {
       setActiveJobId(job.id);
       setActiveJob(job);
       setLiveCall(null);
+      setAudioTick(tick => tick + 1);
       await refreshJobs();
     } catch (err) {
       setError(err.message || 'Could not start synthetic call run');
@@ -313,6 +315,7 @@ function SyntheticCallsPage() {
           </section>
 
           <LiveConversationPanel job={job} liveCall={liveCall} />
+          <LiveAudioPanel job={job} audioTick={audioTick} onRefresh={() => setAudioTick(tick => tick + 1)} />
 
           <section style={{ background: '#fff', borderRadius: 8, boxShadow: '0 2px 12px rgba(0,0,0,0.05)', overflow: 'hidden' }}>
             <PanelHeader icon="auto_awesome" title="Generate Cases" subtitle="Use current LLM" />
@@ -508,6 +511,60 @@ function LiveConversationPanel({ job, liveCall }) {
             </div>
           )}
         </div>
+      </div>
+    </section>
+  );
+}
+
+function LiveAudioPanel({ job, audioTick, onRefresh }) {
+  const hasJob = !!job?.id;
+  const isRunning = job && ['queued', 'running'].includes(job.status);
+  const audioUrl = hasJob ? `/api/synthetic/jobs/${job.id}/audio.wav?v=${audioTick}` : '';
+  const subtitle = job?.audio_available ? (isRunning ? 'Live snapshot' : 'Ready') : isRunning ? 'Recording' : 'Idle';
+  return (
+    <section style={{ background: '#fff', borderRadius: 8, boxShadow: '0 2px 12px rgba(0,0,0,0.05)', overflow: 'hidden' }}>
+      <PanelHeader icon="graphic_eq" title="Synthetic Call Audio" subtitle={subtitle} />
+      <div style={{ padding: 16, display: 'grid', gap: 10 }}>
+        {hasJob ? (
+          <>
+            <audio
+              key={`${job.id}-${audioTick}`}
+              controls
+              preload="none"
+              src={audioUrl}
+              style={{ width: '100%' }}
+            />
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              <ActionButton icon="refresh" label="Refresh Audio" onClick={onRefresh} />
+              <a
+                href={audioUrl}
+                download={`${job.id}.wav`}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  padding: '8px 12px',
+                  borderRadius: 7,
+                  background: '#F4F5F6',
+                  color: '#5A5F6B',
+                  fontSize: 11,
+                  fontWeight: 900,
+                  letterSpacing: '0.04em',
+                  textTransform: 'uppercase',
+                  textDecoration: 'none'
+                }}
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: 15 }}>download</span>
+                Download WAV
+              </a>
+              <span style={{ fontSize: 11, fontWeight: 700, color: '#8A8F98' }}>
+                {isRunning ? 'Refresh to hear the latest captured audio.' : 'Full captured synthetic call audio.'}
+              </span>
+            </div>
+          </>
+        ) : (
+          <EmptyState text="Run a synthetic call to capture playable audio." />
+        )}
       </div>
     </section>
   );

@@ -1479,7 +1479,9 @@ live_call_sessions: Dict[str, dict] = {}
 LIVE_CALL_LIMIT = 80
 LIVE_TRANSCRIPT_LIMIT = 240
 synthetic_test_jobs: Dict[str, dict] = {}
+synthetic_audio_segments: Dict[str, list[dict]] = {}
 SYNTHETIC_JOB_LIMIT = 40
+SYNTHETIC_AUDIO_LIMIT_BYTES = 8_000_000
 
 # Demo mode shared state
 demo_events: list[dict] = []      # append-only list of graph events (fan-out to multiple viewers)
@@ -2726,6 +2728,38 @@ def _trim_synthetic_jobs() -> None:
     for job_id in list(synthetic_test_jobs):
         if job_id not in keep:
             synthetic_test_jobs.pop(job_id, None)
+            synthetic_audio_segments.pop(job_id, None)
+
+
+def _append_synthetic_audio(job_id: str, speaker: str, pcm: bytes) -> None:
+    if not pcm:
+        return
+    segments = synthetic_audio_segments.setdefault(job_id, [])
+    segments.append({
+        "speaker": speaker,
+        "pcm": pcm,
+        "created_at": _now_iso(),
+    })
+    total = sum(len(item.get("pcm") or b"") for item in segments)
+    while total > SYNTHETIC_AUDIO_LIMIT_BYTES and segments:
+        removed = segments.pop(0)
+        total -= len(removed.get("pcm") or b"")
+
+
+def _wav_from_pcm16(pcm: bytes, sample_rate: int = 16000) -> bytes:
+    data_size = len(pcm)
+    byte_rate = sample_rate * 2
+    block_align = 2
+    return b"".join([
+        b"RIFF",
+        struct.pack("<I", 36 + data_size),
+        b"WAVE",
+        b"fmt ",
+        struct.pack("<IHHIIHH", 16, 1, 1, sample_rate, byte_rate, block_align, 16),
+        b"data",
+        struct.pack("<I", data_size),
+        pcm,
+    ])
 
 
 def _synthetic_public_target(request: Request) -> str:
@@ -2807,6 +2841,13 @@ async def _run_synthetic_job(job_id: str, scenarios: list[dict], target: str, pa
         if not args.voice_id:
             raise RuntimeError("ELEVENLABS_VOICE_ID or VOICE_TEST_ELEVENLABS_VOICE_ID is not set")
 
+        synthetic_audio_segments[job_id] = []
+
+        def on_audio_segment(speaker: str, pcm: bytes) -> None:
+            _append_synthetic_audio(job_id, speaker, pcm)
+
+        args.on_audio_segment = on_audio_segment
+
         ws_url, http_base = normalize_target(target)
         job.update({
             "status": "running",
@@ -2837,6 +2878,7 @@ async def _run_synthetic_job(job_id: str, scenarios: list[dict], target: str, pa
             job["results"].append(asdict(result))
             job["last_call_id"] = result.call_id
             job["last_monitor_id"] = job.get("current_monitor_id")
+            job["audio_available"] = bool(synthetic_audio_segments.get(job_id))
             job["updated_at"] = _now_iso()
 
         passed = sum(1 for result in job["results"] if result.get("status") == "PASS")
@@ -2844,6 +2886,7 @@ async def _run_synthetic_job(job_id: str, scenarios: list[dict], target: str, pa
             "status": "complete",
             "completed_at": _now_iso(),
             "updated_at": _now_iso(),
+            "audio_available": bool(synthetic_audio_segments.get(job_id)),
             "summary": {"passed": passed, "total": len(job["results"])},
         })
     except asyncio.CancelledError:
@@ -2883,7 +2926,23 @@ async def synthetic_job(job_id: str):
     job = synthetic_test_jobs.get(job_id)
     if not job:
         return Response(status_code=404, content="Synthetic test job not found")
+    job["audio_available"] = bool(synthetic_audio_segments.get(job_id))
     return job
+
+
+@app.get("/api/synthetic/jobs/{job_id}/audio.wav")
+async def synthetic_job_audio(job_id: str):
+    if job_id not in synthetic_test_jobs:
+        return Response(status_code=404, content="Synthetic test job not found")
+    segments = synthetic_audio_segments.get(job_id) or []
+    if not segments:
+        return Response(status_code=404, content="Synthetic call audio is not available yet")
+    pcm = b"".join(item.get("pcm") or b"" for item in segments)
+    headers = {
+        "Cache-Control": "no-store",
+        "Content-Disposition": f'inline; filename="{job_id}.wav"',
+    }
+    return Response(content=_wav_from_pcm16(pcm), media_type="audio/wav", headers=headers)
 
 
 @app.post("/api/synthetic/run")
@@ -2913,6 +2972,7 @@ async def synthetic_run(request: Request):
         "current_index": None,
         "current_id": None,
         "results": [],
+        "audio_available": False,
         "summary": {"passed": 0, "total": len(scenarios)},
     }
     _trim_synthetic_jobs()

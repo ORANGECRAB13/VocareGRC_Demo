@@ -176,6 +176,13 @@ def pcm16_to_telnyx_ulaw(pcm: bytes) -> bytes:
     return audioop.lin2ulaw(resampled, PCM_WIDTH)
 
 
+def telnyx_ulaw_to_pcm16(ulaw: bytes) -> bytes:
+    """Convert Telnyx 8 kHz PCMU into 16 kHz signed PCM for WAV playback."""
+    pcm8 = audioop.ulaw2lin(ulaw, PCM_WIDTH)
+    pcm16, _ = audioop.ratecv(pcm8, PCM_WIDTH, 1, TELNYX_RATE, PCM_RATE, None)
+    return pcm16
+
+
 def chunk_telnyx_ulaw(ulaw: bytes) -> list[bytes]:
     return [
         ulaw[i : i + TELNYX_FRAME_BYTES]
@@ -320,7 +327,14 @@ async def wait_for_agent_turn(http_base: str, monitor_id: str, previous_agent_co
     return last_call
 
 
-async def send_telnyx_audio(ws, pcm: bytes):
+def emit_audio_segment(args, speaker: str, pcm: bytes):
+    callback = getattr(args, "on_audio_segment", None)
+    if callable(callback) and pcm:
+        callback(speaker, pcm)
+
+
+async def send_telnyx_audio(ws, pcm: bytes, args=None, speaker: str = "caller"):
+    emit_audio_segment(args, speaker, pcm)
     ulaw = pcm16_to_telnyx_ulaw(pcm)
     send_clock = time.monotonic()
     for frame in chunk_telnyx_ulaw(ulaw):
@@ -449,6 +463,11 @@ async def stream_telnyx_call(ws_url: str, http_base: str, scenario: dict[str, An
                     except Exception:
                         continue
                     if msg.get("event") == "media" and (msg.get("media") or {}).get("payload"):
+                        try:
+                            payload = base64.b64decode((msg.get("media") or {}).get("payload"))
+                            emit_audio_segment(args, "agent", telnyx_ulaw_to_pcm16(payload))
+                        except Exception:
+                            pass
                         received_bot_audio += 1
                         last_bot_audio_at = time.monotonic()
                         if first_bot_audio_at is None:
@@ -468,7 +487,7 @@ async def stream_telnyx_call(ws_url: str, http_base: str, scenario: dict[str, An
                 await asyncio.sleep(0.05)
 
         for audio in utterance_audio:
-            await send_telnyx_audio(ws, audio)
+            await send_telnyx_audio(ws, audio, args=args, speaker="caller")
             await asyncio.sleep(args.between_utterances)
 
         call = await wait_for_transcript_quiet(http_base, monitor_id, args.listen_secs, args.quiet_secs)
@@ -536,6 +555,11 @@ async def stream_autonomous_telnyx_call(ws_url: str, http_base: str, scenario: d
                     except Exception:
                         continue
                     if msg.get("event") == "media" and (msg.get("media") or {}).get("payload"):
+                        try:
+                            payload = base64.b64decode((msg.get("media") or {}).get("payload"))
+                            emit_audio_segment(args, "agent", telnyx_ulaw_to_pcm16(payload))
+                        except Exception:
+                            pass
                         received_bot_audio += 1
                         last_bot_audio_at = time.monotonic()
                         if first_bot_audio_at is None:
@@ -573,7 +597,7 @@ async def stream_autonomous_telnyx_call(ws_url: str, http_base: str, scenario: d
                 utterance = "Could you repeat that please?"
 
             audio = await build_utterance_audio(utterance, args)
-            await send_telnyx_audio(ws, audio)
+            await send_telnyx_audio(ws, audio, args=args, speaker="caller")
             resident_turns.append({
                 "turn": turn_index + 1,
                 "utterance": utterance,
