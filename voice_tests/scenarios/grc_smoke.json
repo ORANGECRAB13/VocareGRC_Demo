@@ -56,6 +56,20 @@
         "agent stays silent or brief during hesitation",
         "agent captures fifty Vine Street Hurstville after the hesitation"
       ]
+    },
+    {
+      "id": "autonomous_resident_bins_events",
+      "description": "LLM-driven resident asks about bins and then a council event.",
+      "autonomous": true,
+      "persona": "A realistic Georges River Council resident. They are polite, slightly time-poor, and speak in short natural phone-call turns.",
+      "goal": "Choose English. Ask for bin collection help for 50 Warraba Street Hurstville. Confirm the address if it is correct. After the bin answer, ask what free events are coming up.",
+      "max_turns": 7,
+      "expectations": [
+        "resident agent engages over multiple turns",
+        "main agent handles bin collection and asks for address confirmation before giving days",
+        "main agent answers the events follow-up from council events context",
+        "latency between caller turns and agent responses is recorded"
+      ]
     }
   ]
 }

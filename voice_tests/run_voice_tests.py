@@ -246,6 +246,152 @@ async def wait_for_transcript_quiet(http_base: str, monitor_id: str, timeout_sec
     return last_call
 
 
+def parse_iso_ts(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
+
+
+def transcript_turn_latencies(transcript: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    latencies = []
+    for index, line in enumerate(transcript):
+        if line.get("speaker") != "caller":
+            continue
+        caller_ts = parse_iso_ts(line.get("timestamp"))
+        if caller_ts is None:
+            continue
+        next_agent = next((item for item in transcript[index + 1 :] if item.get("speaker") == "agent"), None)
+        if not next_agent:
+            continue
+        agent_ts = parse_iso_ts(next_agent.get("timestamp"))
+        if agent_ts is None:
+            continue
+        latencies.append({
+            "caller_text": line.get("text", ""),
+            "agent_text": next_agent.get("text", ""),
+            "latency_secs": round(max(0.0, agent_ts - caller_ts), 3),
+            "caller_timestamp": line.get("timestamp"),
+            "agent_timestamp": next_agent.get("timestamp"),
+        })
+    return latencies
+
+
+async def wait_for_agent_turn(http_base: str, monitor_id: str, previous_agent_count: int, timeout_secs: float) -> dict[str, Any] | None:
+    import httpx
+
+    deadline = time.monotonic() + timeout_secs
+    last_call = None
+    async with httpx.AsyncClient(timeout=10) as client:
+        while time.monotonic() < deadline:
+            try:
+                resp = await client.get(f"{http_base}/api/live-calls")
+                resp.raise_for_status()
+                data = resp.json()
+                call = next((c for c in data.get("calls", []) if c.get("id") == monitor_id), None)
+                if call:
+                    last_call = call
+                    agent_count = sum(1 for line in call.get("transcript") or [] if line.get("speaker") == "agent")
+                    if agent_count > previous_agent_count:
+                        return call
+            except Exception:
+                pass
+            await asyncio.sleep(0.35)
+    return last_call
+
+
+async def send_pcm_audio(ws, stream_id: str, pcm: bytes):
+    send_clock = time.monotonic()
+    for frame in chunk_pcm(pcm):
+        await ws.send(json.dumps({
+            "event": "media",
+            "streamId": stream_id,
+            "media": {
+                "contentType": "audio/x-l16",
+                "sampleRate": PCM_RATE,
+                "payload": base64.b64encode(frame).decode("ascii"),
+            },
+        }))
+        send_clock += FRAME_SECS
+        await asyncio.sleep(max(0, send_clock - time.monotonic()))
+
+
+async def create_json_chat_completion(client, *, model: str, messages: list[dict[str, str]], max_tokens: int | None = None):
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "response_format": {"type": "json_object"},
+    }
+    if max_tokens:
+        kwargs["max_tokens"] = max_tokens
+    try:
+        return await client.chat.completions.create(**kwargs)
+    except Exception as exc:
+        message = str(exc)
+        if max_tokens and "max_tokens" in message and "max_completion_tokens" in message:
+            kwargs.pop("max_tokens", None)
+            kwargs["max_completion_tokens"] = max_tokens
+            return await client.chat.completions.create(**kwargs)
+        raise
+
+
+async def decide_resident_utterance(scenario: dict[str, Any], transcript: list[dict[str, Any]], turn_index: int, args) -> dict[str, Any]:
+    api_key = args.openai_api_key or os.getenv("OPENAI_API") or os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        fallback = ["English please", "I need help with my bins.", "My address is fifty Warraba Street Hurstville.", "Yes, that is correct."]
+        return {"utterance": fallback[min(turn_index, len(fallback) - 1)], "done": turn_index >= len(fallback), "rationale": "fallback_no_llm_key"}
+
+    from openai import AsyncOpenAI
+
+    client = AsyncOpenAI(api_key=api_key, base_url=args.openai_base_url or None)
+    persona = scenario.get("persona") or args.resident_persona
+    goal = scenario.get("goal") or args.resident_goal
+    max_turns = int(scenario.get("max_turns") or args.autonomous_turns)
+    transcript_text = "\n".join(f"{line.get('speaker')}: {line.get('text')}" for line in transcript[-14:])
+    system = (
+        "You are a synthetic test caller for a Georges River Council phone voice agent. "
+        "Your job is to roleplay a realistic GRC resident, not to help the assistant. "
+        "Stay in persona, respond naturally and briefly, and pursue the test goal. "
+        "You may ask about bin collections, development applications, or council events. "
+        "You should sometimes use realistic short answers, corrections, or mild confusion if the persona calls for it. "
+        "Do not mention that you are an AI, a tester, a scenario, or evaluating the agent. "
+        "Output only JSON with keys: utterance string, done boolean, rationale string. "
+        "Set done true only when the goal has been satisfied, the agent failed irrecoverably, or max turns is reached."
+    )
+    user = {
+        "persona": persona,
+        "goal": goal,
+        "turn_index": turn_index,
+        "max_turns": max_turns,
+        "conversation_so_far": transcript_text,
+        "policy": (
+            "If the agent asks for language, choose English unless the persona explicitly says otherwise. "
+            "If the agent asks to confirm an address and the address matches your intended one, say yes. "
+            "If it mishears the address, correct only the wrong part."
+        ),
+    }
+    resp = await create_json_chat_completion(
+        client,
+        model=args.resident_model,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
+        ],
+        max_tokens=220,
+    )
+    content = resp.choices[0].message.content or "{}"
+    data = json.loads(content)
+    utterance = (data.get("utterance") or "").strip()
+    if not utterance and not data.get("done"):
+        utterance = "Could you repeat that please?"
+    if turn_index + 1 >= max_turns:
+        data["done"] = True
+    data["utterance"] = utterance
+    return data
+
+
 async def stream_vobiz_call(ws_url: str, http_base: str, scenario: dict[str, Any], args) -> dict[str, Any]:
     import websockets
 
@@ -343,6 +489,132 @@ async def stream_vobiz_call(ws_url: str, http_base: str, scenario: dict[str, Any
             "elapsed_secs": round(elapsed, 3),
             "bot_audio_frames": received_bot_audio,
             "time_to_first_bot_audio_secs": round(first_bot_audio_at - started_at, 3) if first_bot_audio_at else None,
+            "turn_latencies": transcript_turn_latencies((call or {}).get("transcript") or []),
+        },
+        "errors": errors,
+    }
+
+
+async def stream_autonomous_vobiz_call(ws_url: str, http_base: str, scenario: dict[str, Any], args) -> dict[str, Any]:
+    import websockets
+
+    call_id = f"autonomous-{scenario['id']}-{uuid.uuid4().hex[:8]}"
+    stream_id = f"stream-{call_id}"
+    monitor_id = f"vobiz:{call_id}"
+    received_bot_audio = 0
+    first_bot_audio_at = None
+    last_bot_audio_at = None
+    started_at = time.monotonic()
+    errors: list[str] = []
+    resident_turns: list[dict[str, Any]] = []
+    call = None
+
+    async with websockets.connect(ws_url, open_timeout=20, close_timeout=5, max_size=None) as ws:
+        await ws.send(json.dumps({
+            "event": "start",
+            "callId": call_id,
+            "streamId": stream_id,
+            "start": {
+                "callId": call_id,
+                "streamId": stream_id,
+                "mediaFormat": {
+                    "encoding": "audio/x-l16",
+                    "sampleRate": PCM_RATE,
+                    "channels": 1,
+                },
+            },
+        }))
+
+        await poll_call(http_base, monitor_id, timeout_secs=8)
+
+        async def receiver():
+            nonlocal received_bot_audio, first_bot_audio_at, last_bot_audio_at
+            try:
+                async for raw in ws:
+                    try:
+                        msg = json.loads(raw)
+                    except Exception:
+                        continue
+                    if msg.get("event") == "playAudio" and (msg.get("media") or {}).get("payload"):
+                        received_bot_audio += 1
+                        last_bot_audio_at = time.monotonic()
+                        if first_bot_audio_at is None:
+                            first_bot_audio_at = last_bot_audio_at
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                errors.append(f"receiver: {type(exc).__name__}: {exc}")
+
+        rx = asyncio.create_task(receiver())
+
+        deadline = time.monotonic() + args.greeting_timeout
+        while time.monotonic() < deadline:
+            if first_bot_audio_at and last_bot_audio_at and (time.monotonic() - last_bot_audio_at) >= args.greeting_quiet_secs:
+                break
+            await asyncio.sleep(0.05)
+
+        call = await wait_for_agent_turn(http_base, monitor_id, previous_agent_count=0, timeout_secs=2.0)
+        max_turns = int(scenario.get("max_turns") or args.autonomous_turns)
+        for turn_index in range(max_turns):
+            transcript = (call or {}).get("transcript") or []
+            agent_count_before = sum(1 for line in transcript if line.get("speaker") == "agent")
+            decision_started = time.monotonic()
+            try:
+                decision = await decide_resident_utterance(scenario, transcript, turn_index, args)
+            except Exception as exc:
+                errors.append(f"resident_llm: {type(exc).__name__}: {exc}")
+                fallback = "English please" if turn_index == 0 else "Could you help me with my bins please?"
+                decision = {"utterance": fallback, "done": turn_index >= 2, "rationale": "resident_llm_failed"}
+
+            utterance = (decision.get("utterance") or "").strip()
+            if decision.get("done") and not utterance:
+                break
+            if not utterance:
+                utterance = "Could you repeat that please?"
+
+            audio = await build_utterance_audio(utterance, args)
+            await send_pcm_audio(ws, stream_id, audio)
+            resident_turns.append({
+                "turn": turn_index + 1,
+                "utterance": utterance,
+                "rationale": decision.get("rationale", ""),
+                "decision_latency_secs": round(time.monotonic() - decision_started, 3),
+            })
+
+            await asyncio.sleep(args.between_utterances)
+            call = await wait_for_agent_turn(
+                http_base,
+                monitor_id,
+                previous_agent_count=agent_count_before,
+                timeout_secs=args.autonomous_agent_timeout,
+            )
+            if decision.get("done"):
+                break
+
+        call = await wait_for_transcript_quiet(http_base, monitor_id, args.listen_secs, args.quiet_secs)
+        try:
+            await ws.send(json.dumps({"event": "stop", "streamId": stream_id}))
+        except Exception:
+            pass
+        rx.cancel()
+        try:
+            await rx
+        except asyncio.CancelledError:
+            pass
+
+    elapsed = time.monotonic() - started_at
+    transcript = (call or {}).get("transcript") or []
+    return {
+        "call_id": call_id,
+        "monitor_id": monitor_id,
+        "call": call or {},
+        "metrics": {
+            "elapsed_secs": round(elapsed, 3),
+            "bot_audio_frames": received_bot_audio,
+            "time_to_first_bot_audio_secs": round(first_bot_audio_at - started_at, 3) if first_bot_audio_at else None,
+            "turn_latencies": transcript_turn_latencies(transcript),
+            "resident_turns": resident_turns,
+            "autonomous": True,
         },
         "errors": errors,
     }
@@ -406,13 +678,13 @@ async def llm_evaluate(scenario: dict[str, Any], transcript: list[dict[str, Any]
                 "likely_root_cause string, recommended_fix string, summary string."
             ),
         }
-        resp = await client.chat.completions.create(
+        resp = await create_json_chat_completion(
+            client,
             model=args.evaluator_model,
             messages=[
                 {"role": "system", "content": "You are a strict QA evaluator for a phone voice agent. Output only JSON."},
                 {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
             ],
-            response_format={"type": "json_object"},
         )
         content = resp.choices[0].message.content or "{}"
         return json.loads(content)
@@ -429,7 +701,10 @@ async def run_scenario(ws_url: str, http_base: str, scenario: dict[str, Any], ar
     metrics: dict[str, Any] = {}
 
     try:
-        call_payload = await stream_vobiz_call(ws_url, http_base, scenario, args)
+        if scenario.get("autonomous"):
+            call_payload = await stream_autonomous_vobiz_call(ws_url, http_base, scenario, args)
+        else:
+            call_payload = await stream_vobiz_call(ws_url, http_base, scenario, args)
         errors.extend(call_payload.get("errors") or [])
         metrics = call_payload.get("metrics") or {}
         call = call_payload.get("call") or {}
@@ -549,6 +824,11 @@ def parse_args():
     ap.add_argument("--openai-api-key", default=os.getenv("OPENAI_API") or os.getenv("OPENAI_API_KEY"))
     ap.add_argument("--openai-base-url", default=os.getenv("OPENAI_BASE_URL") or os.getenv("LLM_BASE_URL"))
     ap.add_argument("--evaluator-model", default=os.getenv("VOICE_TEST_EVALUATOR_MODEL", "gpt-4o-mini"))
+    ap.add_argument("--resident-model", default=os.getenv("VOICE_TEST_RESIDENT_MODEL", os.getenv("VOICE_TEST_EVALUATOR_MODEL", "gpt-4o-mini")))
+    ap.add_argument("--resident-persona", default=os.getenv("VOICE_TEST_RESIDENT_PERSONA", "A realistic Georges River Council resident who wants clear help and gives concise answers."))
+    ap.add_argument("--resident-goal", default=os.getenv("VOICE_TEST_RESIDENT_GOAL", "Choose English, ask for bin collection help, provide 50 Warraba Street Hurstville, confirm the address, and check the answer."))
+    ap.add_argument("--autonomous-turns", type=int, default=int(os.getenv("VOICE_TEST_AUTONOMOUS_TURNS", "6")))
+    ap.add_argument("--autonomous-agent-timeout", type=float, default=float(os.getenv("VOICE_TEST_AUTONOMOUS_AGENT_TIMEOUT", "18")))
     args = ap.parse_args()
 
     if not args.elevenlabs_api_key:

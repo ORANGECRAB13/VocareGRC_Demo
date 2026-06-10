@@ -11,6 +11,8 @@ function SyntheticCallsPage() {
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState('');
   const [prompt, setPrompt] = React.useState('Test short caller responses and noisy bin address pickup.');
+  const [residentPersona, setResidentPersona] = React.useState('A realistic Georges River Council resident. They are polite but a little impatient, speak naturally, and give concise answers.');
+  const [residentGoal, setResidentGoal] = React.useState('Choose English, ask for bin collection help, provide 50 Warraba Street Hurstville, confirm the address if it is correct, then ask one follow-up about council events.');
   const [evaluate, setEvaluate] = React.useState(false);
   const [options, setOptions] = React.useState({
     gain: 1,
@@ -18,7 +20,9 @@ function SyntheticCallsPage() {
     background_voice: '',
     background_gain: 0.25,
     speed: 1,
-    listen_secs: 14
+    listen_secs: 14,
+    autonomous_turns: 6,
+    autonomous_agent_timeout: 18
   });
 
   React.useEffect(() => {
@@ -105,6 +109,23 @@ function SyntheticCallsPage() {
     await runPayload({ scenarios: chosen });
   }
 
+  async function runAutonomousResident() {
+    const scenario = {
+      id: `autonomous_resident_${Date.now()}`,
+      description: 'LLM-driven resident persona call',
+      autonomous: true,
+      persona: residentPersona,
+      goal: residentGoal,
+      max_turns: Number(options.autonomous_turns),
+      expectations: [
+        'resident agent engages in multiple turns like a realistic GRC caller',
+        'main agent handles the chosen goal without unnecessary repetition',
+        'latency between caller and agent turns is recorded'
+      ]
+    };
+    await runPayload({ scenarios: [scenario] });
+  }
+
   async function runPayload(extra) {
     setLoading(true);
     setError('');
@@ -154,7 +175,11 @@ function SyntheticCallsPage() {
       noise: Number(options.noise),
       background_gain: Number(options.background_gain),
       speed: Number(options.speed),
-      listen_secs: Number(options.listen_secs)
+      listen_secs: Number(options.listen_secs),
+      autonomous_turns: Number(options.autonomous_turns),
+      autonomous_agent_timeout: Number(options.autonomous_agent_timeout),
+      resident_persona: residentPersona,
+      resident_goal: residentGoal
     };
   }
 
@@ -239,6 +264,31 @@ function SyntheticCallsPage() {
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+          <section style={{ background: '#fff', borderRadius: 8, boxShadow: '0 2px 12px rgba(0,0,0,0.05)', overflow: 'hidden' }}>
+            <PanelHeader icon="record_voice_over" title="Resident Agent" subtitle="Autonomous call" />
+            <div style={{ padding: 16, display: 'grid', gap: 12 }}>
+              <label style={{ display: 'grid', gap: 6 }}>
+                <span style={{ fontSize: 11, fontWeight: 800, color: '#767676', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Persona</span>
+                <textarea
+                  value={residentPersona}
+                  onChange={e => setResidentPersona(e.target.value)}
+                  style={inputStyle({ minHeight: 82, resize: 'vertical' })}
+                />
+              </label>
+              <label style={{ display: 'grid', gap: 6 }}>
+                <span style={{ fontSize: 11, fontWeight: 800, color: '#767676', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Goal</span>
+                <textarea
+                  value={residentGoal}
+                  onChange={e => setResidentGoal(e.target.value)}
+                  style={inputStyle({ minHeight: 82, resize: 'vertical' })}
+                />
+              </label>
+              <RangeRow label="Max resident turns" value={options.autonomous_turns} min="2" max="12" step="1" onChange={v => setOpt('autonomous_turns', v)} />
+              <RangeRow label="Agent wait timeout" value={options.autonomous_agent_timeout} min="8" max="35" step="1" onChange={v => setOpt('autonomous_agent_timeout', v)} />
+              <ActionButton icon="smart_toy" label="Run Resident Agent" primary onClick={runAutonomousResident} disabled={loading || !residentPersona.trim() || !residentGoal.trim()} />
+            </div>
+          </section>
+
           <section style={{ background: '#fff', borderRadius: 8, boxShadow: '0 2px 12px rgba(0,0,0,0.05)', overflow: 'hidden' }}>
             <PanelHeader icon="auto_awesome" title="Generate Cases" subtitle="Use current LLM" />
             <div style={{ padding: 16, display: 'grid', gap: 12 }}>
@@ -403,6 +453,8 @@ function ResultBlock({ result }) {
   const pass = result.status === 'PASS';
   const transcript = result.transcript || [];
   const issues = result.evaluation?.issues || [];
+  const residentTurns = result.metrics?.resident_turns || [];
+  const turnLatencies = result.metrics?.turn_latencies || [];
   return (
     <div style={{ border: '1px solid #E8E9EB', borderRadius: 8, overflow: 'hidden' }}>
       <div style={{ padding: '10px 12px', background: pass ? '#F2FBFA' : '#FFF7F7', display: 'flex', justifyContent: 'space-between', gap: 12 }}>
@@ -414,6 +466,25 @@ function ResultBlock({ result }) {
       </div>
       <div style={{ padding: 12, display: 'grid', gap: 8 }}>
         {issues.map((issue, i) => <div key={i} style={{ fontSize: 11, color: '#C8232C', fontWeight: 700 }}>{issue}</div>)}
+        {!!residentTurns.length && (
+          <div style={{ display: 'grid', gap: 4, background: '#FAFAFA', border: '1px solid #F0F1F3', borderRadius: 7, padding: 8 }}>
+            <div style={{ fontSize: 10, fontWeight: 900, color: '#8A8F98', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Resident agent turns</div>
+            {residentTurns.slice(-6).map((turn, i) => (
+              <div key={i} style={{ fontSize: 11, color: '#5A5F6B' }}>
+                <b>{turn.turn}.</b> {turn.utterance}
+              </div>
+            ))}
+          </div>
+        )}
+        {!!turnLatencies.length && (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {turnLatencies.slice(-6).map((turn, i) => (
+              <span key={i} style={{ fontSize: 10, fontWeight: 800, color: '#007A77', background: '#D0F2F1', borderRadius: 5, padding: '3px 6px' }}>
+                reply {turn.latency_secs}s
+              </span>
+            ))}
+          </div>
+        )}
         {transcript.slice(-8).map((line, i) => (
           <div key={i} style={{ fontSize: 12, lineHeight: 1.4 }}>
             <b style={{ color: line.speaker === 'agent' ? '#C8232C' : '#007A77' }}>{line.speaker}:</b> {line.text}

@@ -1425,6 +1425,19 @@ def create_llm(name: str, system_instruction: str = ""):
     raise ValueError(f"Unknown LLM provider: {provider}")
 
 
+async def _chat_completion_with_token_fallback(client, **kwargs):
+    """Call an OpenAI-compatible chat API across models that rename max_tokens."""
+    try:
+        return await client.chat.completions.create(**kwargs)
+    except Exception as exc:
+        message = str(exc)
+        if "max_tokens" in kwargs and "max_tokens" in message and "max_completion_tokens" in message:
+            retry_kwargs = dict(kwargs)
+            retry_kwargs["max_completion_tokens"] = retry_kwargs.pop("max_tokens")
+            return await client.chat.completions.create(**retry_kwargs)
+        raise
+
+
 def create_tts(name: str):
     """Create a TTS service by name."""
     if name == "elevenlabs":
@@ -1920,7 +1933,8 @@ async def _select_bin_address_with_llm(llm, transcript: str, candidates: list[di
     try:
         timeout = _float_env("ADDRESS_LLM_SELECTION_TIMEOUT_SECS", 4.0)
         response = await asyncio.wait_for(
-            llm._client.chat.completions.create(
+            _chat_completion_with_token_fallback(
+                llm._client,
                 model=llm._settings.model,
                 messages=[
                     {"role": "system", "content": system},
@@ -2725,6 +2739,14 @@ def _synthetic_args(payload: dict, target: str):
     from types import SimpleNamespace
 
     options = payload.get("options") or {}
+    provider = _llm_provider(_env("LLM_PROVIDER"))
+    llm_base_url = (
+        _env("OPENAI_BASE_URL")
+        or _env("LLM_BASE_URL")
+        or (_azure_openai_base_url() if provider in {"azure", "azure_openai", "foundry"} else "")
+    )
+    llm_api_key = _llm_api_key(provider)
+    llm_model = _llm_model(provider)
     return SimpleNamespace(
         target=target,
         scenarios=str(_synthetic_scenario_path()),
@@ -2755,9 +2777,20 @@ def _synthetic_args(payload: dict, target: str):
         listen_secs=float(options.get("listen_secs", _env("VOICE_TEST_LISTEN_SECS", "14"))),
         quiet_secs=float(options.get("quiet_secs", _env("VOICE_TEST_QUIET_SECS", "2.0"))),
         evaluate=bool(payload.get("evaluate", False)),
-        openai_api_key=_env("OPENAI_API") or _env("OPENAI_API_KEY"),
-        openai_base_url=_env("OPENAI_BASE_URL") or _env("LLM_BASE_URL"),
-        evaluator_model=options.get("evaluator_model") or _env("VOICE_TEST_EVALUATOR_MODEL", "gpt-4o-mini"),
+        openai_api_key=llm_api_key,
+        openai_base_url=llm_base_url,
+        evaluator_model=options.get("evaluator_model") or _env("VOICE_TEST_EVALUATOR_MODEL", llm_model),
+        resident_model=options.get("resident_model") or _env("VOICE_TEST_RESIDENT_MODEL", _env("VOICE_TEST_EVALUATOR_MODEL", llm_model)),
+        resident_persona=options.get("resident_persona") or _env(
+            "VOICE_TEST_RESIDENT_PERSONA",
+            "A realistic Georges River Council resident who wants clear help and gives concise answers.",
+        ),
+        resident_goal=options.get("resident_goal") or _env(
+            "VOICE_TEST_RESIDENT_GOAL",
+            "Choose English, ask for bin collection help, provide 50 Warraba Street Hurstville, confirm the address, and check the answer.",
+        ),
+        autonomous_turns=int(options.get("autonomous_turns", _env("VOICE_TEST_AUTONOMOUS_TURNS", "6"))),
+        autonomous_agent_timeout=float(options.get("autonomous_agent_timeout", _env("VOICE_TEST_AUTONOMOUS_AGENT_TIMEOUT", "18"))),
     )
 
 
@@ -2888,7 +2921,8 @@ async def synthetic_generate(request: Request):
     )
     try:
         llm = create_llm(_env("LLM_PROVIDER"), system_instruction=system)
-        resp = await llm._client.chat.completions.create(
+        resp = await _chat_completion_with_token_fallback(
+            llm._client,
             model=llm._settings.model,
             messages=[
                 {"role": "system", "content": system},
@@ -2923,7 +2957,8 @@ async def translate_text(request: Request):
         return {"translation": ""}
     try:
         llm = create_llm(_env("LLM_PROVIDER"))
-        resp = await llm._client.chat.completions.create(
+        resp = await _chat_completion_with_token_fallback(
+            llm._client,
             model=llm._settings.model,
             messages=[
                 {"role": "system", "content": "Translate the following Chinese text to English. Output only the English translation, nothing else."},
@@ -4106,7 +4141,8 @@ class TranslationProcessor(FrameProcessor):
                 "If the input consists entirely of filler sounds (e.g. 'um', 'uh', 'ahh', 'hmm') with no meaningful content, output nothing."
             )
             logger.info(f"[Translation] Calling configured LLM for translation...")
-            response = await self._llm._client.chat.completions.create(
+            response = await _chat_completion_with_token_fallback(
+                self._llm._client,
                 model=self._llm._settings.model,
                 messages=[
                     {"role": "system", "content": system_instruction},
@@ -4332,7 +4368,8 @@ class AutoTranslationProcessor(FrameProcessor):
                     "Output ONLY the translation. No explanations, no labels, no original text. "
                     "If the input is filler sounds only (e.g. 'um', 'uh', '嗯', '啊'), output nothing."
                 )
-            response = await self._llm._client.chat.completions.create(
+            response = await _chat_completion_with_token_fallback(
+                self._llm._client,
                 model=self._llm._settings.model,
                 messages=[
                     {"role": "system", "content": system_instruction},
@@ -4418,7 +4455,8 @@ class FixedAutoTranslationProcessor(AutoTranslationProcessor):
                     "If the input is filler sounds only (e.g. 'um', 'uh', 'å—¯', 'å•Š'), output nothing."
                 )
 
-            response = await self._llm._client.chat.completions.create(
+            response = await _chat_completion_with_token_fallback(
+                self._llm._client,
                 model=self._llm._settings.model,
                 messages=[
                     {"role": "system", "content": system_instruction},
@@ -4489,7 +4527,8 @@ class StrictAutoTranslationProcessor(FixedAutoTranslationProcessor):
                 f"Text:\n{text}"
             )
 
-        response = await self._llm._client.chat.completions.create(
+        response = await _chat_completion_with_token_fallback(
+            self._llm._client,
             model=self._llm._settings.model,
             messages=[
                 {"role": "system", "content": system_instruction},
