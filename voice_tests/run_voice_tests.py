@@ -2,7 +2,7 @@
 """Synthetic voice-call regression tests for the GRC bot.
 
 The runner generates caller audio with ElevenLabs, streams it into the bot's
-Vobiz websocket endpoint, polls /api/live-calls for the live transcript, and
+Telnyx websocket endpoint, polls /api/live-calls for the live transcript, and
 optionally asks an LLM to evaluate the conversation against scenario
 expectations.
 """
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import audioop
 import base64
 import hashlib
 import json
@@ -33,8 +34,10 @@ DEFAULT_REPORT_DIR = ROOT / "reports"
 DEFAULT_AUDIO_CACHE = ROOT / "audio_cache"
 PCM_RATE = 16000
 PCM_WIDTH = 2
+TELNYX_RATE = 8000
 FRAME_SECS = 0.02
 FRAME_BYTES = int(PCM_RATE * FRAME_SECS * PCM_WIDTH)
+TELNYX_FRAME_BYTES = int(TELNYX_RATE * FRAME_SECS)
 
 
 @dataclass
@@ -59,7 +62,7 @@ def normalize_target(target: str) -> tuple[str, str]:
     target = target.rstrip("/")
     if target.startswith("ws://") or target.startswith("wss://"):
         parsed = urlparse(target)
-        ws_url = target if parsed.path else f"{target}/vobiz/ws"
+        ws_url = target if parsed.path else f"{target}/telnyx/ws"
         scheme = "https" if parsed.scheme == "wss" else "http"
         http_base = f"{scheme}://{parsed.netloc}"
         return ws_url, http_base
@@ -67,7 +70,7 @@ def normalize_target(target: str) -> tuple[str, str]:
     if target.startswith("http://") or target.startswith("https://"):
         parsed = urlparse(target)
         ws_scheme = "wss" if parsed.scheme == "https" else "ws"
-        return f"{ws_scheme}://{parsed.netloc}/vobiz/ws", f"{parsed.scheme}://{parsed.netloc}"
+        return f"{ws_scheme}://{parsed.netloc}/telnyx/ws", f"{parsed.scheme}://{parsed.netloc}"
 
     raise ValueError("target must be http(s) app URL or ws(s) websocket URL")
 
@@ -164,6 +167,21 @@ def mix_pcm(a: bytes, b: bytes, b_gain: float = 0.35) -> bytes:
 
 def chunk_pcm(pcm: bytes) -> list[bytes]:
     return [pcm[i : i + FRAME_BYTES] for i in range(0, len(pcm), FRAME_BYTES) if len(pcm[i : i + FRAME_BYTES]) == FRAME_BYTES]
+
+
+def pcm16_to_telnyx_ulaw(pcm: bytes) -> bytes:
+    """Convert ElevenLabs 16 kHz signed PCM into Telnyx 8 kHz PCMU."""
+    clean = pcm[: len(pcm) - (len(pcm) % PCM_WIDTH)]
+    resampled, _ = audioop.ratecv(clean, PCM_WIDTH, 1, PCM_RATE, TELNYX_RATE, None)
+    return audioop.lin2ulaw(resampled, PCM_WIDTH)
+
+
+def chunk_telnyx_ulaw(ulaw: bytes) -> list[bytes]:
+    return [
+        ulaw[i : i + TELNYX_FRAME_BYTES]
+        for i in range(0, len(ulaw), TELNYX_FRAME_BYTES)
+        if len(ulaw[i : i + TELNYX_FRAME_BYTES]) == TELNYX_FRAME_BYTES
+    ]
 
 
 async def build_utterance_audio(utterance: str, args) -> bytes:
@@ -302,15 +320,13 @@ async def wait_for_agent_turn(http_base: str, monitor_id: str, previous_agent_co
     return last_call
 
 
-async def send_pcm_audio(ws, stream_id: str, pcm: bytes):
+async def send_telnyx_audio(ws, pcm: bytes):
+    ulaw = pcm16_to_telnyx_ulaw(pcm)
     send_clock = time.monotonic()
-    for frame in chunk_pcm(pcm):
+    for frame in chunk_telnyx_ulaw(ulaw):
         await ws.send(json.dumps({
             "event": "media",
-            "streamId": stream_id,
             "media": {
-                "contentType": "audio/x-l16",
-                "sampleRate": PCM_RATE,
                 "payload": base64.b64encode(frame).decode("ascii"),
             },
         }))
@@ -392,12 +408,12 @@ async def decide_resident_utterance(scenario: dict[str, Any], transcript: list[d
     return data
 
 
-async def stream_vobiz_call(ws_url: str, http_base: str, scenario: dict[str, Any], args) -> dict[str, Any]:
+async def stream_telnyx_call(ws_url: str, http_base: str, scenario: dict[str, Any], args) -> dict[str, Any]:
     import websockets
 
     call_id = f"synthetic-{scenario['id']}-{uuid.uuid4().hex[:8]}"
     stream_id = f"stream-{call_id}"
-    monitor_id = f"vobiz:{call_id}"
+    monitor_id = f"telnyx:{call_id}"
     on_call_started = getattr(args, "on_call_started", None)
     if callable(on_call_started):
         on_call_started(call_id, monitor_id, scenario)
@@ -412,18 +428,13 @@ async def stream_vobiz_call(ws_url: str, http_base: str, scenario: dict[str, Any
         utterance_audio.append(await build_utterance_audio(utterance, args))
 
     async with websockets.connect(ws_url, open_timeout=20, close_timeout=5, max_size=None) as ws:
+        await ws.send(json.dumps({"event": "connected"}))
         await ws.send(json.dumps({
             "event": "start",
-            "callId": call_id,
-            "streamId": stream_id,
+            "stream_id": stream_id,
             "start": {
-                "callId": call_id,
-                "streamId": stream_id,
-                "mediaFormat": {
-                    "encoding": "audio/x-l16",
-                    "sampleRate": PCM_RATE,
-                    "channels": 1,
-                },
+                "call_control_id": call_id,
+                "media_format": {"encoding": "PCMU", "sample_rate": TELNYX_RATE, "channels": 1},
             },
         }))
 
@@ -437,7 +448,7 @@ async def stream_vobiz_call(ws_url: str, http_base: str, scenario: dict[str, Any
                         msg = json.loads(raw)
                     except Exception:
                         continue
-                    if msg.get("event") == "playAudio" and (msg.get("media") or {}).get("payload"):
+                    if msg.get("event") == "media" and (msg.get("media") or {}).get("payload"):
                         received_bot_audio += 1
                         last_bot_audio_at = time.monotonic()
                         if first_bot_audio_at is None:
@@ -457,24 +468,12 @@ async def stream_vobiz_call(ws_url: str, http_base: str, scenario: dict[str, Any
                 await asyncio.sleep(0.05)
 
         for audio in utterance_audio:
-            send_clock = time.monotonic()
-            for frame in chunk_pcm(audio):
-                await ws.send(json.dumps({
-                    "event": "media",
-                    "streamId": stream_id,
-                    "media": {
-                        "contentType": "audio/x-l16",
-                        "sampleRate": PCM_RATE,
-                        "payload": base64.b64encode(frame).decode("ascii"),
-                    },
-                }))
-                send_clock += FRAME_SECS
-                await asyncio.sleep(max(0, send_clock - time.monotonic()))
+            await send_telnyx_audio(ws, audio)
             await asyncio.sleep(args.between_utterances)
 
         call = await wait_for_transcript_quiet(http_base, monitor_id, args.listen_secs, args.quiet_secs)
         try:
-            await ws.send(json.dumps({"event": "stop", "streamId": stream_id}))
+            await ws.send(json.dumps({"event": "stop"}))
         except Exception:
             pass
         rx.cancel()
@@ -498,12 +497,12 @@ async def stream_vobiz_call(ws_url: str, http_base: str, scenario: dict[str, Any
     }
 
 
-async def stream_autonomous_vobiz_call(ws_url: str, http_base: str, scenario: dict[str, Any], args) -> dict[str, Any]:
+async def stream_autonomous_telnyx_call(ws_url: str, http_base: str, scenario: dict[str, Any], args) -> dict[str, Any]:
     import websockets
 
     call_id = f"autonomous-{scenario['id']}-{uuid.uuid4().hex[:8]}"
     stream_id = f"stream-{call_id}"
-    monitor_id = f"vobiz:{call_id}"
+    monitor_id = f"telnyx:{call_id}"
     on_call_started = getattr(args, "on_call_started", None)
     if callable(on_call_started):
         on_call_started(call_id, monitor_id, scenario)
@@ -516,18 +515,13 @@ async def stream_autonomous_vobiz_call(ws_url: str, http_base: str, scenario: di
     call = None
 
     async with websockets.connect(ws_url, open_timeout=20, close_timeout=5, max_size=None) as ws:
+        await ws.send(json.dumps({"event": "connected"}))
         await ws.send(json.dumps({
             "event": "start",
-            "callId": call_id,
-            "streamId": stream_id,
+            "stream_id": stream_id,
             "start": {
-                "callId": call_id,
-                "streamId": stream_id,
-                "mediaFormat": {
-                    "encoding": "audio/x-l16",
-                    "sampleRate": PCM_RATE,
-                    "channels": 1,
-                },
+                "call_control_id": call_id,
+                "media_format": {"encoding": "PCMU", "sample_rate": TELNYX_RATE, "channels": 1},
             },
         }))
 
@@ -541,7 +535,7 @@ async def stream_autonomous_vobiz_call(ws_url: str, http_base: str, scenario: di
                         msg = json.loads(raw)
                     except Exception:
                         continue
-                    if msg.get("event") == "playAudio" and (msg.get("media") or {}).get("payload"):
+                    if msg.get("event") == "media" and (msg.get("media") or {}).get("payload"):
                         received_bot_audio += 1
                         last_bot_audio_at = time.monotonic()
                         if first_bot_audio_at is None:
@@ -579,7 +573,7 @@ async def stream_autonomous_vobiz_call(ws_url: str, http_base: str, scenario: di
                 utterance = "Could you repeat that please?"
 
             audio = await build_utterance_audio(utterance, args)
-            await send_pcm_audio(ws, stream_id, audio)
+            await send_telnyx_audio(ws, audio)
             resident_turns.append({
                 "turn": turn_index + 1,
                 "utterance": utterance,
@@ -599,7 +593,7 @@ async def stream_autonomous_vobiz_call(ws_url: str, http_base: str, scenario: di
 
         call = await wait_for_transcript_quiet(http_base, monitor_id, args.listen_secs, args.quiet_secs)
         try:
-            await ws.send(json.dumps({"event": "stop", "streamId": stream_id}))
+            await ws.send(json.dumps({"event": "stop"}))
         except Exception:
             pass
         rx.cancel()
@@ -708,9 +702,9 @@ async def run_scenario(ws_url: str, http_base: str, scenario: dict[str, Any], ar
 
     try:
         if scenario.get("autonomous"):
-            call_payload = await stream_autonomous_vobiz_call(ws_url, http_base, scenario, args)
+            call_payload = await stream_autonomous_telnyx_call(ws_url, http_base, scenario, args)
         else:
-            call_payload = await stream_vobiz_call(ws_url, http_base, scenario, args)
+            call_payload = await stream_telnyx_call(ws_url, http_base, scenario, args)
         errors.extend(call_payload.get("errors") or [])
         metrics = call_payload.get("metrics") or {}
         call = call_payload.get("call") or {}

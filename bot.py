@@ -2729,10 +2729,11 @@ def _trim_synthetic_jobs() -> None:
 
 
 def _synthetic_public_target(request: Request) -> str:
-    configured = _env("VOICE_TEST_TARGET") or _env("PUBLIC_URL") or _env("PUBLIC_URL_TELNYX")
+    configured = _env("VOICE_TEST_TARGET")
     if configured:
         return configured.rstrip("/")
-    return str(request.base_url).rstrip("/")
+    port = _env("PORT", "8080").strip() or "8080"
+    return f"http://127.0.0.1:{port}"
 
 
 def _synthetic_args(payload: dict, target: str):

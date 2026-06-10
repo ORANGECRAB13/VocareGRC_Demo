@@ -92,7 +92,7 @@ function SyntheticCallsPage() {
       setLiveCall(null);
       return;
     }
-    const wantedId = monitorId.includes(':') ? monitorId : `vobiz:${monitorId}`;
+    const wantedId = monitorId.includes(':') ? monitorId : `telnyx:${monitorId}`;
     try {
       const data = await api('/api/live-calls');
       const calls = Array.isArray(data.calls) ? data.calls : [];
