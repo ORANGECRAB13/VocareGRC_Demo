@@ -8,6 +8,7 @@ function SyntheticCallsPage() {
   const [jobs, setJobs] = React.useState([]);
   const [activeJobId, setActiveJobId] = React.useState(null);
   const [activeJob, setActiveJob] = React.useState(null);
+  const [liveCall, setLiveCall] = React.useState(null);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState('');
   const [prompt, setPrompt] = React.useState('Test short caller responses and noisy bin address pickup.');
@@ -33,10 +34,13 @@ function SyntheticCallsPage() {
   React.useEffect(() => {
     const t = setInterval(() => {
       refreshJobs();
-      if (activeJobId) refreshJob(activeJobId);
+      if (activeJobId) {
+        refreshJob(activeJobId);
+        refreshLiveCall();
+      }
     }, 1200);
     return () => clearInterval(t);
-  }, [activeJobId]);
+  }, [activeJobId, activeJob?.current_monitor_id, activeJob?.last_monitor_id]);
 
   async function api(path, init) {
     const res = await fetch(path, {
@@ -75,8 +79,26 @@ function SyntheticCallsPage() {
     try {
       const data = await api(`/api/synthetic/jobs/${jobId}`);
       setActiveJob(data);
+      refreshLiveCall(data);
     } catch (err) {
       setError(err.message || 'Could not load job');
+    }
+  }
+
+  async function refreshLiveCall(jobOverride) {
+    const sourceJob = jobOverride || activeJob;
+    const monitorId = sourceJob?.current_monitor_id || sourceJob?.last_monitor_id || sourceJob?.results?.[sourceJob.results.length - 1]?.call_id;
+    if (!monitorId) {
+      setLiveCall(null);
+      return;
+    }
+    const wantedId = monitorId.includes(':') ? monitorId : `vobiz:${monitorId}`;
+    try {
+      const data = await api('/api/live-calls');
+      const calls = Array.isArray(data.calls) ? data.calls : [];
+      setLiveCall(calls.find(call => call.id === wantedId) || null);
+    } catch (err) {
+      setError(err.message || 'Could not load live call');
     }
   }
 
@@ -140,6 +162,7 @@ function SyntheticCallsPage() {
       });
       setActiveJobId(job.id);
       setActiveJob(job);
+      setLiveCall(null);
       await refreshJobs();
     } catch (err) {
       setError(err.message || 'Could not start synthetic call run');
@@ -289,6 +312,8 @@ function SyntheticCallsPage() {
             </div>
           </section>
 
+          <LiveConversationPanel job={job} liveCall={liveCall} />
+
           <section style={{ background: '#fff', borderRadius: 8, boxShadow: '0 2px 12px rgba(0,0,0,0.05)', overflow: 'hidden' }}>
             <PanelHeader icon="auto_awesome" title="Generate Cases" subtitle="Use current LLM" />
             <div style={{ padding: 16, display: 'grid', gap: 12 }}>
@@ -413,6 +438,78 @@ function RangeRow({ label, value, min, max, step, onChange }) {
       </div>
       <input type="range" min={min} max={max} step={step} value={value} onChange={e => onChange(e.target.value)} />
     </label>
+  );
+}
+
+function LiveConversationPanel({ job, liveCall }) {
+  const monitorId = job?.current_monitor_id || job?.last_monitor_id || '';
+  const transcript = liveCall && Array.isArray(liveCall.transcript) ? liveCall.transcript : [];
+  const isRunning = job && ['queued', 'running'].includes(job.status);
+  const subtitle = liveCall ? liveCall.status : isRunning ? 'Waiting for stream' : 'Idle';
+  return (
+    <section style={{ background: '#fff', borderRadius: 8, boxShadow: '0 2px 12px rgba(0,0,0,0.05)', overflow: 'hidden' }}>
+      <PanelHeader icon="forum" title="Live Resident Conversation" subtitle={subtitle} />
+      <div style={{ padding: 16, display: 'grid', gap: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+          <div style={{ fontSize: 11, fontWeight: 800, color: '#767676', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {monitorId || 'Start an autonomous resident call to attach the live transcript.'}
+          </div>
+          <span style={{
+            flexShrink: 0,
+            fontSize: 10,
+            fontWeight: 900,
+            color: liveCall?.status === 'active' ? '#007A77' : '#767676',
+            background: liveCall?.status === 'active' ? '#D0F2F1' : '#F4F5F6',
+            borderRadius: 5,
+            padding: '4px 7px',
+            textTransform: 'uppercase'
+          }}>
+            {liveCall?.status || (isRunning ? 'connecting' : 'none')}
+          </span>
+        </div>
+        <div style={{
+          minHeight: 220,
+          maxHeight: 360,
+          overflowY: 'auto',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 8,
+          background: '#FAFAFA',
+          border: '1px solid #F0F1F3',
+          borderRadius: 8,
+          padding: 10
+        }}>
+          {transcript.map((line, index) => {
+            const isAgent = line.speaker === 'agent';
+            return (
+              <div key={`${line.timestamp || index}-${index}`} style={{
+                alignSelf: isAgent ? 'flex-end' : 'flex-start',
+                maxWidth: '88%',
+                background: isAgent ? '#F9E6E7' : '#fff',
+                border: `1px solid ${isAgent ? '#F2CDD0' : '#E8E9EB'}`,
+                borderRadius: 8,
+                padding: '8px 10px'
+              }}>
+                <div style={{
+                  fontSize: 9,
+                  fontWeight: 900,
+                  color: isAgent ? '#C8232C' : '#007A77',
+                  letterSpacing: '0.08em',
+                  textTransform: 'uppercase',
+                  marginBottom: 4
+                }}>{isAgent ? 'Main agent' : 'Resident agent'}</div>
+                <div style={{ fontSize: 12, lineHeight: 1.4, fontWeight: 650, color: '#1A1A1A', whiteSpace: 'pre-wrap' }}>{line.text}</div>
+              </div>
+            );
+          })}
+          {!transcript.length && (
+            <div style={{ margin: 'auto', textAlign: 'center', color: '#8A8F98', fontSize: 12, fontWeight: 800 }}>
+              {isRunning ? 'Call is starting. Transcript lines will appear here.' : 'No live autonomous conversation selected.'}
+            </div>
+          )}
+        </div>
+      </div>
+    </section>
   );
 }
 

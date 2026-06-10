@@ -398,6 +398,9 @@ async def stream_vobiz_call(ws_url: str, http_base: str, scenario: dict[str, Any
     call_id = f"synthetic-{scenario['id']}-{uuid.uuid4().hex[:8]}"
     stream_id = f"stream-{call_id}"
     monitor_id = f"vobiz:{call_id}"
+    on_call_started = getattr(args, "on_call_started", None)
+    if callable(on_call_started):
+        on_call_started(call_id, monitor_id, scenario)
     received_bot_audio = 0
     first_bot_audio_at = None
     last_bot_audio_at = None
@@ -501,6 +504,9 @@ async def stream_autonomous_vobiz_call(ws_url: str, http_base: str, scenario: di
     call_id = f"autonomous-{scenario['id']}-{uuid.uuid4().hex[:8]}"
     stream_id = f"stream-{call_id}"
     monitor_id = f"vobiz:{call_id}"
+    on_call_started = getattr(args, "on_call_started", None)
+    if callable(on_call_started):
+        on_call_started(call_id, monitor_id, scenario)
     received_bot_audio = 0
     first_bot_audio_at = None
     last_bot_audio_at = None

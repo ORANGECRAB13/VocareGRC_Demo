@@ -2816,11 +2816,26 @@ async def _run_synthetic_job(job_id: str, scenarios: list[dict], target: str, pa
         })
 
         for index, scenario in enumerate(scenarios):
+            def on_call_started(call_id: str, monitor_id: str, started_scenario: dict, *, current_index=index) -> None:
+                job.update({
+                    "current_call_id": call_id,
+                    "current_monitor_id": monitor_id,
+                    "current_scenario_id": started_scenario.get("id"),
+                    "current_index": current_index,
+                    "updated_at": _now_iso(),
+                })
+
+            args.on_call_started = on_call_started
             job["current_index"] = index
             job["current_id"] = scenario.get("id")
+            job["current_call_id"] = None
+            job["current_monitor_id"] = None
+            job["current_scenario_id"] = scenario.get("id")
             job["updated_at"] = _now_iso()
             result = await run_scenario(ws_url, http_base, scenario, args)
             job["results"].append(asdict(result))
+            job["last_call_id"] = result.call_id
+            job["last_monitor_id"] = job.get("current_monitor_id")
             job["updated_at"] = _now_iso()
 
         passed = sum(1 for result in job["results"] if result.get("status") == "PASS")
