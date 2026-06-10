@@ -183,6 +183,45 @@ def telnyx_ulaw_to_pcm16(ulaw: bytes) -> bytes:
     return pcm16
 
 
+def wav_from_pcm16(pcm: bytes, sample_rate: int = PCM_RATE) -> bytes:
+    data_size = len(pcm)
+    return b"".join([
+        b"RIFF",
+        struct.pack("<I", 36 + data_size),
+        b"WAVE",
+        b"fmt ",
+        struct.pack("<IHHIIHH", 16, 1, 1, sample_rate, sample_rate * PCM_WIDTH, PCM_WIDTH, 16),
+        b"data",
+        struct.pack("<I", data_size),
+        pcm,
+    ])
+
+
+async def transcribe_agent_audio(pcm: bytes, args) -> str:
+    if not pcm or len(pcm) < int(0.25 * PCM_RATE * PCM_WIDTH):
+        return ""
+    api_key = args.elevenlabs_api_key or os.getenv("ELEVENLABS_API_KEY")
+    if not api_key:
+        return ""
+    import httpx
+
+    files = {"file": ("agent.wav", wav_from_pcm16(pcm), "audio/wav")}
+    data = {
+        "model_id": getattr(args, "agent_stt_model", "scribe_v2"),
+        "tag_audio_events": "false",
+        "num_speakers": "1",
+    }
+    headers = {"xi-api-key": api_key}
+    try:
+        async with httpx.AsyncClient(timeout=45) as client:
+            resp = await client.post("https://api.elevenlabs.io/v1/speech-to-text", headers=headers, data=data, files=files)
+            resp.raise_for_status()
+            payload = resp.json()
+            return (payload.get("text") or "").strip()
+    except Exception:
+        return ""
+
+
 def chunk_telnyx_ulaw(ulaw: bytes) -> list[bytes]:
     return [
         ulaw[i : i + TELNYX_FRAME_BYTES]
@@ -531,6 +570,8 @@ async def stream_autonomous_telnyx_call(ws_url: str, http_base: str, scenario: d
     started_at = time.monotonic()
     errors: list[str] = []
     resident_turns: list[dict[str, Any]] = []
+    agent_audio_transcripts: list[dict[str, Any]] = []
+    agent_audio_buffer = bytearray()
     call = None
 
     async with websockets.connect(ws_url, open_timeout=20, close_timeout=5, max_size=None) as ws:
@@ -547,7 +588,7 @@ async def stream_autonomous_telnyx_call(ws_url: str, http_base: str, scenario: d
         await poll_call(http_base, monitor_id, timeout_secs=8)
 
         async def receiver():
-            nonlocal received_bot_audio, first_bot_audio_at, last_bot_audio_at
+            nonlocal received_bot_audio, first_bot_audio_at, last_bot_audio_at, agent_audio_buffer
             try:
                 async for raw in ws:
                     try:
@@ -557,7 +598,9 @@ async def stream_autonomous_telnyx_call(ws_url: str, http_base: str, scenario: d
                     if msg.get("event") == "media" and (msg.get("media") or {}).get("payload"):
                         try:
                             payload = base64.b64decode((msg.get("media") or {}).get("payload"))
-                            emit_audio_segment(args, "agent", telnyx_ulaw_to_pcm16(payload))
+                            agent_pcm = telnyx_ulaw_to_pcm16(payload)
+                            agent_audio_buffer.extend(agent_pcm)
+                            emit_audio_segment(args, "agent", agent_pcm)
                         except Exception:
                             pass
                         received_bot_audio += 1
@@ -571,20 +614,45 @@ async def stream_autonomous_telnyx_call(ws_url: str, http_base: str, scenario: d
 
         rx = asyncio.create_task(receiver())
 
-        deadline = time.monotonic() + args.greeting_timeout
-        while time.monotonic() < deadline:
-            if first_bot_audio_at and last_bot_audio_at and (time.monotonic() - last_bot_audio_at) >= args.greeting_quiet_secs:
-                break
-            await asyncio.sleep(0.05)
+        async def wait_for_bot_audio_quiet(timeout_secs: float, min_bot_frames: int = 0) -> bytes:
+            nonlocal agent_audio_buffer
+            deadline = time.monotonic() + timeout_secs
+            saw_audio = False
+            while time.monotonic() < deadline:
+                if last_bot_audio_at and received_bot_audio > min_bot_frames:
+                    saw_audio = True
+                    if (time.monotonic() - last_bot_audio_at) >= args.greeting_quiet_secs:
+                        break
+                await asyncio.sleep(0.05)
+            if not saw_audio:
+                return b""
+            pcm = bytes(agent_audio_buffer)
+            agent_audio_buffer = bytearray()
+            return pcm
+
+        async def capture_heard_agent_audio(timeout_secs: float, label: str, min_bot_frames: int = 0) -> str:
+            pcm = await wait_for_bot_audio_quiet(timeout_secs, min_bot_frames=min_bot_frames)
+            text = await transcribe_agent_audio(pcm, args)
+            if text:
+                agent_audio_transcripts.append({
+                    "speaker": "agent_audio",
+                    "text": text,
+                    "timestamp": datetime.utcnow().isoformat(timespec="milliseconds") + "Z",
+                    "label": label,
+                })
+            return text
+
+        await capture_heard_agent_audio(args.greeting_timeout, "greeting")
 
         call = await wait_for_agent_turn(http_base, monitor_id, previous_agent_count=0, timeout_secs=2.0)
         max_turns = int(scenario.get("max_turns") or args.autonomous_turns)
         for turn_index in range(max_turns):
             transcript = (call or {}).get("transcript") or []
+            heard_transcript = transcript + agent_audio_transcripts[-4:]
             agent_count_before = sum(1 for line in transcript if line.get("speaker") == "agent")
             decision_started = time.monotonic()
             try:
-                decision = await decide_resident_utterance(scenario, transcript, turn_index, args)
+                decision = await decide_resident_utterance(scenario, heard_transcript, turn_index, args)
             except Exception as exc:
                 errors.append(f"resident_llm: {type(exc).__name__}: {exc}")
                 fallback = "English please" if turn_index == 0 else "Could you help me with my bins please?"
@@ -597,6 +665,7 @@ async def stream_autonomous_telnyx_call(ws_url: str, http_base: str, scenario: d
                 utterance = "Could you repeat that please?"
 
             audio = await build_utterance_audio(utterance, args)
+            bot_frames_before_reply = received_bot_audio
             await send_telnyx_audio(ws, audio, args=args, speaker="caller")
             resident_turns.append({
                 "turn": turn_index + 1,
@@ -611,6 +680,11 @@ async def stream_autonomous_telnyx_call(ws_url: str, http_base: str, scenario: d
                 monitor_id,
                 previous_agent_count=agent_count_before,
                 timeout_secs=args.autonomous_agent_timeout,
+            )
+            await capture_heard_agent_audio(
+                args.autonomous_agent_timeout,
+                f"turn_{turn_index + 1}",
+                min_bot_frames=bot_frames_before_reply,
             )
             if decision.get("done"):
                 break
@@ -638,6 +712,7 @@ async def stream_autonomous_telnyx_call(ws_url: str, http_base: str, scenario: d
             "time_to_first_bot_audio_secs": round(first_bot_audio_at - started_at, 3) if first_bot_audio_at else None,
             "turn_latencies": transcript_turn_latencies(transcript),
             "resident_turns": resident_turns,
+            "agent_audio_transcripts": agent_audio_transcripts,
             "autonomous": True,
         },
         "errors": errors,
@@ -853,6 +928,7 @@ def parse_args():
     ap.add_argument("--resident-goal", default=os.getenv("VOICE_TEST_RESIDENT_GOAL", "Choose English, ask for bin collection help, provide 50 Warraba Street Hurstville, confirm the address, and check the answer."))
     ap.add_argument("--autonomous-turns", type=int, default=int(os.getenv("VOICE_TEST_AUTONOMOUS_TURNS", "6")))
     ap.add_argument("--autonomous-agent-timeout", type=float, default=float(os.getenv("VOICE_TEST_AUTONOMOUS_AGENT_TIMEOUT", "18")))
+    ap.add_argument("--agent-stt-model", default=os.getenv("VOICE_TEST_AGENT_STT_MODEL", "scribe_v2"))
     args = ap.parse_args()
 
     if not args.elevenlabs_api_key:

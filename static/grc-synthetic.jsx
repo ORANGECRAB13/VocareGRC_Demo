@@ -609,6 +609,7 @@ function ResultBlock({ result }) {
   const issues = result.evaluation?.issues || [];
   const residentTurns = result.metrics?.resident_turns || [];
   const turnLatencies = result.metrics?.turn_latencies || [];
+  const agentAudioTurns = result.metrics?.agent_audio_transcripts || [];
   return (
     <div style={{ border: '1px solid #E8E9EB', borderRadius: 8, overflow: 'hidden' }}>
       <div style={{ padding: '10px 12px', background: pass ? '#F2FBFA' : '#FFF7F7', display: 'flex', justifyContent: 'space-between', gap: 12 }}>
@@ -626,6 +627,16 @@ function ResultBlock({ result }) {
             {residentTurns.slice(-6).map((turn, i) => (
               <div key={i} style={{ fontSize: 11, color: '#5A5F6B' }}>
                 <b>{turn.turn}.</b> {turn.utterance}
+              </div>
+            ))}
+          </div>
+        )}
+        {!!agentAudioTurns.length && (
+          <div style={{ display: 'grid', gap: 4, background: '#FAFAFA', border: '1px solid #F0F1F3', borderRadius: 7, padding: 8 }}>
+            <div style={{ fontSize: 10, fontWeight: 900, color: '#8A8F98', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Main agent audio heard by resident STT</div>
+            {agentAudioTurns.slice(-4).map((turn, i) => (
+              <div key={i} style={{ fontSize: 11, color: '#5A5F6B' }}>
+                <b>{turn.label || 'audio'}.</b> {turn.text}
               </div>
             ))}
           </div>

@@ -2826,6 +2826,7 @@ def _synthetic_args(payload: dict, target: str):
         ),
         autonomous_turns=int(options.get("autonomous_turns", _env("VOICE_TEST_AUTONOMOUS_TURNS", "6"))),
         autonomous_agent_timeout=float(options.get("autonomous_agent_timeout", _env("VOICE_TEST_AUTONOMOUS_AGENT_TIMEOUT", "18"))),
+        agent_stt_model=options.get("agent_stt_model") or _env("VOICE_TEST_AGENT_STT_MODEL", "scribe_v2"),
     )
 
 
