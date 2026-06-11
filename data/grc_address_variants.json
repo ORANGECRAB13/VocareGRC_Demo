@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "updated_at": "2026-06-11T07:21:19.017Z",
+  "names": {
+    "Warraba Street": {
+      "type": "street",
+      "canonical": "Warraba Street",
+      "variants": [
+        {
+          "value": "Waraba",
+          "source": "llm_generated",
+          "confidence": 0.7,
+          "created_at": "2026-06-11T07:21:19.017Z"
+        },
+        {
+          "value": "Waraba St",
+          "source": "llm_generated",
+          "confidence": 0.7,
+          "created_at": "2026-06-11T07:21:19.017Z"
+        },
+        {
+          "value": "Waraba Street",
+          "source": "tts_stt",
+          "confidence": 0.9,
+          "created_at": "2026-06-11T07:21:19.017Z"
+        },
+        {
+          "value": "Warabba Street",
+          "source": "llm_generated",
+          "confidence": 0.7,
+          "created_at": "2026-06-11T07:21:19.017Z"
+        },
+        {
+          "value": "Warboss Street",
+          "source": "manual_observed",
+          "confidence": 0.9,
+          "created_at": "2026-06-11T07:21:19.017Z"
+        },
+        {
+          "value": "Waroba Street",
+          "source": "llm_generated",
+          "confidence": 0.7,
+          "created_at": "2026-06-11T07:21:19.017Z"
+        }
+      ],
+      "observed_tts_stt": [
+        "Waraba Street"
+      ],
+      "updated_at": "2026-06-11T07:21:19.017Z"
+    }
+  }
+}

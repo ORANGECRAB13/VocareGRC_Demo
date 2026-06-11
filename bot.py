@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import random
+import difflib
 import time
 import uuid
 from datetime import datetime
@@ -2562,6 +2563,405 @@ async def debug_address_lookup(request: Request):
             "expanded_candidates": [],
             "lookup": {"success": False, "error": str(e), "address_query": corrected_address},
             "voice_response": None,
+        }
+
+
+def _address_qa_data_dir() -> Path:
+    path = Path(__file__).parent / "data"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _address_variants_path() -> Path:
+    return _address_qa_data_dir() / "grc_address_variants.json"
+
+
+def _address_qa_norm(text: str) -> str:
+    value = (text or "").lower()
+    value = re.sub(r"[^a-z0-9]+", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _load_address_variants() -> dict:
+    path = _address_variants_path()
+    if not path.exists():
+        return {"version": 1, "updated_at": None, "names": {}}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data.setdefault("version", 1)
+        data.setdefault("names", {})
+        return data
+    except Exception as e:
+        logger.warning(f"[ADDRESS QA] Could not load variants file: {e}")
+        return {"version": 1, "updated_at": None, "names": {}}
+
+
+def _save_address_variants(data: dict) -> None:
+    data["updated_at"] = _now_iso()
+    _address_variants_path().write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _address_name_corpus() -> dict:
+    streets_path = Path(__file__).parent / "GRC_pilot" / "streets_found.txt"
+    street_names: set[str] = set()
+    street_suffix_re = re.compile(
+        r"\b(?:st|street|rd|road|ave|avenue|pl|place|cres|crescent|ct|court|dr|drive|"
+        r"ln|lane|pde|parade|cl|close|cct|circuit|way|tce|terrace|hwy|highway|"
+        r"sq|square|gr|grove|walk|mall|blvd|boulevard)\.?$",
+        re.IGNORECASE,
+    )
+    stop_words_re = re.compile(r"\b(?:after|before|at|opp|opposite|station|school)\b", re.IGNORECASE)
+    if streets_path.exists():
+        for raw in streets_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            name = re.sub(r"\s+", " ", raw.strip())
+            if not name or len(name) < 3:
+                continue
+            if re.search(r"\d", name):
+                continue
+            if set(name) == {"="}:
+                continue
+            if "," in name:
+                continue
+            if stop_words_re.search(name):
+                continue
+            if " at " in name.lower():
+                continue
+            if not street_suffix_re.search(name):
+                continue
+            street_names.add(name.title())
+
+    try:
+        from grc_wastetrack import _GRC_SUBURBS
+        suburbs = {item.title() for item in _GRC_SUBURBS}
+    except Exception:
+        suburbs = {
+            "Allawah", "Beverly Hills", "Beverley Park", "Blakehurst", "Carlton",
+            "Carss Park", "Connells Point", "Hurstville", "Hurstville Grove",
+            "Kingsgrove", "Kogarah", "Kogarah Bay", "Kyle Bay", "Lugarno",
+            "Mortdale", "Narwee", "Oatley", "Peakhurst", "Peakhurst Heights",
+            "Penshurst", "Ramsgate", "Riverwood", "Sans Souci", "South Hurstville",
+        }
+
+    return {"streets": sorted(street_names), "suburbs": sorted(suburbs)}
+
+
+def _wav_from_pcm_bytes(pcm: bytes, sample_rate: int = 16000) -> bytes:
+    data_size = len(pcm)
+    byte_rate = sample_rate * 2
+    block_align = 2
+    return b"".join([
+        b"RIFF",
+        struct.pack("<I", 36 + data_size),
+        b"WAVE",
+        b"fmt ",
+        struct.pack("<IHHIIHH", 16, 1, 1, sample_rate, byte_rate, block_align, 16),
+        b"data",
+        struct.pack("<I", data_size),
+        pcm,
+    ])
+
+
+async def _elevenlabs_tts_pcm(text: str, *, voice_id: str, speed: float, stability: float, similarity_boost: float) -> bytes:
+    import aiohttp
+
+    api_key = _env("ELEVENLABS_API_KEY")
+    if not api_key:
+        raise RuntimeError("ELEVENLABS_API_KEY is not set")
+    model = _env("VOICE_TEST_ELEVENLABS_MODEL", _env("ELEVENLABS_TTS_MODEL", "eleven_turbo_v2_5"))
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+    payload = {
+        "text": text,
+        "model_id": model,
+        "voice_settings": {
+            "stability": stability,
+            "similarity_boost": similarity_boost,
+            "speed": speed,
+        },
+    }
+    headers = {"xi-api-key": api_key, "Content-Type": "application/json", "Accept": "audio/pcm"}
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            url,
+            params={"output_format": "pcm_16000"},
+            headers=headers,
+            json=payload,
+            timeout=aiohttp.ClientTimeout(total=60),
+        ) as resp:
+            if resp.status >= 400:
+                raise RuntimeError(f"ElevenLabs TTS failed: {resp.status} {await resp.text()}")
+            return await resp.read()
+
+
+async def _elevenlabs_stt_text(pcm: bytes) -> str:
+    import aiohttp
+
+    api_key = _env("ELEVENLABS_API_KEY")
+    if not api_key:
+        raise RuntimeError("ELEVENLABS_API_KEY is not set")
+    boundary = f"----vocare{uuid.uuid4().hex}"
+    wav = _wav_from_pcm_bytes(pcm)
+    body = bytearray()
+    for name, value in (
+        ("model_id", _env("VOICE_TEST_AGENT_STT_MODEL", "scribe_v2")),
+        ("tag_audio_events", "false"),
+        ("num_speakers", "1"),
+    ):
+        body.extend(f"--{boundary}\r\n".encode())
+        body.extend(f'Content-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
+    body.extend(f"--{boundary}\r\n".encode())
+    body.extend(b'Content-Disposition: form-data; name="file"; filename="address.wav"\r\n')
+    body.extend(b"Content-Type: audio/wav\r\n\r\n")
+    body.extend(wav)
+    body.extend(b"\r\n")
+    body.extend(f"--{boundary}--\r\n".encode())
+
+    headers = {"xi-api-key": api_key, "Content-Type": f"multipart/form-data; boundary={boundary}"}
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            "https://api.elevenlabs.io/v1/speech-to-text",
+            headers=headers,
+            data=bytes(body),
+            timeout=aiohttp.ClientTimeout(total=60),
+        ) as resp:
+            if resp.status >= 400:
+                raise RuntimeError(f"ElevenLabs STT failed: {resp.status} {await resp.text()}")
+            data = await resp.json()
+            return (data.get("text") or "").strip()
+
+
+async def _llm_address_variants(name: str, observed: list[str], count: int) -> list[str]:
+    system = (
+        "Generate likely speech-to-text mishearings for Australian street or suburb names. "
+        "Return strict JSON with key variants, an array of short strings. "
+        "Keep the street type if it is part of the name. Do not include the canonical name."
+    )
+    prompt = {
+        "canonical_name": name,
+        "observed_tts_stt_outputs": observed,
+        "target_count": count,
+        "examples": {
+            "Allambee Crescent": ["Alenby Crescent", "Allenby Crescent", "Allambi Crescent"],
+            "Warraba Street": ["Waroba Street", "Warboss Street", "Warbaugh Street"],
+        },
+    }
+    llm = create_llm(_env("LLM_PROVIDER"), system_instruction=system)
+    response = await _chat_completion_with_token_fallback(
+        llm._client,
+        model=llm._settings.model,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
+        ],
+        response_format={"type": "json_object"},
+        max_tokens=700,
+    )
+    try:
+        data = json.loads(response.choices[0].message.content or "{}")
+        variants = data.get("variants") or []
+    except Exception:
+        variants = []
+    return [str(item).strip() for item in variants if str(item).strip()]
+
+
+def _merge_address_variants(existing: list[dict], variants: list[str], source: str) -> list[dict]:
+    by_key = {_address_qa_norm(item.get("value", "")): item for item in existing if item.get("value")}
+    for variant in variants:
+        key = _address_qa_norm(variant)
+        if key:
+            by_key.setdefault(key, {
+                "value": variant,
+                "source": source,
+                "confidence": 0.7 if source == "llm_generated" else 0.9,
+                "created_at": _now_iso(),
+            })
+    return sorted(by_key.values(), key=lambda item: item.get("value", "").lower())[:80]
+
+
+def _apply_generated_address_variants(text: str, variants_data: dict) -> tuple[str, list[dict]]:
+    normalized = f" {_address_qa_norm(text)} "
+    entries = []
+    for canonical, entry in (variants_data.get("names") or {}).items():
+        for item in entry.get("variants") or []:
+            variant = item.get("value") if isinstance(item, dict) else str(item)
+            key = _address_qa_norm(variant)
+            if key and f" {key} " in normalized:
+                entries.append((key, canonical, variant, item))
+
+    matches = []
+    for key, canonical, variant, item in sorted(entries, key=lambda row: len(row[0]), reverse=True):
+        if f" {key} " in normalized:
+            normalized = normalized.replace(f" {key} ", f" {_address_qa_norm(canonical)} ")
+            matches.append({
+                "variant": variant,
+                "canonical": canonical,
+                "source": item.get("source") if isinstance(item, dict) else "unknown",
+            })
+    return normalized.strip(), matches
+
+
+def _variant_rank_score(query: str, candidate_address: str, variant_matches: list[dict]) -> float:
+    query_norm = _address_qa_norm(query)
+    candidate_norm = _address_qa_norm(candidate_address)
+    score = difflib.SequenceMatcher(None, query_norm, candidate_norm).ratio()
+    for match in variant_matches:
+        if _address_qa_norm(match.get("canonical", "")) in candidate_norm:
+            score += 0.18
+    return round(min(score, 1.5), 4)
+
+
+@app.get("/api/address-qa/corpus")
+async def address_qa_corpus(limit: int = 300):
+    corpus = _address_name_corpus()
+    safe_limit = max(1, min(limit, 3000))
+    return {
+        "street_count": len(corpus["streets"]),
+        "suburb_count": len(corpus["suburbs"]),
+        "streets": corpus["streets"][:safe_limit],
+        "suburbs": corpus["suburbs"],
+    }
+
+
+@app.get("/api/address-qa/variants")
+async def address_qa_variants():
+    data = _load_address_variants()
+    names = data.get("names") or {}
+    return {
+        **data,
+        "name_count": len(names),
+        "variant_count": sum(len(entry.get("variants") or []) for entry in names.values()),
+        "path": str(_address_variants_path()),
+    }
+
+
+@app.post("/api/address-qa/generate-variants")
+async def address_qa_generate_variants(request: Request):
+    payload = await request.json()
+    names = [str(item).strip() for item in (payload.get("names") or []) if str(item).strip()]
+    name_type = (payload.get("type") or "street").strip().lower()
+    runs = max(1, min(int(payload.get("runs") or 5), 10))
+    max_names = max(1, min(int(payload.get("max_names") or len(names) or 3), 20))
+    variant_target = max(5, min(int(payload.get("variant_target") or 20), 30))
+
+    if not names:
+        corpus = _address_name_corpus()
+        names = (corpus["suburbs"] if name_type == "suburb" else corpus["streets"])[:max_names]
+    names = names[:max_names]
+
+    voice_id = payload.get("voice_id") or _env("VOICE_TEST_ELEVENLABS_VOICE_ID") or _env("ELEVENLABS_VOICE_ID")
+    if not voice_id:
+        return Response(status_code=400, content="ELEVENLABS_VOICE_ID or VOICE_TEST_ELEVENLABS_VOICE_ID is not set")
+
+    variants_data = _load_address_variants()
+    results = []
+    settings_cycle = [
+        {"speed": 0.95, "stability": 0.35},
+        {"speed": 1.00, "stability": 0.45},
+        {"speed": 1.05, "stability": 0.55},
+        {"speed": 0.90, "stability": 0.40},
+        {"speed": 1.10, "stability": 0.50},
+    ]
+
+    for name in names:
+        observed, errors = [], []
+        for index in range(runs):
+            settings = settings_cycle[index % len(settings_cycle)]
+            try:
+                pcm = await _elevenlabs_tts_pcm(
+                    name,
+                    voice_id=voice_id,
+                    speed=settings["speed"],
+                    stability=settings["stability"],
+                    similarity_boost=0.75,
+                )
+                heard = await _elevenlabs_stt_text(pcm)
+                if heard:
+                    observed.append(heard)
+            except Exception as e:
+                errors.append(f"{type(e).__name__}: {e}")
+
+        unique_observed = []
+        for item in observed:
+            if _address_qa_norm(item) != _address_qa_norm(name) and item not in unique_observed:
+                unique_observed.append(item)
+
+        llm_variants = await _llm_address_variants(name, unique_observed, variant_target)
+        entry = variants_data.setdefault("names", {}).setdefault(name, {
+            "type": name_type,
+            "canonical": name,
+            "variants": [],
+            "observed_tts_stt": [],
+        })
+        entry["type"] = name_type
+        entry["canonical"] = name
+        entry["updated_at"] = _now_iso()
+        entry["observed_tts_stt"] = sorted(set((entry.get("observed_tts_stt") or []) + observed))
+        entry["variants"] = _merge_address_variants(entry.get("variants") or [], unique_observed, "tts_stt")
+        entry["variants"] = _merge_address_variants(entry.get("variants") or [], llm_variants, "llm_generated")[:variant_target]
+
+        results.append({
+            "name": name,
+            "type": name_type,
+            "observed": observed,
+            "variants": [item.get("value") for item in entry["variants"]],
+            "errors": errors,
+        })
+
+    _save_address_variants(variants_data)
+    return {
+        "generated": results,
+        "variant_file": str(_address_variants_path()),
+        "name_count": len(variants_data.get("names") or {}),
+    }
+
+
+@app.post("/api/address-qa/finalize")
+async def address_qa_finalize(request: Request):
+    payload = await request.json()
+    text = (payload.get("text") or "").strip()
+    if not text:
+        return Response(status_code=400, content="Missing text")
+    variants_data = _load_address_variants()
+    variant_rewrite, variant_matches = _apply_generated_address_variants(text, variants_data)
+    corrected = _correct_address(variant_rewrite or text)
+    try:
+        from grc_wastetrack import get_expanded_address_candidates, get_bin_collection_details as _wt, format_voice_response as _wt_fmt
+        candidates = await asyncio.to_thread(get_expanded_address_candidates, corrected, 12)
+        ranked = sorted(
+            [
+                {
+                    **candidate,
+                    "qa_score": _variant_rank_score(corrected, candidate.get("address", ""), variant_matches),
+                }
+                for candidate in candidates
+            ],
+            key=lambda item: (item.get("qa_score", 0), item.get("score", 0)),
+            reverse=True,
+        )
+        selected = ranked[0].get("address") if ranked else corrected
+        lookup = await asyncio.to_thread(_wt, selected)
+        return {
+            "input": text,
+            "variant_rewrite": variant_rewrite,
+            "variant_matches": variant_matches,
+            "corrected": corrected,
+            "selected_address": selected,
+            "candidates": ranked,
+            "lookup": lookup,
+            "voice_response": _wt_fmt(lookup) if lookup.get("success") else "",
+            "note": "Tester only. This does not change the live voice pipeline.",
+        }
+    except Exception as e:
+        logger.error(f"[ADDRESS QA] finalize failed for {text!r}: {e}")
+        return {
+            "input": text,
+            "variant_rewrite": variant_rewrite,
+            "variant_matches": variant_matches,
+            "corrected": corrected,
+            "selected_address": corrected,
+            "candidates": [],
+            "lookup": {"success": False, "error": str(e), "address_query": corrected},
+            "voice_response": "",
+            "note": "Tester only. This does not change the live voice pipeline.",
         }
 
 
