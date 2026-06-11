@@ -2980,7 +2980,25 @@ async def address_qa_finalize(request: Request):
             key=lambda item: (item.get("qa_score", 0), item.get("score", 0)),
             reverse=True,
         )
-        selected = ranked[0].get("address") if ranked else corrected
+        if not ranked:
+            lookup = {
+                "success": False,
+                "error": "No matching address candidate returned by the GRC bin collection API",
+                "address_query": corrected,
+            }
+            return {
+                "input": text,
+                "variant_rewrite": variant_rewrite,
+                "variant_matches": variant_matches,
+                "corrected": corrected,
+                "selected_address": None,
+                "candidates": [],
+                "lookup": lookup,
+                "voice_response": "",
+                "note": "No candidate was selected because the GRC bin collection API returned no matching addresses.",
+            }
+
+        selected = ranked[0].get("address")
         lookup = await asyncio.to_thread(_wt, selected)
         return {
             "input": text,

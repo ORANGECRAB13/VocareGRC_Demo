@@ -227,9 +227,15 @@ function AddressQAPage() {
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 10 }}>
                 <AddressQAInfoTile label="Variant Rewrite" value={finalizeResult.variant_rewrite || '-'} />
                 <AddressQAInfoTile label="Corrected Query" value={finalizeResult.corrected || '-'} />
-                <AddressQAInfoTile label="Selected Address" value={finalizeResult.selected_address || '-'} strong />
+                <AddressQAInfoTile label="Selected Address" value={finalizeResult.selected_address || 'No GRC candidate'} strong={!!finalizeResult.selected_address} />
                 <AddressQAInfoTile label="Lookup" value={finalizeResult.lookup?.success ? 'Successful' : 'No result'} strong={finalizeResult.lookup?.success} />
               </div>
+
+              {!finalizeResult.lookup?.success && (
+                <div style={{ background: '#FFF7E6', color: '#8A5A00', border: '1px solid #F6D48A', borderRadius: 8, padding: '10px 12px', fontSize: 12, fontWeight: 700, lineHeight: 1.45 }}>
+                  {finalizeResult.lookup?.error || finalizeResult.note || 'No matching GRC bin collection address was found.'}
+                </div>
+              )}
 
               {!!finalizeResult.variant_matches?.length && (
                 <AddressQAResultBlock title="Variant Matches" subtitle={`${finalizeResult.variant_matches.length} applied`}>
