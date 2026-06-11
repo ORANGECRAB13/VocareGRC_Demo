@@ -2582,6 +2582,17 @@ def _address_qa_norm(text: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
+def _address_qa_street_base(text: str) -> str:
+    value = _address_qa_norm(text)
+    return re.sub(
+        r"\b(?:st|street|rd|road|ave|avenue|pl|place|cres|crescent|ct|court|dr|drive|"
+        r"ln|lane|pde|parade|cl|close|cct|circuit|way|tce|terrace|hwy|highway|"
+        r"sq|square|gr|grove|walk|mall|blvd|boulevard)$",
+        "",
+        value,
+    ).strip()
+
+
 def _load_address_variants() -> dict:
     path = _address_variants_path()
     if not path.exists():
@@ -2740,7 +2751,7 @@ async def _llm_address_variants(name: str, observed: list[str], count: int) -> l
         "observed_tts_stt_outputs": observed,
         "target_count": count,
         "examples": {
-            "Allambee Crescent": ["Alenby Crescent", "Allenby Crescent", "Allambi Crescent"],
+            "Allambee Street": ["Alenby Street", "Allenby Street", "Allambi Street"],
             "Warraba Street": ["Waroba Street", "Warboss Street", "Warbaugh Street"],
         },
     }
@@ -2761,6 +2772,33 @@ async def _llm_address_variants(name: str, observed: list[str], count: int) -> l
     except Exception:
         variants = []
     return [str(item).strip() for item in variants if str(item).strip()]
+
+
+def _resolve_address_qa_canonical_name(name: str, name_type: str) -> tuple[str, str | None]:
+    """Snap a lab canonical to a real GRC street/suburb name when possible."""
+    corpus = _address_name_corpus()
+    options = corpus["suburbs"] if name_type == "suburb" else corpus["streets"]
+    by_norm = {_address_qa_norm(item): item for item in options}
+    normalized = _address_qa_norm(name)
+    if normalized in by_norm:
+        return by_norm[normalized], None
+
+    if name_type != "suburb":
+        base = _address_qa_street_base(name)
+        base_matches = [
+            option
+            for option in options
+            if base and _address_qa_street_base(option) == base
+        ]
+        if len(base_matches) == 1:
+            canonical = base_matches[0]
+            return canonical, f"{name} was snapped to corpus name {canonical}"
+
+    matches = difflib.get_close_matches(normalized, by_norm.keys(), n=1, cutoff=0.78)
+    if matches:
+        canonical = by_norm[matches[0]]
+        return canonical, f"{name} was snapped to corpus name {canonical}"
+    return name, f"{name} is not in the known GRC {name_type} corpus"
 
 
 def _merge_address_variants(existing: list[dict], variants: list[str], source: str) -> list[dict]:
@@ -2862,7 +2900,11 @@ async def address_qa_generate_variants(request: Request):
     ]
 
     for name in names:
+        requested_name = name
+        name, canonical_warning = _resolve_address_qa_canonical_name(requested_name, name_type)
         observed, errors = [], []
+        if canonical_warning:
+            errors.append(canonical_warning)
         for index in range(runs):
             settings = settings_cycle[index % len(settings_cycle)]
             try:
@@ -2900,6 +2942,7 @@ async def address_qa_generate_variants(request: Request):
 
         results.append({
             "name": name,
+            "requested_name": requested_name,
             "type": name_type,
             "observed": observed,
             "variants": [item.get("value") for item in entry["variants"]],

@@ -4,7 +4,7 @@ function AddressQAPage() {
   const [corpus, setCorpus] = React.useState({ streets: [], suburbs: [], street_count: 0, suburb_count: 0 });
   const [variants, setVariants] = React.useState({ names: {}, name_count: 0, variant_count: 0, path: '' });
   const [type, setType] = React.useState('street');
-  const [namesText, setNamesText] = React.useState('Warraba Street\nAllambee Crescent\nHurstville');
+  const [namesText, setNamesText] = React.useState('Warraba Street\nAllambee Street\nHurstville');
   const [runs, setRuns] = React.useState(5);
   const [variantTarget, setVariantTarget] = React.useState(20);
   const [maxNames, setMaxNames] = React.useState(3);
