@@ -86,6 +86,8 @@ CLIENT_HTML = """<!doctype html>
     button { border: 0; background: #238636; color: white; cursor: pointer; }
     button.secondary { background: #30363d; }
     button:disabled { opacity: .45; cursor: default; }
+    #talk { margin-top: 14px; min-height: 72px; background: #1f6feb; font-weight: 700; font-size: 18px; touch-action: none; user-select: none; }
+    #talk.talking { background: #da3633; transform: scale(.99); }
     #status { color: #8b949e; min-height: 24px; margin-top: 16px; }
     #log { margin-top: 12px; background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 10px; min-height: 120px; max-height: 220px; overflow: auto; white-space: pre-wrap; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: #9ecbff; }
     audio { width: 100%; margin-top: 12px; }
@@ -99,6 +101,7 @@ CLIENT_HTML = """<!doctype html>
     <button id="join">Join call</button>
     <button id="leave" class="secondary" disabled>Leave</button>
   </div>
+  <button id="talk" disabled>Hold to talk</button>
   <div id="status">Ready</div>
   <div id="audio"></div>
   <pre id="log"></pre>
@@ -107,20 +110,52 @@ CLIENT_HTML = """<!doctype html>
   import { Room, RoomEvent, Track, createLocalAudioTrack } from "https://esm.sh/livekit-client@2";
   const join = document.querySelector("#join");
   const leave = document.querySelector("#leave");
+  const talk = document.querySelector("#talk");
   const status = document.querySelector("#status");
   const audio = document.querySelector("#audio");
   const logEl = document.querySelector("#log");
   let activeRoom;
   let activeMicrophone;
+  let isTalking = false;
+  let talkOperation = Promise.resolve();
+
+  function setTalking(enabled) {
+    const microphone = activeMicrophone;
+    if (!microphone || talk.disabled || enabled === isTalking) return talkOperation;
+    isTalking = enabled;
+    talk.classList.toggle("talking", enabled);
+    talk.textContent = enabled ? "Talking — release to stop" : "Hold to talk";
+    talkOperation = talkOperation.then(async () => {
+      try {
+        if (enabled) {
+          await microphone.unmute();
+          setStatus("Talking…");
+          log("push-to-talk opened");
+        } else {
+          await microphone.mute();
+          setStatus("Connected — hold the button or Space to talk");
+          log("push-to-talk closed");
+        }
+      } catch (error) {
+        log(`push-to-talk warning: ${error?.message || error}`);
+      }
+    });
+    return talkOperation;
+  }
 
   async function disposeCall() {
     const room = activeRoom;
     const microphone = activeMicrophone;
     activeRoom = undefined;
     activeMicrophone = undefined;
+    isTalking = false;
+    talk.disabled = true;
+    talk.classList.remove("talking");
+    talk.textContent = "Hold to talk";
 
     if (room && microphone) {
       try {
+        await microphone.mute();
         await room.localParticipant.unpublishTrack(microphone);
       } catch (error) {
         log(`microphone unpublish warning: ${error?.message || error}`);
@@ -206,6 +241,7 @@ CLIENT_HTML = """<!doctype html>
         setStatus("Disconnected");
         join.disabled = false;
         leave.disabled = true;
+        talk.disabled = true;
       });
 
       setStatus(`Connecting to local LiveKit at ${credentials.url}…`);
@@ -219,12 +255,14 @@ CLIENT_HTML = """<!doctype html>
         autoGainControl: true,
       });
       activeMicrophone = microphone;
+      await microphone.mute();
 
-      setStatus("Publishing microphone…");
+      setStatus("Publishing muted microphone…");
       await activeRoom.localParticipant.publishTrack(microphone);
-      log("microphone published");
+      log("microphone published in push-to-talk mode");
       leave.disabled = false;
-      setStatus(`Connected to ${credentials.room} — speak to Ava`);
+      talk.disabled = false;
+      setStatus(`Connected to ${credentials.room} — hold the button or Space to talk`);
     } catch (error) {
       await disposeCall();
       setStatus(`Error: ${error.message || error}`);
@@ -239,7 +277,41 @@ CLIENT_HTML = """<!doctype html>
     setStatus("Disconnected");
   };
 
+  talk.addEventListener("pointerdown", async (event) => {
+    if (talk.disabled) return;
+    event.preventDefault();
+    talk.setPointerCapture?.(event.pointerId);
+    await setTalking(true);
+  });
+
+  for (const eventName of ["pointerup", "pointercancel", "lostpointercapture"]) {
+    talk.addEventListener(eventName, async (event) => {
+      event.preventDefault();
+      await setTalking(false);
+    });
+  }
+
+  window.addEventListener("keydown", async (event) => {
+    if (
+      event.code === "Space"
+      && !event.repeat
+      && document.activeElement?.tagName !== "INPUT"
+      && !talk.disabled
+    ) {
+      event.preventDefault();
+      await setTalking(true);
+    }
+  });
+
+  window.addEventListener("keyup", async (event) => {
+    if (event.code === "Space" && !talk.disabled) {
+      event.preventDefault();
+      await setTalking(false);
+    }
+  });
+
   window.addEventListener("beforeunload", () => {
+    activeMicrophone?.mute();
     activeMicrophone?.stop();
     activeRoom?.disconnect();
   });
