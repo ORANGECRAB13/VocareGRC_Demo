@@ -34,14 +34,14 @@ the repair. This can easily take 10–20 minutes.
 
 ## What Ava should say
 
-> The outage was caused by a damaged underground cable on River Street at 8:14
-> this morning. The repair crew arrived at 9:03, but council roadworks over the
-> fault meant excavation could not begin until a traffic-control permit was
-> approved. That approval came through at 11:27, the traffic contractor is now
-> onsite, and the current restoration estimate is 4:30 PM.
+> A damaged underground cable caused the outage, but council roadworks delayed
+> excavation until the traffic-control permit was approved at 11:27. The
+> contractor and repair crew are now onsite, with power currently estimated
+> back by 4:30 PM.
 
-The exact wording can vary, but the response should connect cause, delay,
-current state, and estimated restoration in one concise explanation.
+The exact wording can vary, but the first response should remain two short
+sentences. Timeline, asset history, escalation, and workflow details are
+reserved for follow-up questions.
 
 ## Authoritative demo timeline
 
