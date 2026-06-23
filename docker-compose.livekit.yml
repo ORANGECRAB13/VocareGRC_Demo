@@ -1,0 +1,54 @@
+name: vocaregrc_livekit
+
+services:
+  livekit:
+    image: livekit/livekit-server:latest
+    command:
+      - --dev
+      - --config
+      - /etc/livekit.yaml
+      - --bind
+      - 0.0.0.0
+      - --node-ip
+      - ${LIVEKIT_NODE_IP:-10.4.67.118}
+    volumes:
+      - ./livekit-dev.yaml:/etc/livekit.yaml:ro
+    ports:
+      - "7900:7900"
+      - "7901:7901"
+      - "7902:7902/udp"
+    restart: unless-stopped
+
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.livekit
+    env_file:
+      - .env
+    environment:
+      LIVEKIT_URL: ws://livekit:7900
+      LIVEKIT_API_KEY: devkey
+      LIVEKIT_API_SECRET: secret
+      AGENT_NAME: utilities10x-agent
+    depends_on:
+      - livekit
+    restart: unless-stopped
+
+  token:
+    build:
+      context: .
+      dockerfile: Dockerfile.livekit
+    command: ["uvicorn", "livekit_token_server:app", "--host", "0.0.0.0", "--port", "8090"]
+    env_file:
+      - .env
+    environment:
+      LIVEKIT_URL: ws://livekit:7900
+      LIVEKIT_PUBLIC_URL: ws://localhost:7900
+      LIVEKIT_API_KEY: devkey
+      LIVEKIT_API_SECRET: secret
+      AGENT_NAME: utilities10x-agent
+    ports:
+      - "8190:8090"
+    depends_on:
+      - livekit
+    restart: unless-stopped

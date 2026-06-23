@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+loguru
+livekit-agents[openai,silero]==1.3.12
+aiohttp>=3.9,<4
+requests>=2.31,<3
+beautifulsoup4>=4.12,<5
+livekit-plugins-elevenlabs==1.3.12
+livekit-api
+websockets<16

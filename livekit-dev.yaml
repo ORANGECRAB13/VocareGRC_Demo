@@ -1,0 +1,9 @@
+# Local LiveKit ports are shifted away from Hemaas (7880-7882) and
+# LiveKitBase (7890-7892) so all three stacks can run together.
+port: 7900
+rtc:
+  tcp_port: 7901
+  udp_port: 7902
+  use_external_ip: false
+keys:
+  devkey: secret
