@@ -88,6 +88,8 @@ CLIENT_HTML = """<!doctype html>
     button:disabled { opacity: .45; cursor: default; }
     #talk { margin-top: 14px; min-height: 72px; background: #1f6feb; font-weight: 700; font-size: 18px; touch-action: none; user-select: none; }
     #talk.talking { background: #da3633; transform: scale(.99); }
+    .scenario { margin: 0 0 16px; padding: 12px 14px; border: 1px solid #30363d; border-radius: 8px; background: #0d1117; color: #c9d1d9; line-height: 1.45; }
+    .scenario strong { display: block; margin-bottom: 5px; color: #58a6ff; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; }
     #status { color: #8b949e; min-height: 24px; margin-top: 16px; }
     #log { margin-top: 12px; background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 10px; min-height: 120px; max-height: 220px; overflow: auto; white-space: pre-wrap; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: #9ecbff; }
     audio { width: 100%; margin-top: 12px; }
@@ -96,6 +98,10 @@ CLIENT_HTML = """<!doctype html>
 <body>
 <main>
   <h1>Utilities10x Outage Demo</h1>
+  <div class="scenario">
+    <strong>Caller script</strong>
+    “My street has been without power for six hours. Why hasn’t it been fixed yet, and when will it be back?”
+  </div>
   <input id="room" value="utilities10x-demo" aria-label="Room name">
   <div class="buttons">
     <button id="join">Join call</button>

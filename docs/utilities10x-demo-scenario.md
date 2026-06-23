@@ -1,59 +1,127 @@
-# Utilities10x Demo Scenario
+# Utilities10x Demo: Power Outage + Council + Utility Coordination
 
-## Recommended caller scenario
+## Caller
 
-> Hi, our power flickered a few times and now it is completely out at 18 Wattle
-> Grove in Riverstone. The outage map says there is nothing in our area, my
-> next-door neighbour still has power, and my mum uses an oxygen concentrator.
-> Can you tell me what is happening and how long this is likely to take?
+> My street has been without power for six hours. Why hasn't it been fixed yet,
+> and when will it be back?
 
-This query is short, but answering it well requires joining facts that would
-normally be fragmented across several utility systems:
+The caller is Sarah Chen at 42 River Street, Riverstone. The demo assumes the
+inbound account has already identified her address, so Ava can answer directly.
 
-- Customer and life-support registration
-- Smart-meter voltage and last-gasp telemetry
-- Low-voltage network topology
-- Public outage-map publishing thresholds
-- Council roadworks and cable-strike reports
-- Crew dispatch and estimated arrival
-- Switching options and repair estimates
+## What a traditional voice AI does
 
-## Demo facts
+It checks an outage API and reads the status:
 
-- Address: 18 Wattle Grove, Riverstone NSW
-- Customer: Sarah Chen, account ending 4821
-- Registered life-support property; oxygen concentrator battery lasts roughly
-  45 minutes
-- Voltage sags began at 4:03 PM and supply was lost at 4:07 PM
-- Eleven properties share the same outage signature
-- The public map is blank because the cluster is below its publishing threshold
-- The neighbour is connected to a different low-voltage spur
-- A roadworks contractor reported a suspected underground cable strike at 4:05 PM
-- Crew E-27 is approximately 12 minutes away
-- Nine properties may be restored by switching in 25–35 minutes
-- This address is on the damaged section, with a current estimate of 2–3 hours
+> There is an outage affecting your area. Crews are investigating.
 
-## What makes the response compelling
+That confirms the obvious but does not explain the delay, the current blocker,
+or what happens next.
 
-The agent should not dump those facts. It should synthesize them into something
-like:
+## What a human agent would need to do
 
-> This looks like a small local cable fault rather than a wider feeder outage,
-> which explains why the public map is blank and your neighbour still has power.
-> A crew is about 12 minutes away, but your property appears to be on the damaged
-> section, so the current estimate is two to three hours. Because your mum uses an
-> oxygen concentrator, switch to the backup battery now; if it may not last or she
-> has any breathing difficulty, call Triple Zero immediately.
+The human would manually move between:
+
+- Outage management
+- Asset registry and maintenance history
+- Field crew dispatch
+- Council roadworks records
+- Traffic-control permit approvals
+- Contractor notes
+- Restoration workflow and escalation procedures
+
+They may also need to call another team to discover which dependency is blocking
+the repair. This can easily take 10–20 minutes.
+
+## What Ava should say
+
+> The outage was caused by a damaged underground cable on River Street at 8:14
+> this morning. The repair crew arrived at 9:03, but council roadworks over the
+> fault meant excavation could not begin until a traffic-control permit was
+> approved. That approval came through at 11:27, the traffic contractor is now
+> onsite, and the current restoration estimate is 4:30 PM.
+
+The exact wording can vary, but the response should connect cause, delay,
+current state, and estimated restoration in one concise explanation.
+
+## Authoritative demo timeline
+
+| Time | Event |
+|---|---|
+| 8:14 AM | Protection equipment isolates a damaged underground cable |
+| 9:03 AM | Utility crew E-27 arrives and confirms the cable fault |
+| 9:18 AM | Traffic-control permit request is lodged with council |
+| 10:42 AM | Utility restoration coordinator escalates the permit |
+| 11:27 AM | Council traffic-control team approves the permit |
+| Now | MetroSafe is onsite establishing the approved lane closure |
+| 4:30 PM | Current estimated restoration time |
+
+## Connected context behind the answer
+
+### Utility systems
+
+- Outage management: 38 affected properties and outage start time
+- Asset registry: damaged underground cable LV-RS-204
+- Crew dispatch: crew arrival, diagnosis, and current onsite status
+- Asset history: two moisture inspections and planned replacement next month
+
+### Council systems
+
+- Active western-lane resurfacing works
+- Excavation and traffic-control permit
+- Approval timestamp and approving team
+- Approved lane-closure plan
+
+### Contractor context
+
+- MetroSafe traffic contractor assignment
+- Contractor arrival and lane-closure status
+
+### Workflow context
+
+- The traffic-control permit was the blocking restoration step
+- The permit is now complete
+- Remaining steps: lane closure, excavation, cable splice, electrical testing,
+  and re-energisation
+- Six-hour escalation is open with the network duty manager
+
+## The graph story
+
+```text
+Outage
+├── Customer / affected properties
+├── Damaged cable asset
+│   ├── Inspection history
+│   └── Planned replacement
+├── Utility repair crew
+├── Council roadworks
+│   └── Traffic-control permit
+│       ├── Escalation
+│       └── Approval
+├── Traffic contractor
+├── Restoration workflow
+│   └── Current blocking step
+└── Restoration estimate and escalation
+```
+
+A normal assistant sees separate records. The demonstration shows an agent
+reasoning over the relationships among the outage, asset, people, approvals,
+work dependencies, and expected next action.
 
 ## Suggested follow-up questions
 
-- Why does my neighbour still have power?
-- Why is the outage missing from the map?
-- Can they restore us by switching the network?
-- Is the two-to-three-hour estimate guaranteed?
-- What should I do if the oxygen battery only has 20 minutes left?
-- What information was connected to work that out?
+- Why did the permit take so long?
+- Are the repair crews actually onsite?
+- What exactly happens after traffic control is set up?
+- Has this cable failed before?
+- Who approved the permit?
+- Is 4:30 guaranteed?
+- What happens if the estimate slips again?
 
-The final question allows the presenter to explain the context-graph vision
-after the voice interaction without requiring the agent to expose internal
-system names during the normal call.
+## Presenter reveal
+
+After the voice interaction, explain:
+
+> The useful part was not simply retrieving an outage record. The answer depended
+> on identifying the relationship between a damaged utility asset, a field crew,
+> active council roadworks, a traffic-control approval, a contractor, and the
+> restoration workflow. That connected operational context is the graph.
