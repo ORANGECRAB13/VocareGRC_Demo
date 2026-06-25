@@ -35,6 +35,65 @@ _STREET_TYPE_ALIASES = {
     "plac": "place",
 }
 
+# Any street-type token (abbreviation or full word) → canonical Title-case form.
+# Used to preserve the street type the caller actually said: the local street
+# list is incomplete (e.g. it has "Allambee Street" but not the real "Allambee
+# Crescent"), so name correction must not silently rewrite the spoken type — the
+# GRC API is the final validator of whether the full address exists.
+_STREET_TYPE_FULL = {
+    "st": "Street", "street": "Street",
+    "rd": "Road", "road": "Road",
+    "ave": "Avenue", "av": "Avenue", "avenue": "Avenue",
+    "pde": "Parade", "parade": "Parade",
+    "cres": "Crescent", "cr": "Crescent", "crescent": "Crescent",
+    "pl": "Place", "place": "Place",
+    "ct": "Court", "court": "Court",
+    "dr": "Drive", "drive": "Drive",
+    "ln": "Lane", "lane": "Lane",
+    "cl": "Close", "close": "Close",
+    "gr": "Grove", "grove": "Grove",
+    "cct": "Circuit", "circuit": "Circuit",
+    "hwy": "Highway", "highway": "Highway",
+    "blvd": "Boulevard", "boulevard": "Boulevard",
+    "tce": "Terrace", "terrace": "Terrace",
+    "way": "Way", "path": "Path", "reserve": "Reserve",
+    "rise": "Rise", "walk": "Walk", "square": "Square", "esplanade": "Esplanade",
+}
+
+
+def _spoken_street_type(street_part: str) -> str | None:
+    """Return the canonical Title-case street type the caller said, if any."""
+    tokens = street_part.split()
+    if not tokens:
+        return None
+    last = tokens[-1].lower().strip(".,")
+    last = _STREET_TYPE_ALIASES.get(last, last)
+    return _STREET_TYPE_FULL.get(last)
+
+
+def _preserve_spoken_street_type(corrected_street: str, spoken_type: str | None) -> str:
+    """Restore the caller's spoken street type if name correction changed it.
+
+    The corrector matches primarily on the street *name*, so it can return a
+    canonical entry whose type differs from what the caller said (the dataset may
+    only contain one type for that name). Trust the spoken type — if the resulting
+    address doesn't exist, the API simply returns no match and we re-ask.
+    """
+    if not spoken_type:
+        return corrected_street
+    tokens = corrected_street.split()
+    if len(tokens) < 2:
+        return corrected_street
+    last = _STREET_TYPE_ALIASES.get(tokens[-1].lower(), tokens[-1].lower())
+    if last in _STREET_TYPE_FULL and _STREET_TYPE_FULL[last] != spoken_type:
+        logger.info(
+            f"[ADDRESS] Preserving spoken street type: "
+            f"{corrected_street!r} → {' '.join(tokens[:-1] + [spoken_type])!r}"
+        )
+        tokens[-1] = spoken_type
+        return " ".join(tokens)
+    return corrected_street
+
 _GRC_SUBURBS = (
     "Allawah",
     "Beverley Park",
@@ -82,6 +141,24 @@ _STREET_PHRASE_ALIASES = {
     "war ob a st": "Warraba Street",
     "war raba street": "Warraba Street",
     "war raba st": "Warraba Street",
+
+    # Seeded from real captured STT sessions (address QA). Each key was verified
+    # NOT to be a real GRC street itself, so the alias can't shadow a valid name.
+    "fipp street": "Phipps Street",
+    "flip street": "Phipps Street",
+    "pamir street": "Premier Street",
+    "almiston street": "Palmerston Street",
+    "baku street": "Barcoo Street",
+    "barku street": "Barcoo Street",
+    "kagara street": "Coogarah Street",
+    "kugera street": "Coogarah Street",
+    "ugera street": "Coogarah Street",
+    "naui avenue": "Narwee Avenue",
+    "relay street": "Riley Street",
+    "alpine avenue": "Hillpine Avenue",
+    "mill pine avenue": "Hillpine Avenue",
+    "pentice avenue": "Penshurst Avenue",
+    "keith road": "Heath Road",
 }
 
 _NUMBER_ONES = {
@@ -183,6 +260,59 @@ def _split_street_suburb(text: str) -> tuple[str, str]:
     return text, ""
 
 
+_LEADING_FILLER_RE = re.compile(
+    r"^(?:i['’]?m in the|i am in the|it['’]?s|this is|the|uh+|um+|er+|so|and|like|"
+    r"okay|ok|yeah|yep|well)\s+",
+    re.IGNORECASE,
+)
+
+
+def _has_street_type(text: str) -> bool:
+    return any(tok.lower().strip(".,") in _STREET_TYPE_TOKENS for tok in text.split())
+
+
+def clean_spoken_variation(text: str) -> str | None:
+    """Tidy a raw STT capture into a usable street utterance, or None to drop it.
+
+    Handles the messy reality of browser/agent STT segments: repeated phrases
+    ("Finch Place. Finch Place..."), leading filler ("I'm in the East Street"),
+    interjections before a comma ("Weenie, Palmerston Street"), bare street-type
+    fragments ("Street"), single stray words, and non-Latin noise.
+    """
+    t = re.sub(r"\s+", " ", (text or "").strip())
+    if not t or not re.search(r"[a-zA-Z]", t):
+        return None
+
+    # Collapse repeated/garbled sentence segments; prefer one that names a street type.
+    segments = [s.strip() for s in re.split(r"[.;]", t) if s.strip()]
+    if len(segments) > 1:
+        unique = list(dict.fromkeys(segments))
+        typed = [s for s in unique if _has_street_type(s)]
+        t = typed[-1] if typed else max(unique, key=len)
+
+    # Drop a leading interjection before a comma ("weenie, palmerston street").
+    if "," in t:
+        tail = t.split(",")[-1].strip()
+        if tail:
+            t = tail
+
+    # Strip leading filler words, repeatedly ("um the ...").
+    prev = None
+    while prev != t:
+        prev = t
+        t = _LEADING_FILLER_RE.sub("", t).strip()
+
+    tokens = t.split()
+    # A usable variation is at least a name + something; a lone word (bare type,
+    # stray "New"/"So", or an un-typed single name) isn't actionable.
+    if len(tokens) < 2:
+        return None
+    # All-street-type with no actual name is noise.
+    if all(tok.lower().strip(".,") in _STREET_TYPE_TOKENS for tok in tokens):
+        return None
+    return t
+
+
 def _normalize_suburb_key(suburb: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", suburb.lower()).strip()
 
@@ -233,6 +363,68 @@ def _correct_street_alias(street: str) -> str | None:
     return None
 
 
+# Spoken/STT renderings of a street *name* (no street type) → canonical name.
+# Handles cases where STT splits or mangles a name into multiple tokens, which the
+# type-bearing phrase aliases above can't catch. Keyed on the lowercased, punctuation-
+# stripped name only, so it applies regardless of the street type the caller used.
+_STREET_NAME_ALIAS_SPOKEN = {
+    "allambee": "Allambee", "alambee": "Allambee", "alanbee": "Allambee",
+    "alanby": "Allambee", "alan by": "Allambee", "alan b": "Allambee",
+    "alan bee": "Allambee", "alam bee": "Allambee", "alam b": "Allambee",
+    "allam bee": "Allambee", "allam b": "Allambee", "all em bee": "Allambee",
+    "allem bee": "Allambee", "alem bee": "Allambee", "alembee": "Allambee",
+    "alan me": "Allambee", "alarm bee": "Allambee",
+    # Gloucester (e.g. Gloucester Road) — STT renders the "-cester" as "sister".
+    "glow sister": "Gloucester", "grow sister": "Gloucester",
+    "crow sister": "Gloucester", "glass sister": "Gloucester",
+    "gloss sister": "Gloucester", "glaw sister": "Gloucester",
+    "gloucester": "Gloucester",
+}
+
+
+def _apply_street_name_aliases(street_part: str) -> str:
+    """Rewrite a known spoken street-name fragment to its canonical name.
+
+    Splits off a trailing street type (if present), normalises the name portion,
+    and looks it up — so 'Alam Bee Crescent', 'Alanby', 'All em bee Street' all
+    become 'Allambee …' before fuzzy matching, regardless of the spoken type.
+    """
+    tokens = street_part.split()
+    if not tokens:
+        return street_part
+    last = _STREET_TYPE_ALIASES.get(tokens[-1].lower().strip(".,"), tokens[-1].lower().strip(".,"))
+    has_type = len(tokens) > 1 and last in _STREET_TYPE_TOKENS
+    name_tokens = tokens[:-1] if has_type else tokens
+    type_token = tokens[-1] if has_type else ""
+    name_key = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]+", "", " ".join(name_tokens).lower())).strip()
+    canonical = _STREET_NAME_ALIAS_SPOKEN.get(name_key)
+    if not canonical:
+        return street_part
+    rebuilt = f"{canonical} {type_token}".strip()
+    logger.info(f"[ADDRESS] Street name alias: {street_part!r} → {rebuilt!r}")
+    return rebuilt
+
+
+def _resolve_street_part(street_part: str) -> str | None:
+    """Resolve a street name+type to canonical form, or None if nothing matched.
+
+    Order: explicit spoken-name alias -> phrase alias -> fuzzy corrector. A name
+    alias is authoritative — if it fires, its canonical name is used even when the
+    fuzzy layer can't add a type (e.g. a bare 'Alanby' -> 'Allambee').
+    """
+    aliased = _apply_street_name_aliases(street_part)
+    name_alias_fired = aliased != street_part
+
+    corrected_street = _correct_street_alias(aliased)
+    corrected = None if corrected_street else _sc.correct_street(aliased)
+    if corrected_street or corrected:
+        chosen = corrected_street or corrected[0]
+        return _preserve_spoken_street_type(chosen, _spoken_street_type(aliased))
+    if name_alias_fired:
+        return aliased
+    return None
+
+
 def _correct_address(address: str) -> str:
     """Apply STT street-name and suburb correction for GRC address lookups."""
     address = _normalize_spoken_house_number(address)
@@ -240,21 +432,18 @@ def _correct_address(address: str) -> str:
     if _num_match:
         _house, _rest = _num_match.group(1), _num_match.group(2)
         _street_part, _suburb_part = _split_street_suburb(_rest)
-        corrected_street = _correct_street_alias(_street_part)
-        corrected = None if corrected_street else _sc.correct_street(_street_part)
-        if corrected_street or corrected:
-            corrected_street = corrected_street or corrected[0]
+        chosen = _resolve_street_part(_street_part)
+        if chosen:
             corrected_suburb = _correct_suburb(_suburb_part)
             suffix = f" {corrected_suburb}" if corrected_suburb else ""
-            return f"{_house} {corrected_street}{suffix}"
+            return f"{_house} {chosen}{suffix}"
     else:
         _street_part, _suburb_part = _split_street_suburb(address)
-        corrected_street = _correct_street_alias(_street_part)
-        corrected = None if corrected_street else _sc.correct_street(_street_part)
-        if corrected_street or corrected:
+        chosen = _resolve_street_part(_street_part)
+        if chosen:
             corrected_suburb = _correct_suburb(_suburb_part)
             suffix = f" {corrected_suburb}" if corrected_suburb else ""
-            return f"{corrected_street or corrected[0]}{suffix}"
+            return f"{chosen}{suffix}"
     return address
 
 
@@ -283,3 +472,30 @@ def get_bin_collection_details(params: dict) -> str:
         "I couldn't find a bin collection record for that address in the council bin lookup. "
         "Could you please repeat the full street address?"
     )
+
+
+def _self_test() -> None:
+    """Offline checks for street-type preservation (uses local street list only)."""
+    cases = [
+        # A correctly-spoken real address must NOT be rewritten to a type that
+        # only exists in the local list (the bug: Crescent -> Street).
+        ("8 Allambee Crescent Beverly Hills", "8 Allambee Crescent Beverly Hills"),
+        # Name STT error gets corrected, but the spoken type is preserved.
+        ("8 Allamby Crescent Beverly Hills", "8 Allambee Crescent Beverly Hills"),
+        # Genuine Street stays Street.
+        ("8 Allambee Street Beverly Hills", "8 Allambee Street Beverly Hills"),
+        # Abbreviated spoken type is preserved (and expanded).
+        ("8 Allambee Cres Beverly Hills", "8 Allambee Crescent Beverly Hills"),
+    ]
+    for raw, expected in cases:
+        got = _correct_address(raw)
+        assert got == expected, f"{raw!r}: expected {expected!r}, got {got!r}"
+    print("tools self-test OK")
+
+
+if __name__ == "__main__":
+    import sys
+
+    if "--self-test" in sys.argv:
+        _self_test()
+        raise SystemExit(0)

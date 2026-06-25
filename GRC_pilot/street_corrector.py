@@ -50,6 +50,30 @@ _ABBR: dict[str, str] = {
     "pde":  "parade",
 }
 
+# Canonical (expanded) street-type words. Used to break ties between streets that
+# share a name but differ in type ("Balfour Road" vs "Balfour Lane") — the variant
+# coverage report showed the corrector was matching the name and ignoring the type.
+_STREET_TYPE_WORDS: frozenset[str] = frozenset(_ABBR.values()) | {
+    "way", "square", "esplanade", "rise", "walk", "circle", "mall", "row", "glade",
+}
+
+
+def _street_type_of(norm: str) -> Optional[str]:
+    """Return the trailing canonical street-type word of a normalised name, if any."""
+    tokens = norm.split()
+    if tokens and tokens[-1] in _STREET_TYPE_WORDS:
+        return tokens[-1]
+    return None
+
+
+def _name_stem(norm: str) -> str:
+    """The name without its trailing street type ('balfour road' -> 'balfour')."""
+    tokens = norm.split()
+    if len(tokens) > 1 and tokens[-1] in _STREET_TYPE_WORDS:
+        return " ".join(tokens[:-1])
+    return norm
+
+
 # Words that signal a cross-street / stop qualifier - split primary name here
 # Phonetically similar first-character groups for STT substitution errors.
 # e.g. "Canons" (c) -> "Gannons" (g), both mapped to group {'c','g','k','q'}
@@ -106,8 +130,14 @@ def _extract_primary(raw_line: str) -> str:
     # Expand abbreviations in each token
     tokens = primary.split()
     expanded = []
-    for tok in tokens:
+    for idx, tok in enumerate(tokens):
         clean = tok.rstrip(".,")
+        # A leading "St" is "Saint" (e.g. "St George Hospital"), never the
+        # street-type "Street" — a street name never begins with its own type.
+        # Expanding it produced bogus entries like "Street George Hospital".
+        if idx == 0 and clean.lower() in {"st", "st."}:
+            expanded.append("Saint")
+            continue
         expanded.append(_ABBR.get(clean.lower(), clean))
     # Reconstruct with title case
     return " ".join(t.capitalize() for t in expanded if t)
@@ -234,6 +264,7 @@ class StreetCorrector:
         self._first_words: list[str] = []        # "gannons"
         self._by_first_char: dict[str, list[int]] = {}   # 'g' -> [idx, ...]
         self._by_first_word_len: dict[int, list[int]] = {}  # 7 -> [idx, ...]
+        self._by_despaced: dict[str, int] = {}           # "stoneycreekroad" -> idx
         self._cache: dict[str, tuple[str, float] | None] = {}
 
         self._load(Path(filepath))
@@ -270,6 +301,10 @@ class StreetCorrector:
 
             fw_len = len(self._first_words[idx])
             self._by_first_word_len.setdefault(fw_len, []).append(idx)
+
+            # Index by whitespace-stripped form so merged STT input like
+            # "stoneycreek road" can recover "Stoney Creek Road".
+            self._by_despaced.setdefault(norm.replace(" ", ""), idx)
 
     def _prefilter(self, norm_input: str) -> list[int]:
         """Return candidate indices using phonetic first-char + first-word length.
@@ -355,11 +390,21 @@ class StreetCorrector:
             self._cache[norm] = result
             return result
 
+        # Whitespace-merge recovery: "stoneycreek road" -> "Stoney Creek Road".
+        despaced = norm.replace(" ", "")
+        if despaced != norm and despaced in self._by_despaced:
+            idx = self._by_despaced[despaced]
+            result = (self._canonical[idx], 0.97)
+            self._cache[norm] = result
+            return result
+
         input_first_word = norm.split()[0] if norm else ""
+        input_type = _street_type_of(norm)
         candidates = self._prefilter(norm)
 
-        best_score = 0.0
+        best_name_score = 0.0
         best_idx = -1
+        scored: list[tuple[float, int]] = []
 
         for idx in candidates:
             cand_norm = self._normalised[idx]
@@ -377,22 +422,44 @@ class StreetCorrector:
             # Road" with score 1.0 due to an identical first word.
             if input_first_word != cand_first:
                 word_score = _phonetic_word_similarity(input_first_word, cand_first)
-                score = max(full_score, word_score)
+                name_score = max(full_score, word_score)
             else:
-                score = full_score
+                name_score = full_score
 
-            if score > best_score:
-                best_score = score
+            if name_score < threshold:
+                continue
+
+            scored.append((name_score, idx))
+            if name_score > best_name_score:  # strict > keeps first-seen on ties
+                best_name_score = name_score
                 best_idx = idx
 
-        if best_score >= threshold and best_idx >= 0:
-            result: tuple[str, float] | None = (
-                self._canonical[best_idx],
-                round(best_score, 4),
-            )
-        else:
-            result = None
+        if best_idx < 0:
+            self._cache[norm] = None
+            return None
 
+        # Street-type tie-break: only among candidates that share the winner's name
+        # stem (e.g. "Balfour Road"/"Balfour Lane"/"Balfour Street"). This fixes the
+        # report's biggest failure class — picking the wrong type for a same-named
+        # street — without ever overriding a clearly better *name* match (so
+        # "Allambee Crescent" still resolves to Allambee, not "Allwood Crescent").
+        chosen_idx = best_idx
+        chosen_score = best_name_score
+        if input_type:
+            best_stem = _name_stem(self._normalised[best_idx])
+            for ns, idx in scored:
+                if (
+                    ns >= best_name_score - 0.02
+                    and _name_stem(self._normalised[idx]) == best_stem
+                    and _street_type_of(self._normalised[idx]) == input_type
+                ):
+                    chosen_idx, chosen_score = idx, ns
+                    break
+
+        result: tuple[str, float] | None = (
+            self._canonical[chosen_idx],
+            round(chosen_score, 4),
+        )
         self._cache[norm] = result
         return result
 

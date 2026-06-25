@@ -1,0 +1,15 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_INPUT=1
+
+WORKDIR /app
+
+COPY requirements.livekit.txt .
+RUN pip install --no-cache-dir -r requirements.livekit.txt
+
+COPY livekit_token_server.py /app/livekit_token_server.py
+
+CMD ["uvicorn", "livekit_token_server:app", "--host", "0.0.0.0", "--port", "8090"]

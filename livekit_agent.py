@@ -1,4 +1,4 @@
-"""Prompt-only Utilities10x outage demo using the production LiveKit pipeline."""
+"""Georges River Council voice agent using the production LiveKit pipeline."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import base64
 import json
 import os
 import re
+import sys
 import urllib.request
 from collections.abc import AsyncIterable, AsyncIterator
 from pathlib import Path
@@ -20,6 +21,7 @@ from livekit.agents import (
     AudioConfig,
     BackgroundAudioPlayer,
     BuiltinAudioClip,
+    function_tool,
     JobContext,
     JobProcess,
     cli,
@@ -31,6 +33,15 @@ from loguru import logger
 import vocare_eot as eot
 
 load_dotenv(dotenv_path=Path(__file__).with_name(".env"), override=True)
+
+GRC_PILOT_DIR = Path(__file__).parent / "GRC_pilot"
+if str(GRC_PILOT_DIR) not in sys.path:
+    sys.path.insert(0, str(GRC_PILOT_DIR))
+
+from bin_faq import BIN_FAQ  # noqa: E402
+from da_knowledge import DA_KNOWLEDGE  # noqa: E402
+from grc_events import format_events_for_system_prompt, get_events, get_future_events  # noqa: E402
+from tools import _correct_address  # noqa: E402
 
 
 _MAIN_OPENING_FILLER_RE = re.compile(
@@ -83,9 +94,16 @@ async def _sanitize_main_tts_text(text: AsyncIterable[str]) -> AsyncIterator[str
 class VocareAgent(Agent):
     """Keep cached filler and the substantive answer in one speech pipeline."""
 
-    def __init__(self, *, eot_controller: eot.EOTController | None, **kwargs) -> None:
+    def __init__(
+        self,
+        *,
+        eot_controller: eot.EOTController | None,
+        apply_main_voice=None,
+        **kwargs,
+    ) -> None:
         super().__init__(**kwargs)
         self._eot_controller = eot_controller
+        self._apply_main_voice = apply_main_voice
 
     async def tts_node(
         self,
@@ -117,8 +135,26 @@ class VocareAgent(Agent):
                 filler_duration * 1000,
             )
 
+        # Pick the voice from the reply text itself, before the synth connection
+        # opens, so the spoken voice always matches the language being said. We
+        # buffer just the opening (until a CJK char, sentence end, or 16 chars).
+        text_iter = text.__aiter__()
+        opening = ""
+        async for chunk in text_iter:
+            opening += chunk
+            if _CJK_RE.search(opening) or len(opening) >= 16 or re.search(r"[.!?…\n]", opening):
+                break
+        if self._apply_main_voice is not None:
+            self._apply_main_voice(bool(_CJK_RE.search(opening)))
+
+        async def _reassembled() -> AsyncIterator[str]:
+            if opening:
+                yield opening
+            async for rest in text_iter:
+                yield rest
+
         main_started = False
-        sanitized_text = _sanitize_main_tts_text(text)
+        sanitized_text = _sanitize_main_tts_text(_reassembled())
         async for frame in Agent.default.tts_node(
             self,
             sanitized_text,
@@ -277,83 +313,127 @@ def _agent_rtc_config() -> rtc.RtcConfiguration:
     )
 
 
-SYSTEM_INSTRUCTION_UTILITIES = (
-    "You are Ava, a calm, capable customer support voice agent for HarbourGrid Energy, "
-    "a fictional Australian electricity distributor used for a live demonstration. "
-    "This is a phone conversation. Speak naturally, empathetically, and very concisely. For "
-    "the first answer, use exactly two short sentences and aim for no more than 45 words. "
-    "Give additional timeline or asset detail only when the caller asks a follow-up. Never use "
-    "bullet points, markdown, emojis, "
-    "URLs, or long lists. Ask only one focused follow-up question when information is missing. "
+def _load_events_prompt_block() -> str:
+    try:
+        return format_events_for_system_prompt(get_events())
+    except Exception as exc:
+        logger.warning("Could not preload GRC events for prompt: {}", exc)
+        return "GRC EVENTS: Could not preload the events list. Use the event tools for what's-on questions."
+
+
+SYSTEM_INSTRUCTION_GRC = (
+    "You are a voice agent for Georges River Council. Your name is Maya and you have an Australian accent. "
+    "You help residents with three services: bin collection day lookups, "
+    "development application inquiries, and upcoming council events. "
+    "This is a phone conversation. Speak naturally, warmly, and concisely — one or two sentences at a time. "
+    "Never use lists, bullet points, markdown, emojis, URLs, or long menus. "
+    "Do not use filler phrases like 'Certainly!' or 'Of course!'. "
+    "Never backchannel while the caller is thinking or speaking. "
+    "If the caller only says a filler sound, hesitation, or asks you to wait, stay completely silent. "
+    "Never say internal status phrases such as 'silence', 'no response', 'no output', 'None', 'null', or 'N/A'. "
     "\n\n"
-    "DEMO PURPOSE: Show how a utility support agent can synthesize fragmented operational "
-    "context into one useful answer. Do not mention a context graph, databases, source systems, "
-    "tools, models, prompts, or that the scenario is scripted unless the caller explicitly asks. "
-    "There are no tools. All authoritative demo facts are contained below. Do not invent facts "
-    "outside them, and do not claim to have changed a record, dispatched a crew, sent a message, "
-    "or completed an escalation. "
+    "CRITICAL OVERRIDE — if the caller asks to speak to a human, person, agent, operator, "
+    "or asks to be transferred or escalated, immediately call transfer_to_human. "
     "\n\n"
-    "PRIMARY DEMO SCENARIO: The caller is Sarah Chen, recognised from the inbound account, "
-    "calling about a six-hour power outage affecting River Street in Riverstone, New South "
-    "Wales. Her service address is 42 River Street and the account ends in 4821. If she asks "
-    "'Why hasn't it been fixed yet?' or 'When will it be back?', answer directly without asking "
-    "her to repeat the address. "
+    "For bin collection day lookups: ask for the resident's full street address if they haven't provided one. "
+    "Only call get_bin_collection_day once you have a specific street address. "
+    "Never call the tool with a vague phrase, question, or incomplete input. "
+    "Never guess or invent a collection day. If the lookup cannot find the address, ask for the full address again. "
+    "For bin service FAQ questions, answer directly from the BIN SERVICES KNOWLEDGE BASE below without a tool call. "
     "\n\n"
-    "OUTAGE AND ASSET CONTEXT: The outage began at 8:14 AM when protection equipment isolated "
-    "an underground low-voltage cable after it was damaged beside River Street. The fault affects "
-    "38 properties connected through distribution cabinet SC-19. The damaged cable section is "
-    "asset LV-RS-204. Its asset record shows two earlier moisture-related inspections and an "
-    "approved replacement project scheduled for next month, but no previous service failure. "
+    "For development application inquiries: answer from the DEVELOPMENT APPLICATIONS knowledge base below. "
+    "Direct residents to lodge via the NSW Planning Portal only. "
+    "For specific planning advice, refer them to Council's Duty Planner on 9330 6400. "
     "\n\n"
-    "CREW AND COUNCIL CONTEXT: Utility repair crew E-27 arrived at 9:03 AM and confirmed the "
-    "cable damage. They could not excavate immediately because existing council resurfacing works "
-    "occupy the western lane directly above the fault. Excavation requires a council traffic-control "
-    "permit and a safe lane closure coordinated with the council's roadworks contractor. The permit "
-    "request was lodged at 9:18 AM, escalated by the utility restoration coordinator at 10:42 AM, "
-    "and approved by council at 11:27 AM. Traffic contractor MetroSafe is now onsite establishing "
-    "the approved lane closure. The utility crew remains onsite and has not left the job. "
+    "For questions about upcoming events, activities, or what's on: "
+    "Use the embedded next-30-days event list below when it contains the answer. "
+    "If the caller asks generally, ask one short friendly narrowing question, such as whether they want free events, kids activities, or a particular type of activity. "
+    "If the caller names an interest, answer immediately with 2 or 3 matching events where possible. "
+    "If the caller asks about later dates, call get_future_council_events. Do not read out URLs; say they can register on the Georges River Council website. "
     "\n\n"
-    "RESTORATION WORKFLOW: The blocking step was the council traffic-control approval, not a lack "
-    "of available utility crews. That approval is now complete. The remaining sequence is to finish "
-    "the lane closure, excavate and expose the cable, splice the damaged section, electrically test "
-    "it, and re-energise the circuit. The current estimated restoration time is 4:30 PM today. This "
-    "is the active operational estimate, not a guarantee; heavy rain, additional cable damage, or "
-    "a failed post-repair test could move it. A six-hour-duration escalation is already open with "
-    "the network duty manager, who will review the estimate if restoration slips. "
+    "You ONLY handle bin collection day lookups, development application inquiries, and Georges River Council events. "
+    "If the resident asks about anything else, politely say you can only help with those three topics, then stop. "
+    "Your only sources of truth are tool results and the knowledge bases in this prompt. If the answer is not there, say you don't have that information. "
     "\n\n"
-    "SAFETY: If the caller mentions fallen wires, sparks, smoke, fire, a damaged switchboard, or "
-    "medical equipment, prioritise safety. Tell them to stay clear of electrical hazards and call "
-    "Triple Zero for immediate danger or medical risk. Never suggest entering a work zone, touching "
-    "damaged equipment, using a generator indoors, or back-feeding a home circuit. "
+    "A separate predictive voice bridge may already have spoken an acknowledgement immediately before your response. "
+    "Treat your first words as its direct continuation. Begin with substance, not another filler or acknowledgement. "
+    "Do not open with 'amazing', 'awesome', 'okay', 'sure', 'of course', 'great question', 'so', 'well', 'um', or 'let me'. "
+    "Never output the literal word 'none'. "
     "\n\n"
-    "IDEAL FIRST RESPONSE: Give only the cause, reason for delay, current status, and restoration "
-    "estimate. Use this compact shape: 'A damaged underground cable caused the outage, but council "
-    "roadworks delayed excavation until the traffic-control permit was approved at 11:27. The "
-    "contractor and repair crew are now onsite, with power currently estimated back by 4:30 PM.' "
-    "Do not include the crew's arrival time, permit-lodgement time, asset history, workflow steps, "
-    "or escalation details unless the caller asks. "
+    "LANGUAGE — STRICT, TOP PRIORITY: Your first message asks the caller whether they want to continue in English or Mandarin Chinese. "
+    "As soon as the caller indicates a choice, lock to that language and speak ONLY that language for the entire rest of the call — every single word. "
+    "If they choose English (for example they say 'English', 'in English', or 'English please'), respond only in English from then on. "
+    "If they choose Mandarin or Chinese (for example 'Mandarin', 'Chinese', '中文', '普通话', or they speak in Chinese), respond only in Simplified Chinese characters from then on — do not use English words except unavoidable proper nouns or street names. "
+    "Never mix the two languages within a reply, and never switch the conversation language again unless the caller explicitly asks to change it. "
+    "If the caller's choice is unclear, ask once: 'Would you prefer English or Mandarin?' and wait. "
     "\n\n"
-    "FOLLOW-UP DETAIL: If asked why it took so long, explain that the permit and safe lane closure "
-    "were the blocking dependency. If asked what happens next, explain the excavation, cable splice, "
-    "testing, and re-energisation sequence. If asked whether the cable had problems before, explain "
-    "the prior moisture inspections and planned replacement without claiming they caused today's "
-    "damage. If asked who approved the permit, say the council traffic-control team approved it at "
-    "11:27 AM. If asked whether 4:30 is guaranteed, say it is the current estimate and name the risks. "
-    "\n\n"
-    "If the caller clearly gives a different street or incident, explain that this demonstration "
-    "only has verified operational context for the River Street outage and offer general outage "
-    "safety guidance without inventing a status. "
-    "\n\n"
-    "A separate predictive voice bridge may already have spoken an acknowledgement immediately "
-    "before your response. Treat your first words as its direct continuation. Begin with substance, "
-    "not another filler or acknowledgement. Do not open with 'amazing', 'awesome', 'okay', 'sure', "
-    "'of course', 'great question', 'so', 'well', 'um', or 'let me'. Never output the literal "
-    "word 'none'. Support English and Mandarin, replying in the language used by the caller."
+    + DA_KNOWLEDGE
+    + "\n\n"
+    + BIN_FAQ
+    + "\n\n"
+    + _load_events_prompt_block()
 )
 
 INITIAL_GREETING = (
-    "Hi, you're speaking with Ava at HarbourGrid Energy. How can I help with your electricity service today?"
+    "Hello, you're speaking with Maya, a virtual assistant from Georges River Council. "
+    "Would you like to continue in English, or in Mandarin Chinese?"
 )
+
+
+@function_tool(
+    description=(
+        "Look up the bin collection day for a resident's full street address in the Georges River Council area. "
+        "Only call this after the resident provides a specific street address."
+    )
+)
+async def get_bin_collection_day(address: str) -> str:
+    address = (address or "").strip()
+    if not address:
+        return "Please ask the resident for their full street address."
+
+    corrected = _correct_address(address)
+    try:
+        from grc_wastetrack import get_bin_collection_details as _wt, format_voice_response
+
+        result = await asyncio.to_thread(_wt, corrected)
+        voice = format_voice_response(result)
+        if voice:
+            logger.info(
+                "[GRC TOOL] bin lookup success raw={!r} corrected={!r} matched={!r}",
+                address,
+                corrected,
+                result.get("address"),
+            )
+            return voice
+        logger.warning("[GRC TOOL] bin lookup empty for {!r}: {}", corrected, result.get("error"))
+    except Exception as exc:
+        logger.warning("[GRC TOOL] bin lookup failed for {!r}: {}", corrected, exc)
+
+    return (
+        "I couldn't find a bin collection record for that address in the council bin lookup. "
+        "Please ask the resident to repeat the full street address."
+    )
+
+
+@function_tool(
+    description=(
+        "Fetch Georges River Council events beyond the embedded next-30-days list. "
+        "Use this when the caller asks about later dates, such as next month or a future month."
+    )
+)
+async def get_future_council_events(after_days: int = 30) -> str:
+    return await asyncio.to_thread(get_future_events, after_days)
+
+
+@function_tool(
+    description=(
+        "Use when the caller asks to speak to a human, person, live agent, operator, "
+        "or asks to be transferred or escalated."
+    )
+)
+async def transfer_to_human() -> str:
+    logger.info("[GRC TOOL] transfer_to_human requested")
+    return "I can't transfer the call directly from this demo line, but you can reach Georges River Council on 9330 6400."
 
 
 async def _wait_for_remote_participant(ctx: JobContext, timeout: float = 2.0) -> None:
@@ -380,9 +460,145 @@ server = AgentServer(
 )
 
 
+async def _run_s2s_session(ctx: JobContext) -> None:
+    """Speech-to-speech agent on a hosted Azure realtime model (gpt-realtime-2).
+
+    Same Maya persona and tools as the cascaded pipeline, but the realtime model
+    handles speech-in / speech-out and turn-taking directly — no ElevenLabs TTS,
+    no EOT classifier, no cascaded STT. Connects to the Azure OpenAI v1 GA
+    realtime surface: wss://<resource>/openai/v1/realtime?model=<model> (Bearer).
+    """
+    from livekit.plugins.openai import realtime
+
+    api_key = _env("S2S_TARGET_API_KEY")
+    base = _env("S2S_TARGET_URI").rstrip("/")
+    if not api_key or not base:
+        raise RuntimeError("S2S_ENABLED but S2S_TARGET_URI / S2S_TARGET_API_KEY are not set")
+    # The realtime plugin uses base_url verbatim as the websocket endpoint (it does
+    # NOT append /realtime), so point it at the full Azure v1 GA realtime path:
+    #   wss://<resource>/openai/v1/realtime?model=<model>
+    if not base.endswith("/realtime"):
+        if not base.endswith("/openai/v1"):
+            base = base + "/openai/v1"
+        base = base + "/realtime"
+    model_name = _env("S2S_MODEL", "gpt-realtime-2")
+    voice = _env("S2S_VOICE", "marin")
+
+    # Authenticate via the api-key QUERY param, not just the Bearer header. The
+    # Azure realtime endpoint answers a Bearer-only handshake with a redirect to
+    # the same URL carrying api-key, and the plugin's aiohttp client refuses to
+    # follow a wss:// redirect (NonHttpUrlRedirectClientError). Putting api-key in
+    # the query authenticates on the first request, so no redirect is issued.
+    sep = "&" if "?" in base else "?"
+    base_url = f"{base}{sep}api-key={api_key}"
+
+    # Server-side turn detection for the realtime model (its own VAD, separate from
+    # the cascaded Silero VAD). Tunable via env:
+    #   S2S_TURN_TYPE=server_vad|semantic_vad
+    #   server_vad:  S2S_VAD_THRESHOLD (0-1), S2S_VAD_SILENCE_MS, S2S_VAD_PREFIX_MS
+    #   semantic_vad: S2S_VAD_EAGERNESS=low|medium|high|auto
+    from openai.types.beta.realtime.session import TurnDetection
+
+    td_type = _env("S2S_TURN_TYPE", "server_vad").lower()
+    if td_type == "semantic_vad":
+        turn_detection = TurnDetection(
+            type="semantic_vad",
+            eagerness=_env("S2S_VAD_EAGERNESS", "auto"),
+            create_response=True,
+            interrupt_response=True,
+        )
+        td_desc = f"semantic_vad eagerness={_env('S2S_VAD_EAGERNESS', 'auto')}"
+    else:
+        turn_detection = TurnDetection(
+            type="server_vad",
+            threshold=_float_env("S2S_VAD_THRESHOLD", 0.5),
+            prefix_padding_ms=_int_env("S2S_VAD_PREFIX_MS", 300),
+            silence_duration_ms=_int_env("S2S_VAD_SILENCE_MS", 500),
+            create_response=True,
+            interrupt_response=True,
+        )
+        td_desc = (
+            f"server_vad threshold={_float_env('S2S_VAD_THRESHOLD', 0.5)} "
+            f"silence_ms={_int_env('S2S_VAD_SILENCE_MS', 500)} "
+            f"prefix_ms={_int_env('S2S_VAD_PREFIX_MS', 300)}"
+        )
+
+    realtime_model = realtime.RealtimeModel(
+        model=model_name,
+        voice=voice,
+        base_url=base_url,
+        api_key=api_key,
+        # Lower temperature improves adherence to the accent instruction (0.6 is the
+        # gpt-realtime floor). Tunable via S2S_TEMPERATURE.
+        temperature=_float_env("S2S_TEMPERATURE", 0.6),
+        turn_detection=turn_detection,
+    )
+    session = AgentSession(llm=realtime_model)
+
+    @session.on("error")
+    def _on_error(event) -> None:
+        logger.error("S2S pipeline error from {}: {}", type(event.source).__name__, event.error)
+
+    @session.on("user_input_transcribed")
+    def _on_transcript(event) -> None:
+        if getattr(event, "is_final", False):
+            logger.info("S2S user [{}]: {!r}", getattr(event, "language", "?"), event.transcript)
+
+    # Realtime voices are accent-neutral/American and DRIFT back to American over a call,
+    # so steer the accent hard via instructions — at the very top (priority) and bottom
+    # (recency) of the prompt, and demand it on every turn.
+    accent = _env("S2S_ACCENT", "Australian")
+    accent_prefix = (
+        f"You are a local Sydney council officer who speaks English with a broad, natural "
+        f"{accent} accent at ALL times and NEVER drifts into an American or neutral accent.\n\n"
+    )
+    accent_note = (
+        "\n\nACCENT — MANDATORY, HIGHEST PRIORITY, APPLIES TO EVERY SINGLE TURN: Speak "
+        f"English only in a broad, natural {accent} English accent — Australian vowels, "
+        "non-rhotic Rs, and Australian intonation, like someone born and raised in "
+        "Australia. This applies to EVERY response for the entire call: the greeting, "
+        "answers, follow-ups, and ESPECIALLY when reading out addresses, dates, bin days, "
+        "or event details (do not switch to a flat 'reading' voice). Do NOT drift into an "
+        "American or neutral accent at any point; if you catch yourself, correct straight "
+        "back to Australian. When speaking Mandarin, use standard Mandarin. Never mention "
+        "or announce your accent."
+    )
+    logger.info(
+        "Starting GRC S2S agent | model={} voice={} accent={} turn=[{}] endpoint={}",
+        model_name, voice, accent, td_desc, base,
+    )
+    await session.start(
+        room=ctx.room,
+        agent=Agent(
+            instructions=accent_prefix + SYSTEM_INSTRUCTION_GRC + accent_note,
+            tools=[
+                get_bin_collection_day,
+                get_future_council_events,
+                transfer_to_human,
+            ],
+        ),
+    )
+    await _wait_for_remote_participant(
+        ctx, timeout=_float_env("LIVEKIT_GREETING_PARTICIPANT_WAIT_SECS", 2.0)
+    )
+    await asyncio.sleep(_float_env("LIVEKIT_GREETING_DELAY_SECS", 0.3))
+    logger.info("Sending initial greeting (S2S)")
+    await session.generate_reply(
+        instructions=(
+            f"In a broad {accent} English accent, say this greeting word-for-word and then "
+            f"wait for the caller to choose a language: {INITIAL_GREETING}"
+        )
+    )
+    logger.info("Initial greeting sent (S2S)")
+
+
 @server.rtc_session(agent_name=_env("AGENT_NAME", "utilities10x-agent"))
 async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect(rtc_config=_agent_rtc_config())
+
+    if _bool_env("S2S_ENABLED", False):
+        await _run_s2s_session(ctx)
+        return
 
     elevenlabs_api_key = _env("ELEVENLABS_API_KEY")
     voice_id = _env("ELEVENLABS_VOICE_ID")
@@ -472,37 +688,46 @@ async def entrypoint(ctx: JobContext) -> None:
         enable_logging=_bool_env("ELEVENLABS_TTS_ENABLE_LOGGING", True),
     )
 
-    # Ava uses a dedicated Mandarin voice when the caller speaks Chinese and the
-    # default English voice otherwise. ElevenLabs flash v2.5 is multilingual, so we
-    # swap voice_id + per-language settings on the live TTS connection.
-    tts_voice_is_english = True
+    # Maya uses a dedicated Mandarin voice when speaking Chinese and the default
+    # English voice otherwise. ElevenLabs flash v2.5 is multilingual, so we swap
+    # voice_id + per-language settings. The main voice and the predictive filler
+    # voice are each chosen from the exact text about to be spoken (in tts_node and
+    # in the filler renderer), not from the user's transcript — that removes the
+    # race/mis-detection that flipped the voice inconsistently.
+    main_voice_is_english = True
+    filler_voice_is_english = True
 
-    def _maybe_switch_tts_voice(language, text: str = "") -> None:
-        nonlocal tts_voice_is_english
-        wants_english = _wants_english_voice(language, text)
-        if wants_english is None or wants_english == tts_voice_is_english:
+    def _apply_main_voice(is_chinese: bool) -> None:
+        nonlocal main_voice_is_english
+        if (not is_chinese) == main_voice_is_english:
             return
-        tts_voice_is_english = wants_english
-        if wants_english:
-            tts_service.update_options(
-                voice_id=voice_id, language="en", voice_settings=english_voice_settings
-            )
-            filler_tts_service.update_options(
-                voice_id=voice_id,
-                language="en",
-                voice_settings=english_voice_settings,
-            )
-            logger.info("TTS voice -> English ({})", voice_id)
-        else:
+        main_voice_is_english = not is_chinese
+        if is_chinese:
             tts_service.update_options(
                 voice_id=chinese_voice_id, language="zh", voice_settings=chinese_voice_settings
             )
-            filler_tts_service.update_options(
-                voice_id=chinese_voice_id,
-                language="zh",
-                voice_settings=chinese_voice_settings,
+            logger.info("Main TTS voice -> Mandarin ({})", chinese_voice_id)
+        else:
+            tts_service.update_options(
+                voice_id=voice_id, language="en", voice_settings=english_voice_settings
             )
-            logger.info("TTS voice -> Mandarin ({})", chinese_voice_id)
+            logger.info("Main TTS voice -> English ({})", voice_id)
+
+    def _apply_filler_voice(is_chinese: bool) -> None:
+        nonlocal filler_voice_is_english
+        if (not is_chinese) == filler_voice_is_english:
+            return
+        filler_voice_is_english = not is_chinese
+        if is_chinese:
+            filler_tts_service.update_options(
+                voice_id=chinese_voice_id, language="zh", voice_settings=chinese_voice_settings
+            )
+            logger.info("Filler TTS voice -> Mandarin ({})", chinese_voice_id)
+        else:
+            filler_tts_service.update_options(
+                voice_id=voice_id, language="en", voice_settings=english_voice_settings
+            )
+            logger.info("Filler TTS voice -> English ({})", voice_id)
 
     eot_cfg = eot.EOTConfig.from_env(
         default_model=_llm_model(),
@@ -541,7 +766,6 @@ async def entrypoint(ctx: JobContext) -> None:
     def _on_transcript(event) -> None:
         kind = "FINAL" if event.is_final else "interim"
         logger.info("STT {} [{}]: {!r}", kind, event.language, event.transcript)
-        _maybe_switch_tts_voice(event.language, event.transcript)
         if eot_controller is not None:
             eot_controller.on_user_input_transcribed(event)
 
@@ -577,23 +801,30 @@ async def entrypoint(ctx: JobContext) -> None:
             eot_controller.on_conversation_item_added(event)
 
         eot_controller.bind(session, filler_tts_service)
+        eot_controller.filler_apply_voice = _apply_filler_voice
         ctx.add_shutdown_callback(eot_controller.aclose)
         eot_controller.start()
 
     logger.info(
-        "Starting Utilities10x LiveKit demo | model={} STT={} silence={}s TTS={}",
+        "Starting GRC LiveKit agent | model={} STT={} silence={}s TTS={} tools={}",
         llm_kwargs["model"],
         stt_kwargs["model_id"],
         stt_kwargs["server_vad"]["vad_silence_threshold_secs"],
         tts_service.model,
+        3,
     )
 
     await session.start(
         room=ctx.room,
         agent=VocareAgent(
             eot_controller=eot_controller,
-            instructions=SYSTEM_INSTRUCTION_UTILITIES,
-            tools=[],
+            apply_main_voice=_apply_main_voice,
+            instructions=SYSTEM_INSTRUCTION_GRC,
+            tools=[
+                get_bin_collection_day,
+                get_future_council_events,
+                transfer_to_human,
+            ],
         ),
     )
 

@@ -366,6 +366,10 @@ class EOTController:
         self._neutral_filler_index = 0
         self._question_filler_index = 0
         self._filler_epoch = 0
+        # Host sets this to a callable(is_chinese: bool) that points the filler TTS
+        # at the matching voice. Applied right before render so a Chinese filler
+        # phrase is never baked with the English voice (and vice versa).
+        self.filler_apply_voice = None
 
     def bind(self, session, filler_tts) -> None:
         self._session = session
@@ -486,7 +490,6 @@ class EOTController:
             self._consider_filler(result)
             if (
                 self.cfg.fast_lane_enabled
-                and self._user_speaking
                 and not self._last_transcript_was_final
                 and result.complete
                 and result.confidence >= self.cfg.complete_threshold
@@ -506,7 +509,6 @@ class EOTController:
             self._closed
             or self._committed
             or self._session is None
-            or not self._user_speaking
             or self._last_transcript_was_final
             or revision != self._revision
             or text != self.current_text()
@@ -520,9 +522,10 @@ class EOTController:
         self._suppress_until_silence = self._user_speaking
         self.on_complete(user_text=text)
         logger.info(
-            "EOT FAST LANE commit before VAD conf=%.2f stable=%dms text=%r",
+            "EOT FAST LANE commit before VAD conf=%.2f stable=%dms vad_user_speaking=%s text=%r",
             result.confidence,
             self.cfg.fast_lane_stability_ms,
+            self._user_speaking,
             text,
         )
         try:
@@ -607,6 +610,13 @@ class EOTController:
                 return
             pre_render = _PreRender(phrase)
             self._context_filler = pre_render
+            # Point the filler voice at the phrase's own language before rendering,
+            # so the cached audio's voice always matches its text.
+            if self.filler_apply_voice is not None:
+                try:
+                    self.filler_apply_voice(bool(_CJK_RE.search(phrase)))
+                except Exception:
+                    logger.exception("EOT filler voice apply failed")
             logger.info(
                 "EOT rendering predictive %s filler: %r",
                 filler_kind,
