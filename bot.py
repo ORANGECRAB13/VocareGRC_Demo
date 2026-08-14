@@ -14,9 +14,7 @@ import os
 import re
 import sys
 import random
-import difflib
 import time
-import uuid
 from datetime import datetime
 from dataclasses import dataclass, field
 from contextlib import asynccontextmanager
@@ -35,6 +33,8 @@ from fastapi import BackgroundTasks, FastAPI, Request, WebSocket
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
+
+import vocare_llm  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # CRITICAL FIX: aioice does NOT handle TURN DATA indications (RFC 5766 §7.2).
@@ -346,6 +346,9 @@ def _llm_api_key(provider: str) -> str:
 
 
 def _validate_llm_key(provider: str, api_key: str) -> None:
+    if vocare_llm.wire_for(provider) == "bedrock":
+        # Bedrock uses the AWS credential chain, not an API key in app config.
+        return
     if not api_key:
         raise RuntimeError(f"{provider.upper()} API key is not set")
     if provider != "openai" and api_key.startswith("sk-proj-"):
@@ -383,18 +386,12 @@ def _tts_float_env(language: str, setting: str, default: float) -> float:
 
 
 def create_vad_analyzer() -> SileroVADAnalyzer:
-    # Telephony audio (8 kHz µ-law) is companded and often low-gain, so the
-    # default min_volume=0.6 / confidence=0.7 reject the quiet onset of short
-    # phrases. With use_interim turn starts, that means STT still shows the text
-    # but VAD never fires a speech-stop, so the turn never closes and the bot
-    # doesn't reply until the caller speaks louder ("Hello?"). Lower, env-tunable
-    # thresholds fix that without making the VAD trigger on line noise.
     return SileroVADAnalyzer(
         params=VADParams(
-            confidence=_float_env("VAD_CONFIDENCE", 0.6),
-            start_secs=_float_env("VAD_START_SECS", 0.15),
-            stop_secs=_float_env("VAD_STOP_SECS", 0.6),
-            min_volume=_float_env("VAD_MIN_VOLUME", 0.3),
+            confidence=0.6,
+            start_secs=0.15,
+            stop_secs=0.6,
+            min_volume=0.3,
         )
     )
 
@@ -973,18 +970,8 @@ class LanguageSwitchProcessor(FrameProcessor):
         self._filler_tts = filler_tts
         self._context = context
         self._is_english: bool = True  # start English; flip on first non-EN utterance
-        # Dedup synthetic language-choice turns. Keyed on the *canonical* rewritten
-        # sentence (stable) rather than the raw STT text (which varies between
-        # "english", "in english", "english please"...), so repeats and the delayed
-        # final that follows an interim collapse to one turn. Reset when the caller
-        # says something unrelated, so a genuine later re-selection still works.
-        self._last_injected_canonical = ""
+        self._last_injected_language_text = ""
         self._last_injected_language_at = 0.0
-
-    # How long a language choice stays deduped. Generous because the failure mode
-    # is a runaway re-greet loop; a real re-selection clears the guard via a normal
-    # turn anyway.
-    _LANGUAGE_DEDUP_SECS = 30.0
 
     # Keywords that signal a language preference regardless of the STT language tag.
     # "Mandarin" is an English word so ElevenLabs STT returns language="en" or None — we
@@ -1013,12 +1000,12 @@ class LanguageSwitchProcessor(FrameProcessor):
             return True, self._closed_slot_language_rewrite(text, True)
         return None, None
 
-    def _recently_injected_language_choice(self, canonical: str) -> bool:
-        """True if `canonical` matches the language turn we last emitted, recently."""
+    def _recently_injected_language_choice(self, text: str) -> bool:
+        normalized = re.sub(r"\s+", " ", re.sub(r"[^a-zA-Z\u4e00-\u9fff]+", " ", text).lower()).strip()
         return (
-            bool(canonical)
-            and canonical == self._last_injected_canonical
-            and (time.monotonic() - self._last_injected_language_at) < self._LANGUAGE_DEDUP_SECS
+            bool(normalized)
+            and normalized == self._last_injected_language_text
+            and (time.monotonic() - self._last_injected_language_at) < 5.0
         )
 
     async def _emit_language_choice_turn(self, frame, is_english: bool, rewritten_text: str):
@@ -1029,7 +1016,11 @@ class LanguageSwitchProcessor(FrameProcessor):
             f"{original_text!r} -> {rewritten_text!r}"
         )
 
-        self._last_injected_canonical = rewritten_text
+        self._last_injected_language_text = re.sub(
+            r"\s+",
+            " ",
+            re.sub(r"[^a-zA-Z\u4e00-\u9fff]+", " ", original_text).lower(),
+        ).strip()
         self._last_injected_language_at = time.monotonic()
 
         if is_english != self._is_english:
@@ -1059,7 +1050,7 @@ class LanguageSwitchProcessor(FrameProcessor):
         if isinstance(frame, InterimTranscriptionFrame) and direction == FrameDirection.DOWNSTREAM:
             explicit_language_preference, rewritten_language_turn = self._detect_language_preference(frame.text)
             if explicit_language_preference is not None and rewritten_language_turn:
-                if not self._recently_injected_language_choice(rewritten_language_turn):
+                if not self._recently_injected_language_choice(frame.text):
                     await self._emit_language_choice_turn(
                         frame,
                         explicit_language_preference,
@@ -1069,20 +1060,14 @@ class LanguageSwitchProcessor(FrameProcessor):
 
         if isinstance(frame, TranscriptionFrame) and direction == FrameDirection.DOWNSTREAM:
             switched = False
+            explicit_language_preference = None
+            rewritten_language_turn = None
+            if self._recently_injected_language_choice(frame.text):
+                logger.info(f"Suppressing delayed duplicate language transcript: {frame.text!r}")
+                return
 
             # 1. Text-based keyword detection (catches "Mandarin" spoken in English)
             explicit_language_preference, rewritten_language_turn = self._detect_language_preference(frame.text)
-
-            # Suppress the delayed final that trails an interim we already turned
-            # into a synthetic turn, and any rapid repeat of the same choice — this
-            # is what stops the runaway re-greet loop.
-            if rewritten_language_turn and self._recently_injected_language_choice(rewritten_language_turn):
-                logger.info(f"Suppressing duplicate language transcript: {frame.text!r}")
-                return
-            # A genuine non-language turn clears the guard so a later re-selection works.
-            if explicit_language_preference is None:
-                self._last_injected_canonical = ""
-
             if explicit_language_preference is False:
                 if self._is_english:
                     self._is_english = False
@@ -1113,9 +1098,6 @@ class LanguageSwitchProcessor(FrameProcessor):
                         f"{frame.text!r} -> {rewritten_language_turn!r}"
                     )
                     frame.text = rewritten_language_turn
-                    # Dedup any repeat of this same choice that arrives shortly after.
-                    self._last_injected_canonical = rewritten_language_turn
-                    self._last_injected_language_at = time.monotonic()
 
             if switched:
                 # ElevenLabs closes and reopens its WebSocket on a voice/language change.
@@ -1134,18 +1116,14 @@ class LanguageSwitchProcessor(FrameProcessor):
             msg = (
                 "CALLER_LANGUAGE_SELECTION: The caller explicitly selected English. "
                 "Treat this as the complete answer to your language preference question. "
-                "Do not ask for the language again. In one warm, natural sentence, tell them "
-                "you can help with bin collection days, development applications, and what's on "
-                "around the council, then ask what they'd like help with. Continue in English."
+                "Do not ask for the language again. Continue in English."
             )
         else:
             msg = (
                 "CALLER_LANGUAGE_SELECTION: The caller explicitly selected Mandarin Chinese (普通话). "
                 "Treat this as the complete answer to your language preference question. "
-                "Do not ask for the language again. In one warm, natural sentence in simplified "
-                "Chinese, tell them you can help with bin collection days (垃圾收集日), development "
-                "applications (开发申请), and council events (社区活动), then ask what they'd like help "
-                "with. Continue using Mandarin Chinese only."
+                "Do not ask for the language again. Acknowledge briefly in simplified Chinese "
+                "and continue using Mandarin Chinese only."
             )
 
         self._context.add_message({"role": "system", "content": msg})
@@ -1346,6 +1324,14 @@ def create_stt(name: str):
 def create_llm(name: str, system_instruction: str = ""):
     """Create an LLM service by name."""
     provider = _llm_provider(name)
+
+    # Bedrock does not speak the OpenAI wire format, so it cannot be expressed
+    # as a base_url swap like every provider below; it is built from the shared
+    # registry instead.
+    if vocare_llm.wire_for(provider) == "bedrock":
+        spec = vocare_llm.resolve_spec("pipecat", provider=provider)
+        return vocare_llm.make_pipecat_llm(spec, system_instruction)
+
     model = _llm_model(provider)
     api_key = _llm_api_key(provider)
     _validate_llm_key(provider, api_key)
@@ -1426,19 +1412,6 @@ def create_llm(name: str, system_instruction: str = ""):
     raise ValueError(f"Unknown LLM provider: {provider}")
 
 
-async def _chat_completion_with_token_fallback(client, **kwargs):
-    """Call an OpenAI-compatible chat API across models that rename max_tokens."""
-    try:
-        return await client.chat.completions.create(**kwargs)
-    except Exception as exc:
-        message = str(exc)
-        if "max_tokens" in kwargs and "max_tokens" in message and "max_completion_tokens" in message:
-            retry_kwargs = dict(kwargs)
-            retry_kwargs["max_completion_tokens"] = retry_kwargs.pop("max_tokens")
-            return await client.chat.completions.create(**retry_kwargs)
-        raise
-
-
 def create_tts(name: str):
     """Create a TTS service by name."""
     if name == "elevenlabs":
@@ -1479,10 +1452,6 @@ graph_event_queues: Dict[str, asyncio.Queue] = {}
 live_call_sessions: Dict[str, dict] = {}
 LIVE_CALL_LIMIT = 80
 LIVE_TRANSCRIPT_LIMIT = 240
-synthetic_test_jobs: Dict[str, dict] = {}
-synthetic_audio_segments: Dict[str, list[dict]] = {}
-SYNTHETIC_JOB_LIMIT = 40
-SYNTHETIC_AUDIO_LIMIT_BYTES = 8_000_000
 
 # Demo mode shared state
 demo_events: list[dict] = []      # append-only list of graph events (fan-out to multiple viewers)
@@ -1865,37 +1834,30 @@ _BIN_STREET_TYPES = {
     "cres", "close",
 }
 
-# Token-based, not exact-phrase, so natural confirmations like "yep that's correct"
-# or "yes that's the one" are recognised. Negation always wins over affirmation.
-_CONFIRM_YES_TOKENS = {
-    "yes", "yeah", "yep", "yup", "correct", "right", "confirmed", "confirm",
-    "sure", "ok", "okay", "perfect", "exactly", "definitely", "absolutely",
-    "对", "对的", "是", "是的", "正确", "没错",
+_CONFIRM_YES = {
+    "yes", "yeah", "yep", "correct", "right", "that's right", "that is right",
+    "thats right", "yes correct", "yes that's correct", "yes that is correct",
+    "confirmed", "confirm", "that is correct", "that's correct", "thats correct",
 }
-_CONFIRM_NO_TOKENS = {
-    "no", "nope", "nah", "incorrect", "wrong", "不", "不是", "不对", "错",
+
+_CONFIRM_NO = {
+    "no", "nope", "nah", "incorrect", "not correct", "that's wrong", "thats wrong",
+    "that is wrong", "wrong address", "not that address",
 }
-# Multi-word negations that wouldn't survive single-token matching.
-_CONFIRM_NO_PHRASES = ("not correct", "not right", "not that", "not the")
 
 
 def _normalize_confirmation_text(text: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9'一-鿿]+", " ", text.lower())).strip()
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9']+", " ", text.lower())).strip()
+
+
+def _is_confirmation_yes(text: str) -> bool:
+    normalized = _normalize_confirmation_text(text)
+    return normalized in _CONFIRM_YES
 
 
 def _is_confirmation_no(text: str) -> bool:
     normalized = _normalize_confirmation_text(text)
-    if any(phrase in normalized for phrase in _CONFIRM_NO_PHRASES):
-        return True
-    return bool(set(normalized.split()) & _CONFIRM_NO_TOKENS)
-
-
-def _is_confirmation_yes(text: str) -> bool:
-    # A negation anywhere ("no, that's wrong") must not read as a yes.
-    if _is_confirmation_no(text):
-        return False
-    normalized = _normalize_confirmation_text(text)
-    return bool(set(normalized.split()) & _CONFIRM_YES_TOKENS)
+    return normalized in _CONFIRM_NO
 
 
 def _looks_like_bin_address(address: str) -> bool:
@@ -1936,8 +1898,7 @@ async def _select_bin_address_with_llm(llm, transcript: str, candidates: list[di
     try:
         timeout = _float_env("ADDRESS_LLM_SELECTION_TIMEOUT_SECS", 4.0)
         response = await asyncio.wait_for(
-            _chat_completion_with_token_fallback(
-                llm._client,
+            llm._client.chat.completions.create(
                 model=llm._settings.model,
                 messages=[
                     {"role": "system", "content": system},
@@ -2310,6 +2271,9 @@ async def run_bot(
     stt_name: str,
     llm_name: str,
     tts_name: str,
+    call_room_id: str = "grc-demo",
+    caller: str = "Web caller",
+    source: str = "grc_demo",
 ):
     logger.info(f"Starting bot — STT={stt_name}, LLM={llm_name}, TTS={tts_name}")
 
@@ -2347,7 +2311,16 @@ async def run_bot(
     # Always attach transcript logging; frontend events are emitted when a queue exists.
     pc_id = webrtc_connection.pc_id
     event_queue = graph_event_queues.get(pc_id)
-    monitor_id = _start_live_call("WebRTC", call_id=pc_id, caller="Web caller")
+    provider = "Vocare Website" if source == "vocare_website" else "WebRTC"
+    monitor_id = _start_live_call(
+        provider,
+        call_id=pc_id,
+        caller=caller,
+        meta={
+            "room_id": call_room_id,
+            "source": source,
+        },
+    )
     latency_observer = LatencyObserver()
     transcript_observer = TranscriptionObserver(event_queue, monitor_id=monitor_id)
     observers = [latency_observer, transcript_observer]
@@ -2566,466 +2539,6 @@ async def debug_address_lookup(request: Request):
         }
 
 
-def _address_qa_data_dir() -> Path:
-    path = Path(__file__).parent / "data"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def _address_variants_path() -> Path:
-    return _address_qa_data_dir() / "grc_address_variants.json"
-
-
-def _address_qa_norm(text: str) -> str:
-    value = (text or "").lower()
-    value = re.sub(r"[^a-z0-9]+", " ", value)
-    return re.sub(r"\s+", " ", value).strip()
-
-
-def _address_qa_street_base(text: str) -> str:
-    value = _address_qa_norm(text)
-    return re.sub(
-        r"\b(?:st|street|rd|road|ave|avenue|pl|place|cres|crescent|ct|court|dr|drive|"
-        r"ln|lane|pde|parade|cl|close|cct|circuit|way|tce|terrace|hwy|highway|"
-        r"sq|square|gr|grove|walk|mall|blvd|boulevard)$",
-        "",
-        value,
-    ).strip()
-
-
-def _load_address_variants() -> dict:
-    path = _address_variants_path()
-    if not path.exists():
-        return {"version": 1, "updated_at": None, "names": {}}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        data.setdefault("version", 1)
-        data.setdefault("names", {})
-        return data
-    except Exception as e:
-        logger.warning(f"[ADDRESS QA] Could not load variants file: {e}")
-        return {"version": 1, "updated_at": None, "names": {}}
-
-
-def _save_address_variants(data: dict) -> None:
-    data["updated_at"] = _now_iso()
-    _address_variants_path().write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-
-
-def _address_name_corpus() -> dict:
-    streets_path = Path(__file__).parent / "GRC_pilot" / "streets_found.txt"
-    street_names: set[str] = set()
-    street_suffix_re = re.compile(
-        r"\b(?:st|street|rd|road|ave|avenue|pl|place|cres|crescent|ct|court|dr|drive|"
-        r"ln|lane|pde|parade|cl|close|cct|circuit|way|tce|terrace|hwy|highway|"
-        r"sq|square|gr|grove|walk|mall|blvd|boulevard)\.?$",
-        re.IGNORECASE,
-    )
-    stop_words_re = re.compile(r"\b(?:after|before|at|opp|opposite|station|school)\b", re.IGNORECASE)
-    if streets_path.exists():
-        for raw in streets_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-            name = re.sub(r"\s+", " ", raw.strip())
-            if not name or len(name) < 3:
-                continue
-            if re.search(r"\d", name):
-                continue
-            if set(name) == {"="}:
-                continue
-            if "," in name:
-                continue
-            if stop_words_re.search(name):
-                continue
-            if " at " in name.lower():
-                continue
-            if not street_suffix_re.search(name):
-                continue
-            street_names.add(name.title())
-
-    try:
-        from grc_wastetrack import _GRC_SUBURBS
-        suburbs = {item.title() for item in _GRC_SUBURBS}
-    except Exception:
-        suburbs = {
-            "Allawah", "Beverly Hills", "Beverley Park", "Blakehurst", "Carlton",
-            "Carss Park", "Connells Point", "Hurstville", "Hurstville Grove",
-            "Kingsgrove", "Kogarah", "Kogarah Bay", "Kyle Bay", "Lugarno",
-            "Mortdale", "Narwee", "Oatley", "Peakhurst", "Peakhurst Heights",
-            "Penshurst", "Ramsgate", "Riverwood", "Sans Souci", "South Hurstville",
-        }
-
-    return {"streets": sorted(street_names), "suburbs": sorted(suburbs)}
-
-
-def _wav_from_pcm_bytes(pcm: bytes, sample_rate: int = 16000) -> bytes:
-    data_size = len(pcm)
-    byte_rate = sample_rate * 2
-    block_align = 2
-    return b"".join([
-        b"RIFF",
-        struct.pack("<I", 36 + data_size),
-        b"WAVE",
-        b"fmt ",
-        struct.pack("<IHHIIHH", 16, 1, 1, sample_rate, byte_rate, block_align, 16),
-        b"data",
-        struct.pack("<I", data_size),
-        pcm,
-    ])
-
-
-async def _elevenlabs_tts_pcm(text: str, *, voice_id: str, speed: float, stability: float, similarity_boost: float) -> bytes:
-    import aiohttp
-
-    api_key = _env("ELEVENLABS_API_KEY")
-    if not api_key:
-        raise RuntimeError("ELEVENLABS_API_KEY is not set")
-    model = _env("VOICE_TEST_ELEVENLABS_MODEL", _env("ELEVENLABS_TTS_MODEL", "eleven_turbo_v2_5"))
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-    payload = {
-        "text": text,
-        "model_id": model,
-        "voice_settings": {
-            "stability": stability,
-            "similarity_boost": similarity_boost,
-            "speed": speed,
-        },
-    }
-    headers = {"xi-api-key": api_key, "Content-Type": "application/json", "Accept": "audio/pcm"}
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            url,
-            params={"output_format": "pcm_16000"},
-            headers=headers,
-            json=payload,
-            timeout=aiohttp.ClientTimeout(total=60),
-        ) as resp:
-            if resp.status >= 400:
-                raise RuntimeError(f"ElevenLabs TTS failed: {resp.status} {await resp.text()}")
-            return await resp.read()
-
-
-async def _elevenlabs_stt_text(pcm: bytes) -> str:
-    import aiohttp
-
-    api_key = _env("ELEVENLABS_API_KEY")
-    if not api_key:
-        raise RuntimeError("ELEVENLABS_API_KEY is not set")
-    boundary = f"----vocare{uuid.uuid4().hex}"
-    wav = _wav_from_pcm_bytes(pcm)
-    body = bytearray()
-    for name, value in (
-        ("model_id", _env("VOICE_TEST_AGENT_STT_MODEL", "scribe_v2")),
-        ("tag_audio_events", "false"),
-        ("num_speakers", "1"),
-    ):
-        body.extend(f"--{boundary}\r\n".encode())
-        body.extend(f'Content-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
-    body.extend(f"--{boundary}\r\n".encode())
-    body.extend(b'Content-Disposition: form-data; name="file"; filename="address.wav"\r\n')
-    body.extend(b"Content-Type: audio/wav\r\n\r\n")
-    body.extend(wav)
-    body.extend(b"\r\n")
-    body.extend(f"--{boundary}--\r\n".encode())
-
-    headers = {"xi-api-key": api_key, "Content-Type": f"multipart/form-data; boundary={boundary}"}
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            "https://api.elevenlabs.io/v1/speech-to-text",
-            headers=headers,
-            data=bytes(body),
-            timeout=aiohttp.ClientTimeout(total=60),
-        ) as resp:
-            if resp.status >= 400:
-                raise RuntimeError(f"ElevenLabs STT failed: {resp.status} {await resp.text()}")
-            data = await resp.json()
-            return (data.get("text") or "").strip()
-
-
-async def _llm_address_variants(name: str, observed: list[str], count: int) -> list[str]:
-    system = (
-        "Generate likely speech-to-text mishearings for Australian street or suburb names. "
-        "Return strict JSON with key variants, an array of short strings. "
-        "Keep the street type if it is part of the name. Do not include the canonical name."
-    )
-    prompt = {
-        "canonical_name": name,
-        "observed_tts_stt_outputs": observed,
-        "target_count": count,
-        "examples": {
-            "Allambee Street": ["Alenby Street", "Allenby Street", "Allambi Street"],
-            "Warraba Street": ["Waroba Street", "Warboss Street", "Warbaugh Street"],
-        },
-    }
-    llm = create_llm(_env("LLM_PROVIDER"), system_instruction=system)
-    response = await _chat_completion_with_token_fallback(
-        llm._client,
-        model=llm._settings.model,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
-        ],
-        response_format={"type": "json_object"},
-        max_tokens=700,
-    )
-    try:
-        data = json.loads(response.choices[0].message.content or "{}")
-        variants = data.get("variants") or []
-    except Exception:
-        variants = []
-    return [str(item).strip() for item in variants if str(item).strip()]
-
-
-def _resolve_address_qa_canonical_name(name: str, name_type: str) -> tuple[str, str | None]:
-    """Snap a lab canonical to a real GRC street/suburb name when possible."""
-    corpus = _address_name_corpus()
-    options = corpus["suburbs"] if name_type == "suburb" else corpus["streets"]
-    by_norm = {_address_qa_norm(item): item for item in options}
-    normalized = _address_qa_norm(name)
-    if normalized in by_norm:
-        return by_norm[normalized], None
-
-    if name_type != "suburb":
-        base = _address_qa_street_base(name)
-        base_matches = [
-            option
-            for option in options
-            if base and _address_qa_street_base(option) == base
-        ]
-        if len(base_matches) == 1:
-            canonical = base_matches[0]
-            return canonical, f"{name} was snapped to corpus name {canonical}"
-
-    matches = difflib.get_close_matches(normalized, by_norm.keys(), n=1, cutoff=0.78)
-    if matches:
-        canonical = by_norm[matches[0]]
-        return canonical, f"{name} was snapped to corpus name {canonical}"
-    return name, f"{name} is not in the known GRC {name_type} corpus"
-
-
-def _merge_address_variants(existing: list[dict], variants: list[str], source: str) -> list[dict]:
-    by_key = {_address_qa_norm(item.get("value", "")): item for item in existing if item.get("value")}
-    for variant in variants:
-        key = _address_qa_norm(variant)
-        if key:
-            by_key.setdefault(key, {
-                "value": variant,
-                "source": source,
-                "confidence": 0.7 if source == "llm_generated" else 0.9,
-                "created_at": _now_iso(),
-            })
-    return sorted(by_key.values(), key=lambda item: item.get("value", "").lower())[:80]
-
-
-def _apply_generated_address_variants(text: str, variants_data: dict) -> tuple[str, list[dict]]:
-    normalized = f" {_address_qa_norm(text)} "
-    entries = []
-    for canonical, entry in (variants_data.get("names") or {}).items():
-        for item in entry.get("variants") or []:
-            variant = item.get("value") if isinstance(item, dict) else str(item)
-            key = _address_qa_norm(variant)
-            if key and f" {key} " in normalized:
-                entries.append((key, canonical, variant, item))
-
-    matches = []
-    for key, canonical, variant, item in sorted(entries, key=lambda row: len(row[0]), reverse=True):
-        if f" {key} " in normalized:
-            normalized = normalized.replace(f" {key} ", f" {_address_qa_norm(canonical)} ")
-            matches.append({
-                "variant": variant,
-                "canonical": canonical,
-                "source": item.get("source") if isinstance(item, dict) else "unknown",
-            })
-    return normalized.strip(), matches
-
-
-def _variant_rank_score(query: str, candidate_address: str, variant_matches: list[dict]) -> float:
-    query_norm = _address_qa_norm(query)
-    candidate_norm = _address_qa_norm(candidate_address)
-    score = difflib.SequenceMatcher(None, query_norm, candidate_norm).ratio()
-    for match in variant_matches:
-        if _address_qa_norm(match.get("canonical", "")) in candidate_norm:
-            score += 0.18
-    return round(min(score, 1.5), 4)
-
-
-@app.get("/api/address-qa/corpus")
-async def address_qa_corpus(limit: int = 300):
-    corpus = _address_name_corpus()
-    safe_limit = max(1, min(limit, 3000))
-    return {
-        "street_count": len(corpus["streets"]),
-        "suburb_count": len(corpus["suburbs"]),
-        "streets": corpus["streets"][:safe_limit],
-        "suburbs": corpus["suburbs"],
-    }
-
-
-@app.get("/api/address-qa/variants")
-async def address_qa_variants():
-    data = _load_address_variants()
-    names = data.get("names") or {}
-    return {
-        **data,
-        "name_count": len(names),
-        "variant_count": sum(len(entry.get("variants") or []) for entry in names.values()),
-        "path": str(_address_variants_path()),
-    }
-
-
-@app.post("/api/address-qa/generate-variants")
-async def address_qa_generate_variants(request: Request):
-    payload = await request.json()
-    names = [str(item).strip() for item in (payload.get("names") or []) if str(item).strip()]
-    name_type = (payload.get("type") or "street").strip().lower()
-    runs = max(1, min(int(payload.get("runs") or 5), 10))
-    max_names = max(1, min(int(payload.get("max_names") or len(names) or 3), 20))
-    variant_target = max(5, min(int(payload.get("variant_target") or 20), 30))
-
-    if not names:
-        corpus = _address_name_corpus()
-        names = (corpus["suburbs"] if name_type == "suburb" else corpus["streets"])[:max_names]
-    names = names[:max_names]
-
-    voice_id = payload.get("voice_id") or _env("VOICE_TEST_ELEVENLABS_VOICE_ID") or _env("ELEVENLABS_VOICE_ID")
-    if not voice_id:
-        return Response(status_code=400, content="ELEVENLABS_VOICE_ID or VOICE_TEST_ELEVENLABS_VOICE_ID is not set")
-
-    variants_data = _load_address_variants()
-    results = []
-    settings_cycle = [
-        {"speed": 0.95, "stability": 0.35},
-        {"speed": 1.00, "stability": 0.45},
-        {"speed": 1.05, "stability": 0.55},
-        {"speed": 0.90, "stability": 0.40},
-        {"speed": 1.10, "stability": 0.50},
-    ]
-
-    for name in names:
-        requested_name = name
-        name, canonical_warning = _resolve_address_qa_canonical_name(requested_name, name_type)
-        observed, errors = [], []
-        if canonical_warning:
-            errors.append(canonical_warning)
-        for index in range(runs):
-            settings = settings_cycle[index % len(settings_cycle)]
-            try:
-                pcm = await _elevenlabs_tts_pcm(
-                    name,
-                    voice_id=voice_id,
-                    speed=settings["speed"],
-                    stability=settings["stability"],
-                    similarity_boost=0.75,
-                )
-                heard = await _elevenlabs_stt_text(pcm)
-                if heard:
-                    observed.append(heard)
-            except Exception as e:
-                errors.append(f"{type(e).__name__}: {e}")
-
-        unique_observed = []
-        for item in observed:
-            if _address_qa_norm(item) != _address_qa_norm(name) and item not in unique_observed:
-                unique_observed.append(item)
-
-        llm_variants = await _llm_address_variants(name, unique_observed, variant_target)
-        entry = variants_data.setdefault("names", {}).setdefault(name, {
-            "type": name_type,
-            "canonical": name,
-            "variants": [],
-            "observed_tts_stt": [],
-        })
-        entry["type"] = name_type
-        entry["canonical"] = name
-        entry["updated_at"] = _now_iso()
-        entry["observed_tts_stt"] = sorted(set((entry.get("observed_tts_stt") or []) + observed))
-        entry["variants"] = _merge_address_variants(entry.get("variants") or [], unique_observed, "tts_stt")
-        entry["variants"] = _merge_address_variants(entry.get("variants") or [], llm_variants, "llm_generated")[:variant_target]
-
-        results.append({
-            "name": name,
-            "requested_name": requested_name,
-            "type": name_type,
-            "observed": observed,
-            "variants": [item.get("value") for item in entry["variants"]],
-            "errors": errors,
-        })
-
-    _save_address_variants(variants_data)
-    return {
-        "generated": results,
-        "variant_file": str(_address_variants_path()),
-        "name_count": len(variants_data.get("names") or {}),
-    }
-
-
-@app.post("/api/address-qa/finalize")
-async def address_qa_finalize(request: Request):
-    payload = await request.json()
-    text = (payload.get("text") or "").strip()
-    if not text:
-        return Response(status_code=400, content="Missing text")
-    variants_data = _load_address_variants()
-    variant_rewrite, variant_matches = _apply_generated_address_variants(text, variants_data)
-    corrected = _correct_address(variant_rewrite or text)
-    try:
-        from grc_wastetrack import get_expanded_address_candidates, get_bin_collection_details as _wt, format_voice_response as _wt_fmt
-        candidates = await asyncio.to_thread(get_expanded_address_candidates, corrected, 12)
-        ranked = sorted(
-            [
-                {
-                    **candidate,
-                    "qa_score": _variant_rank_score(corrected, candidate.get("address", ""), variant_matches),
-                }
-                for candidate in candidates
-            ],
-            key=lambda item: (item.get("qa_score", 0), item.get("score", 0)),
-            reverse=True,
-        )
-        if not ranked:
-            lookup = {
-                "success": False,
-                "error": "No matching address candidate returned by the GRC bin collection API",
-                "address_query": corrected,
-            }
-            return {
-                "input": text,
-                "variant_rewrite": variant_rewrite,
-                "variant_matches": variant_matches,
-                "corrected": corrected,
-                "selected_address": None,
-                "candidates": [],
-                "lookup": lookup,
-                "voice_response": "",
-                "note": "No candidate was selected because the GRC bin collection API returned no matching addresses.",
-            }
-
-        selected = ranked[0].get("address")
-        lookup = await asyncio.to_thread(_wt, selected)
-        return {
-            "input": text,
-            "variant_rewrite": variant_rewrite,
-            "variant_matches": variant_matches,
-            "corrected": corrected,
-            "selected_address": selected,
-            "candidates": ranked,
-            "lookup": lookup,
-            "voice_response": _wt_fmt(lookup) if lookup.get("success") else "",
-            "note": "Tester only. This does not change the live voice pipeline.",
-        }
-    except Exception as e:
-        logger.error(f"[ADDRESS QA] finalize failed for {text!r}: {e}")
-        return {
-            "input": text,
-            "variant_rewrite": variant_rewrite,
-            "variant_matches": variant_matches,
-            "corrected": corrected,
-            "selected_address": corrected,
-            "candidates": [],
-            "lookup": {"success": False, "error": str(e), "address_query": corrected},
-            "voice_response": "",
-            "note": "Tester only. This does not change the live voice pipeline.",
-        }
-
-
 @app.get("/api/ice")
 async def get_ice_servers():
     """Return fresh TURN/STUN credentials for the frontend RTCPeerConnection."""
@@ -3050,6 +2563,9 @@ async def offer(request: dict, background_tasks: BackgroundTasks):
     llm_name = request.get("llm") or _env("LLM_PROVIDER")
     tts_name = request.get("tts", "elevenlabs")
     mode = request.get("mode", "indiv")
+    call_room_id = request.get("room_id") or "grc-demo"
+    caller = request.get("caller") or "Web caller"
+    source = request.get("source") or "grc_demo"
 
     if pc_id and pc_id in pcs_map:
         pipecat_connection = pcs_map[pc_id]
@@ -3071,7 +2587,7 @@ async def offer(request: dict, background_tasks: BackgroundTasks):
             await _cleanup_webrtc_session(webrtc_connection.pc_id, reason="connection closed", disconnect=False)
 
         background_tasks.add_task(
-            run_bot, pipecat_connection, stt_name, llm_name, tts_name
+            run_bot, pipecat_connection, stt_name, llm_name, tts_name, call_room_id, caller, source
         )
 
     answer = pipecat_connection.get_answer()
@@ -3163,324 +2679,65 @@ async def live_calls():
     }
 
 
-def _synthetic_scenario_path() -> Path:
-    return Path(__file__).parent / "voice_tests" / "scenarios" / "grc_smoke.json"
+@app.post("/api/live-calls/ingest")
+async def live_calls_ingest(request: Request):
+    """Ingest live-call events from external voice agents (e.g. the LiveKit agent).
 
-
-def _load_synthetic_scenarios() -> dict:
-    path = _synthetic_scenario_path()
+    Body: {"event": "start"|"line"|"end", "monitor_id": str, ...}
+      start: provider, call_id, caller, meta
+      line:  speaker ("caller"|"agent"), text
+    """
+    expected_token = _env("LIVE_CALL_INGEST_TOKEN")
+    if expected_token and request.headers.get("x-ingest-token") != expected_token:
+        return Response(status_code=403, content="Forbidden")
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as e:
-        logger.error(f"[SYNTHETIC] Failed to load scenarios from {path}: {e}")
-        data = {"name": "grc_smoke", "scenarios": []}
-    return data
+        data = await request.json()
+    except Exception:
+        return Response(status_code=400, content="Invalid JSON")
 
+    event = (data.get("event") or "").strip().lower()
+    monitor_id = (data.get("monitor_id") or "").strip()
+    if not event or not monitor_id:
+        return Response(status_code=400, content="event and monitor_id are required")
 
-def _trim_synthetic_jobs() -> None:
-    if len(synthetic_test_jobs) <= SYNTHETIC_JOB_LIMIT:
-        return
-    ordered = sorted(
-        synthetic_test_jobs.items(),
-        key=lambda item: item[1].get("updated_at") or item[1].get("created_at") or "",
-        reverse=True,
-    )
-    keep = {job_id for job_id, _ in ordered[:SYNTHETIC_JOB_LIMIT]}
-    for job_id in list(synthetic_test_jobs):
-        if job_id not in keep:
-            synthetic_test_jobs.pop(job_id, None)
-            synthetic_audio_segments.pop(job_id, None)
-
-
-def _append_synthetic_audio(job_id: str, speaker: str, pcm: bytes) -> None:
-    if not pcm:
-        return
-    segments = synthetic_audio_segments.setdefault(job_id, [])
-    segments.append({
-        "speaker": speaker,
-        "pcm": pcm,
-        "created_at": _now_iso(),
-    })
-    total = sum(len(item.get("pcm") or b"") for item in segments)
-    while total > SYNTHETIC_AUDIO_LIMIT_BYTES and segments:
-        removed = segments.pop(0)
-        total -= len(removed.get("pcm") or b"")
-
-
-def _wav_from_pcm16(pcm: bytes, sample_rate: int = 16000) -> bytes:
-    data_size = len(pcm)
-    byte_rate = sample_rate * 2
-    block_align = 2
-    return b"".join([
-        b"RIFF",
-        struct.pack("<I", 36 + data_size),
-        b"WAVE",
-        b"fmt ",
-        struct.pack("<IHHIIHH", 16, 1, 1, sample_rate, byte_rate, block_align, 16),
-        b"data",
-        struct.pack("<I", data_size),
-        pcm,
-    ])
-
-
-def _synthetic_public_target(request: Request) -> str:
-    configured = _env("VOICE_TEST_TARGET")
-    if configured:
-        return configured.rstrip("/")
-    port = _env("PORT", "8080").strip() or "8080"
-    return f"http://127.0.0.1:{port}"
-
-
-def _synthetic_args(payload: dict, target: str):
-    from types import SimpleNamespace
-
-    options = payload.get("options") or {}
-    provider = _llm_provider(_env("LLM_PROVIDER"))
-    llm_base_url = (
-        _env("OPENAI_BASE_URL")
-        or _env("LLM_BASE_URL")
-        or (_azure_openai_base_url() if provider in {"azure", "azure_openai", "foundry"} else "")
-    )
-    llm_api_key = _llm_api_key(provider)
-    llm_model = _llm_model(provider)
-    return SimpleNamespace(
-        target=target,
-        scenarios=str(_synthetic_scenario_path()),
-        only=None,
-        report_dir=str(Path(__file__).parent / "voice_tests" / "reports"),
-        audio_cache=str(Path(__file__).parent / "voice_tests" / "audio_cache"),
-        elevenlabs_api_key=_env("ELEVENLABS_API_KEY"),
-        voice_id=(
-            options.get("voice_id")
-            or _env("VOICE_TEST_ELEVENLABS_VOICE_ID")
-            or _env("ELEVENLABS_VOICE_ID")
-        ),
-        elevenlabs_model=options.get("elevenlabs_model") or _env("VOICE_TEST_ELEVENLABS_MODEL", "eleven_turbo_v2_5"),
-        force_audio=bool(options.get("force_audio", False)),
-        speed=float(options.get("speed", _env("VOICE_TEST_SPEED", "1.0"))),
-        stability=float(options.get("stability", _env("VOICE_TEST_STABILITY", "0.45"))),
-        similarity_boost=float(options.get("similarity_boost", _env("VOICE_TEST_SIMILARITY_BOOST", "0.75"))),
-        gain=float(options.get("gain", _env("VOICE_TEST_GAIN", "1.0"))),
-        noise=float(options.get("noise", _env("VOICE_TEST_NOISE", "0.0"))),
-        background_voice=options.get("background_voice", _env("VOICE_TEST_BACKGROUND_VOICE", "")),
-        background_gain=float(options.get("background_gain", _env("VOICE_TEST_BACKGROUND_GAIN", "0.25"))),
-        pre_silence=float(options.get("pre_silence", _env("VOICE_TEST_PRE_SILENCE", "0.25"))),
-        post_silence=float(options.get("post_silence", _env("VOICE_TEST_POST_SILENCE", "0.45"))),
-        between_utterances=float(options.get("between_utterances", _env("VOICE_TEST_BETWEEN_UTTERANCES", "1.2"))),
-        wait_for_greeting=bool(options.get("wait_for_greeting", True)),
-        greeting_timeout=float(options.get("greeting_timeout", _env("VOICE_TEST_GREETING_TIMEOUT", "8"))),
-        greeting_quiet_secs=float(options.get("greeting_quiet_secs", _env("VOICE_TEST_GREETING_QUIET_SECS", "0.9"))),
-        listen_secs=float(options.get("listen_secs", _env("VOICE_TEST_LISTEN_SECS", "14"))),
-        quiet_secs=float(options.get("quiet_secs", _env("VOICE_TEST_QUIET_SECS", "2.0"))),
-        evaluate=bool(payload.get("evaluate", False)),
-        openai_api_key=llm_api_key,
-        openai_base_url=llm_base_url,
-        evaluator_model=options.get("evaluator_model") or _env("VOICE_TEST_EVALUATOR_MODEL", llm_model),
-        resident_model=options.get("resident_model") or _env("VOICE_TEST_RESIDENT_MODEL", _env("VOICE_TEST_EVALUATOR_MODEL", llm_model)),
-        resident_persona=options.get("resident_persona") or _env(
-            "VOICE_TEST_RESIDENT_PERSONA",
-            "A realistic Georges River Council resident who wants clear help and gives concise answers.",
-        ),
-        resident_goal=options.get("resident_goal") or _env(
-            "VOICE_TEST_RESIDENT_GOAL",
-            "Choose English, ask for bin collection help, provide 50 Warraba Street Hurstville, confirm the address, and check the answer.",
-        ),
-        autonomous_turns=int(options.get("autonomous_turns", _env("VOICE_TEST_AUTONOMOUS_TURNS", "6"))),
-        autonomous_agent_timeout=float(options.get("autonomous_agent_timeout", _env("VOICE_TEST_AUTONOMOUS_AGENT_TIMEOUT", "18"))),
-        agent_stt_model=options.get("agent_stt_model") or _env("VOICE_TEST_AGENT_STT_MODEL", "scribe_v2"),
-    )
-
-
-async def _run_synthetic_job(job_id: str, scenarios: list[dict], target: str, payload: dict):
-    job = synthetic_test_jobs[job_id]
-    try:
-        from dataclasses import asdict
-        from voice_tests.run_voice_tests import normalize_target, run_scenario
-
-        args = _synthetic_args(payload, target)
-        if not args.elevenlabs_api_key:
-            raise RuntimeError("ELEVENLABS_API_KEY is not set")
-        if not args.voice_id:
-            raise RuntimeError("ELEVENLABS_VOICE_ID or VOICE_TEST_ELEVENLABS_VOICE_ID is not set")
-
-        synthetic_audio_segments[job_id] = []
-
-        def on_audio_segment(speaker: str, pcm: bytes) -> None:
-            _append_synthetic_audio(job_id, speaker, pcm)
-
-        args.on_audio_segment = on_audio_segment
-
-        ws_url, http_base = normalize_target(target)
-        job.update({
-            "status": "running",
-            "started_at": _now_iso(),
-            "updated_at": _now_iso(),
-            "ws_url": ws_url,
-            "http_base": http_base,
-        })
-
-        for index, scenario in enumerate(scenarios):
-            def on_call_started(call_id: str, monitor_id: str, started_scenario: dict, *, current_index=index) -> None:
-                job.update({
-                    "current_call_id": call_id,
-                    "current_monitor_id": monitor_id,
-                    "current_scenario_id": started_scenario.get("id"),
-                    "current_index": current_index,
-                    "updated_at": _now_iso(),
-                })
-
-            args.on_call_started = on_call_started
-            job["current_index"] = index
-            job["current_id"] = scenario.get("id")
-            job["current_call_id"] = None
-            job["current_monitor_id"] = None
-            job["current_scenario_id"] = scenario.get("id")
-            job["updated_at"] = _now_iso()
-            result = await run_scenario(ws_url, http_base, scenario, args)
-            job["results"].append(asdict(result))
-            job["last_call_id"] = result.call_id
-            job["last_monitor_id"] = job.get("current_monitor_id")
-            job["audio_available"] = bool(synthetic_audio_segments.get(job_id))
-            job["updated_at"] = _now_iso()
-
-        passed = sum(1 for result in job["results"] if result.get("status") == "PASS")
-        job.update({
-            "status": "complete",
-            "completed_at": _now_iso(),
-            "updated_at": _now_iso(),
-            "audio_available": bool(synthetic_audio_segments.get(job_id)),
-            "summary": {"passed": passed, "total": len(job["results"])},
-        })
-    except asyncio.CancelledError:
-        job.update({"status": "cancelled", "updated_at": _now_iso()})
-        raise
-    except Exception as e:
-        logger.error(f"[SYNTHETIC] Job {job_id} failed: {e}")
-        job.update({
-            "status": "failed",
-            "error": f"{type(e).__name__}: {e}",
-            "updated_at": _now_iso(),
-        })
-
-
-@app.get("/api/synthetic/scenarios")
-async def synthetic_scenarios():
-    data = _load_synthetic_scenarios()
-    return {
-        "suite": data.get("name", "grc_smoke"),
-        "description": data.get("description", ""),
-        "scenarios": data.get("scenarios", []),
-    }
-
-
-@app.get("/api/synthetic/jobs")
-async def synthetic_jobs():
-    jobs = sorted(
-        synthetic_test_jobs.values(),
-        key=lambda item: item.get("updated_at") or item.get("created_at") or "",
-        reverse=True,
-    )
-    return {"jobs": jobs}
-
-
-@app.get("/api/synthetic/jobs/{job_id}")
-async def synthetic_job(job_id: str):
-    job = synthetic_test_jobs.get(job_id)
-    if not job:
-        return Response(status_code=404, content="Synthetic test job not found")
-    job["audio_available"] = bool(synthetic_audio_segments.get(job_id))
-    return job
-
-
-@app.get("/api/synthetic/jobs/{job_id}/audio.wav")
-async def synthetic_job_audio(job_id: str):
-    if job_id not in synthetic_test_jobs:
-        return Response(status_code=404, content="Synthetic test job not found")
-    segments = synthetic_audio_segments.get(job_id) or []
-    if not segments:
-        return Response(status_code=404, content="Synthetic call audio is not available yet")
-    pcm = b"".join(item.get("pcm") or b"" for item in segments)
-    headers = {
-        "Cache-Control": "no-store",
-        "Content-Disposition": f'inline; filename="{job_id}.wav"',
-    }
-    return Response(content=_wav_from_pcm16(pcm), media_type="audio/wav", headers=headers)
-
-
-@app.post("/api/synthetic/run")
-async def synthetic_run(request: Request):
-    payload = await request.json()
-    scenario_ids = set(payload.get("scenario_ids") or [])
-    custom_scenarios = payload.get("scenarios") or []
-    data = _load_synthetic_scenarios()
-    scenarios = custom_scenarios or [
-        scenario for scenario in data.get("scenarios", [])
-        if not scenario_ids or scenario.get("id") in scenario_ids
-    ]
-    if not scenarios:
-        return Response(status_code=400, content="No synthetic scenarios selected")
-
-    job_id = f"synthetic-{uuid.uuid4().hex[:10]}"
-    target = (payload.get("target") or _synthetic_public_target(request)).rstrip("/")
-    now = _now_iso()
-    synthetic_test_jobs[job_id] = {
-        "id": job_id,
-        "status": "queued",
-        "created_at": now,
-        "updated_at": now,
-        "target": target,
-        "evaluate": bool(payload.get("evaluate", False)),
-        "total": len(scenarios),
-        "current_index": None,
-        "current_id": None,
-        "results": [],
-        "audio_available": False,
-        "summary": {"passed": 0, "total": len(scenarios)},
-    }
-    _trim_synthetic_jobs()
-    asyncio.create_task(_run_synthetic_job(job_id, scenarios, target, payload))
-    return synthetic_test_jobs[job_id]
-
-
-@app.post("/api/synthetic/generate")
-async def synthetic_generate(request: Request):
-    payload = await request.json()
-    prompt = (payload.get("prompt") or "").strip()
-    count = int(payload.get("count") or 3)
-    if not prompt:
-        return Response(status_code=400, content="Missing prompt")
-
-    system = (
-        "Generate synthetic phone-call test scenarios for the Georges River Council voice agent. "
-        "The agent handles bin collection lookups, DA questions, events, language selection, "
-        "turn-taking, noisy calls, short answers, and address correction. "
-        "Return JSON only with key scenarios. Each scenario must have id, description, utterances array, "
-        "and expectations array. Use concise utterances suitable for ElevenLabs text-to-speech."
-    )
-    try:
-        llm = create_llm(_env("LLM_PROVIDER"), system_instruction=system)
-        resp = await _chat_completion_with_token_fallback(
-            llm._client,
-            model=llm._settings.model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": f"Create {count} scenarios for: {prompt}"},
-            ],
-            max_tokens=1200,
-            response_format={"type": "json_object"},
-        )
-        content = resp.choices[0].message.content or "{}"
-        data = json.loads(content)
-        scenarios = data.get("scenarios") or []
-        for i, scenario in enumerate(scenarios):
-            scenario.setdefault("id", f"generated_{i + 1}")
-            scenario.setdefault("description", prompt)
-            scenario.setdefault("utterances", [])
-            scenario.setdefault("expectations", [])
-        return {"scenarios": scenarios[: max(1, min(count, 20))]}
-    except Exception as e:
-        logger.error(f"[SYNTHETIC] Scenario generation failed: {e}")
-        return Response(status_code=500, content=f"Scenario generation failed: {e}")
+    if event == "start":
+        provider = (data.get("provider") or monitor_id.split(":", 1)[0] or "external").strip()
+        session = live_call_sessions.get(monitor_id)
+        now = _now_iso()
+        if not session:
+            live_call_sessions[monitor_id] = {
+                "id": monitor_id,
+                "provider": provider,
+                "call_id": data.get("call_id"),
+                "stream_id": None,
+                "caller": data.get("caller") or "Phone caller",
+                "status": "active",
+                "started_at": now,
+                "ended_at": None,
+                "last_update": now,
+                "meta": data.get("meta") or {},
+                "transcript": [],
+            }
+            _trim_live_call_sessions()
+            logger.info(f"[LIVE_CALLS] Ingested start monitor_id={monitor_id}")
+        else:
+            session.update({
+                "status": "active",
+                "ended_at": None,
+                "last_update": now,
+                "caller": data.get("caller") or session.get("caller") or "Phone caller",
+                "meta": {**session.get("meta", {}), **(data.get("meta") or {})},
+            })
+    elif event == "line":
+        speaker = (data.get("speaker") or "caller").strip()
+        text = (data.get("text") or "").strip()
+        if text:
+            _append_live_transcript(monitor_id, speaker, text)
+    elif event == "end":
+        _end_live_call(monitor_id)
+    else:
+        return Response(status_code=400, content=f"Unknown event: {event}")
+    return {"ok": True}
 
 
 @app.post("/api/translate")
@@ -3495,8 +2752,7 @@ async def translate_text(request: Request):
         return {"translation": ""}
     try:
         llm = create_llm(_env("LLM_PROVIDER"))
-        resp = await _chat_completion_with_token_fallback(
-            llm._client,
+        resp = await llm._client.chat.completions.create(
             model=llm._settings.model,
             messages=[
                 {"role": "system", "content": "Translate the following Chinese text to English. Output only the English translation, nothing else."},
@@ -4544,6 +3800,7 @@ class TranslationParticipant:
     language: Language              # their spoken/output language
     voice_config: dict              # {"voice_id": ..., "language": Language}
     pipeline_task: PipelineTask | None = None
+    bridge: object | None = None    # AgentTranslationBridge, agent engine only
 
 class TranslationSession:
     def __init__(self, session_id: str, caller_name: str, caller_lang: str, topic: str):
@@ -4679,8 +3936,7 @@ class TranslationProcessor(FrameProcessor):
                 "If the input consists entirely of filler sounds (e.g. 'um', 'uh', 'ahh', 'hmm') with no meaningful content, output nothing."
             )
             logger.info(f"[Translation] Calling configured LLM for translation...")
-            response = await _chat_completion_with_token_fallback(
-                self._llm._client,
+            response = await self._llm._client.chat.completions.create(
                 model=self._llm._settings.model,
                 messages=[
                     {"role": "system", "content": system_instruction},
@@ -4722,11 +3978,112 @@ class TranslationProcessor(FrameProcessor):
                 return p
         return None
 
+async def run_agent_translation_participant(
+    webrtc_connection: SmallWebRTCConnection,
+    session: TranslationSession,
+    participant: TranslationParticipant,
+):
+    """Agent engine: one ElevenLabs Agent per participant does STT + LLM + TTS.
+
+    The pipeline is transport-only — the bridge swallows mic audio into the agent websocket
+    and the counterpart's bridge queues translated audio back in. See
+    elevenlabs_agent_translation for the routing.
+    """
+    from elevenlabs_agent_translation import (
+        AGENT_SAMPLE_RATE,
+        AgentTranslationBridge,
+        require_agent_config,
+    )
+
+    api_key = require_agent_config()
+
+    transport = SmallWebRTCTransport(
+        webrtc_connection=webrtc_connection,
+        params=TransportParams(
+            audio_in_enabled=True,
+            audio_out_enabled=True,
+            # Pinned to the agent's PCM rate so the relay never resamples.
+            audio_in_sample_rate=AGENT_SAMPLE_RATE,
+            audio_out_sample_rate=AGENT_SAMPLE_RATE,
+            # The agent runs its own turn detection server-side, so local VAD is only
+            # here to keep the transport's speaking events flowing for the dashboard.
+            vad_enabled=True,
+            vad_analyzer=SileroVADAnalyzer(),
+        ),
+    )
+
+    def get_other():
+        for p in session.participants.values():
+            if p.pc_id != participant.pc_id:
+                return p
+        return None
+
+    bridge = AgentTranslationBridge(
+        session=session,
+        participant=participant,
+        get_other=get_other,
+        api_key=api_key,
+    )
+    participant.bridge = bridge
+
+    pipeline = Pipeline([
+        transport.input(),
+        bridge,
+        AudioProbeProcessor(label=f"agent:{participant.name}"),
+        transport.output(),
+    ])
+
+    task = PipelineTask(pipeline, params=PipelineParams(enable_metrics=True))
+    participant.pipeline_task = task
+
+    @transport.event_handler("on_client_connected")
+    async def on_client_connected(transport, client):
+        logger.info(
+            f"[AgentTranslate] participant connected: {participant.name} "
+            f"({participant.language.value})"
+        )
+        connected = [p for p in session.participants.values() if p.pipeline_task is not None]
+        if len(connected) < 2:
+            logger.info("[AgentTranslate] waiting for counterpart before starting agents")
+            return
+        # Both languages are known only now, and each agent's output language is the
+        # *other* participant's — so neither agent can start before this point.
+        session.status = "live"
+        await session.event_queue.put({"type": "status", "status": "live"})
+        for p in connected:
+            if p.bridge is not None:
+                await p.bridge.start_agent()
+
+    @transport.event_handler("on_client_disconnected")
+    async def on_client_disconnected(transport, client):
+        logger.info(f"[AgentTranslate] participant disconnected: {participant.name}")
+        session.status = "ended"
+        session.ended_at = datetime.now()
+        await session.event_queue.put({"type": "status", "status": "ended"})
+        pc_to_translation.pop(participant.pc_id, None)
+        # Both agents are billed per minute — tear the counterpart's down too rather than
+        # leaving it open on a session that can no longer relay anywhere.
+        for p in session.participants.values():
+            if p.bridge is not None:
+                await p.bridge.stop_agent()
+        await task.cancel()
+
+    runner = PipelineRunner(handle_sigint=False)
+    await runner.run(task)
+
+
 async def run_translation_participant(
     webrtc_connection: SmallWebRTCConnection,
     session: TranslationSession,
     participant: TranslationParticipant,
 ):
+    from elevenlabs_agent_translation import agent_engine_enabled
+
+    if agent_engine_enabled():
+        return await run_agent_translation_participant(
+            webrtc_connection, session, participant
+        )
+
     transport = SmallWebRTCTransport(
         webrtc_connection=webrtc_connection,
         params=TransportParams(
@@ -4906,8 +4263,7 @@ class AutoTranslationProcessor(FrameProcessor):
                     "Output ONLY the translation. No explanations, no labels, no original text. "
                     "If the input is filler sounds only (e.g. 'um', 'uh', '嗯', '啊'), output nothing."
                 )
-            response = await _chat_completion_with_token_fallback(
-                self._llm._client,
+            response = await self._llm._client.chat.completions.create(
                 model=self._llm._settings.model,
                 messages=[
                     {"role": "system", "content": system_instruction},
@@ -4993,8 +4349,7 @@ class FixedAutoTranslationProcessor(AutoTranslationProcessor):
                     "If the input is filler sounds only (e.g. 'um', 'uh', 'å—¯', 'å•Š'), output nothing."
                 )
 
-            response = await _chat_completion_with_token_fallback(
-                self._llm._client,
+            response = await self._llm._client.chat.completions.create(
                 model=self._llm._settings.model,
                 messages=[
                     {"role": "system", "content": system_instruction},
@@ -5065,8 +4420,7 @@ class StrictAutoTranslationProcessor(FixedAutoTranslationProcessor):
                 f"Text:\n{text}"
             )
 
-        response = await _chat_completion_with_token_fallback(
-            self._llm._client,
+        response = await self._llm._client.chat.completions.create(
             model=self._llm._settings.model,
             messages=[
                 {"role": "system", "content": system_instruction},

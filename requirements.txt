@@ -1,4 +1,5 @@
-pipecat-ai[deepgram,elevenlabs,groq,mistral,silero,webrtc]
+pipecat-ai[deepgram,elevenlabs,groq,mistral,silero,webrtc]==1.4.0
+elevenlabs>=2.0.0  # Agents SDK — agent-powered translation engine
 fastapi
 uvicorn[standard]
 python-dotenv
@@ -9,3 +10,4 @@ twilio
 openai
 cerebras-cloud-sdk
 neo4j
+redis
