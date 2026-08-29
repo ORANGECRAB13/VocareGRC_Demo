@@ -55,6 +55,12 @@ OVERRIDES = {
         "agent": {
             "prompt": {"prompt": True},
             "first_message": True,
+            # Must stay True. agent.language drives the ASR, and each agent is
+            # provisioned per OUTPUT language — so without this the agent listens
+            # in the language it speaks rather than the one the user speaks, and
+            # a Filipino speaker in a Filipino->Cantonese session is simply not
+            # transcribed. The runtime overrides it to the source language.
+            "language": True,
         },
         "tts": {
             "voice_id": True,

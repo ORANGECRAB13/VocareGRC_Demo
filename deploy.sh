@@ -28,6 +28,7 @@ Environment overrides:
   CONTAINER_APP=$CONTAINER_APP
   ACR_NAME=$ACR_NAME
   PLATFORM=$PLATFORM
+  MIN_REPLICAS   Set to 1 to keep a warm replica (use during app-store review).
 EOF
 }
 
@@ -105,4 +106,17 @@ az containerapp update \
   --resource-group "$RESOURCE_GROUP" \
   --image "$APP_IMAGE@$DIGEST"
 
+# Scaling was previously only ever set imperatively, so nothing in the repo
+# restored it after the app was scaled to zero for cost. MIN_REPLICAS makes it
+# reproducible: set MIN_REPLICAS=1 while an app-store review is in flight so a
+# cold start can never greet a reviewer, and put it back to 0 afterwards.
+if [[ -n "${MIN_REPLICAS:-}" ]]; then
+  echo "==> Pinning min-replicas=$MIN_REPLICAS (costs money above 0 - unset when review is done)"
+  az containerapp update \
+    --name "$CONTAINER_APP" \
+    --resource-group "$RESOURCE_GROUP" \
+    --min-replicas "$MIN_REPLICAS"
+fi
+
 echo "==> Done. Live at https://vocare-grc-bot.yellowtree-d62e92d2.australiaeast.azurecontainerapps.io"
+echo "==> Health: curl -fsS https://vocare-grc-bot.yellowtree-d62e92d2.australiaeast.azurecontainerapps.io/healthz"

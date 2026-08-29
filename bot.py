@@ -6,20 +6,24 @@ for each session.
 """
 
 import argparse
+import array
 import asyncio
 import base64
+import io
 import json
 import logging
 import os
 import re
 import sys
 import random
+import secrets
 import time
+import wave
 from datetime import datetime
 from dataclasses import dataclass, field
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Awaitable, Callable, Dict
+from typing import Awaitable, Callable, Dict, Optional
 
 sys.path.insert(0, str(Path(__file__).parent / "GRC_pilot"))
 from tools import _correct_address  # noqa: E402
@@ -29,8 +33,10 @@ from bin_faq import BIN_FAQ  # noqa: E402
 
 import uvicorn
 from dotenv import load_dotenv
+import aiohttp
 from fastapi import BackgroundTasks, FastAPI, Request, WebSocket
-from fastapi.responses import HTMLResponse, Response, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
@@ -1412,15 +1418,16 @@ def create_llm(name: str, system_instruction: str = ""):
     raise ValueError(f"Unknown LLM provider: {provider}")
 
 
-def create_tts(name: str):
-    """Create a TTS service by name."""
+def create_tts(name: str, voice_id: str = ""):
+    """Create a TTS service by name, optionally pinned to a specific voice."""
     if name == "elevenlabs":
         from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 
         # Prefer the multilingual voice so TTS can speak any language the LLM
         # generates without requiring a runtime switch.
         voice = (
-            _env("ELEVENLABS_MULTILINGUAL_VOICE_ID")
+            voice_id
+            or _env("ELEVENLABS_MULTILINGUAL_VOICE_ID")
             or _env("ELEVENLABS_VOICE_ID")
         )
         api_key = _env("ELEVENLABS_API_KEY")
@@ -1781,6 +1788,25 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+# The iOS and Android shells bundle the UI locally, so their API calls arrive
+# cross-origin from the Capacitor WebView schemes rather than same-origin from
+# /vocare. allow_credentials stays False: nothing here is authenticated, and
+# enabling it would force origin echoing with cookie exposure for no benefit.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "capacitor://localhost",  # iOS WKWebView
+        "https://localhost",      # Android WebView (androidScheme: https)
+        "http://localhost",       # Android cleartext fallback
+        "ionic://localhost",      # legacy Ionic scheme
+    ],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type"],
+    max_age=600,
+)
+
 app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
 
 
@@ -2488,8 +2514,22 @@ async def index():
         return HTMLResponse(content=f.read())
 
 
+def _debug_endpoints_enabled() -> bool:
+    """Whether the internal debug tools are exposed.
+
+    These belong to the waste-collection demo, not Vocare Translate, but they
+    share this container — which is about to field public app-store traffic.
+    /api/debug/address-lookup makes unauthenticated third-party address lookups,
+    so left open it is a cost-abuse surface against someone else's API. Off
+    unless ENABLE_DEBUG_ENDPOINTS is set truthy.
+    """
+    return _env("ENABLE_DEBUG_ENDPOINTS", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 @app.get("/address-test", response_class=HTMLResponse)
 async def address_test():
+    if not _debug_endpoints_enabled():
+        return Response(status_code=404, content="Not Found")
     html_path = os.path.join(os.path.dirname(__file__), "static", "address-test.html")
     with open(html_path) as f:
         return HTMLResponse(content=f.read())
@@ -2497,6 +2537,8 @@ async def address_test():
 
 @app.post("/api/debug/address-lookup")
 async def debug_address_lookup(request: Request):
+    if not _debug_endpoints_enabled():
+        return Response(status_code=404, content="Not Found")
     payload = await request.json()
     raw_address = (payload.get("address") or "").strip()
     if not raw_address:
@@ -3106,6 +3148,580 @@ async def twilio_ws(websocket: WebSocket):
 # Telnyx phone integration
 # ---------------------------------------------------------------------------
 
+import phone_approval
+import voice_control
+
+
+async def _dial_report_call(task: dict) -> None:
+    """Call the approver back to read out a finished voice task."""
+    api_key = os.getenv("TELNYX_API_KEY", "").strip()
+    app_id = os.getenv("TELNYX_CALL_CONTROL_APP_ID", "").strip()
+    from_number = os.getenv("TELNYX_PHONE_NUMBER", "").strip()
+    to_number = phone_approval.approver_number()
+    if not all([api_key, app_id, from_number, to_number]):
+        logger.error(f"[VoiceTask:{task['id']}] report call skipped — Telnyx env incomplete")
+        return
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.telnyx.com/v2/calls",
+                json={
+                    "connection_id": app_id,
+                    "to": to_number,
+                    "from": from_number,
+                    "client_state": voice_control.encode_report_state(task["id"]),
+                    "timeout_secs": 40,
+                },
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                },
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                body = await resp.text()
+                if resp.status in (200, 201, 202):
+                    call_control_id = json.loads(body)["data"]["call_control_id"]
+                    voice_control.bind_report_call(call_control_id, task["id"])
+                    logger.info(f"[VoiceTask:{task['id']}] report call dialing")
+                else:
+                    logger.error(f"[VoiceTask:{task['id']}] report dial failed: {resp.status} {body[:200]}")
+    except Exception:
+        logger.exception(f"[VoiceTask:{task['id']}] report dial exception")
+
+
+async def run_telnyx_task_bot(websocket, stream_id, call_control_id, outbound_encoding,
+                              system_instruction, connect_directive):
+    """Shared voice-agent shell for the Claude control and report calls.
+
+    Both agents can queue new tasks (submit_task) and read the latest task's
+    state (get_status); only the system prompt differs.
+    """
+    serializer = TelnyxFrameSerializer(
+        stream_id=stream_id,
+        call_control_id=call_control_id,
+        # The start event's media_format is authoritative for BOTH directions:
+        # despite requesting PCMU in answer/streaming_start, Telnyx expects sent
+        # audio in the negotiated leg codec (PCMA on many AU carriers). Pinning
+        # outbound to PCMU produced distorted audio on PCMA calls.
+        outbound_encoding=outbound_encoding,
+        inbound_encoding=outbound_encoding,
+        api_key=os.getenv("TELNYX_API_KEY"),
+    )
+    transport = FastAPIWebsocketTransport(
+        websocket=websocket,
+        params=FastAPIWebsocketParams(
+            audio_in_enabled=True,
+            audio_out_enabled=True,
+            audio_out_10ms_chunks=16,
+            serializer=serializer,
+        ),
+    )
+
+    stt = create_stt("elevenlabs")
+    llm = create_llm(_env("LLM_PROVIDER"), system_instruction=system_instruction)
+    tts = create_tts("elevenlabs", voice_id=os.getenv("APPROVAL_VOICE_ID", ""))
+
+    async def handle_submit_task(params: FunctionCallParams):
+        instruction = str(params.arguments.get("instruction", "")).strip()
+        if len(instruction) < 8:
+            await params.result_callback({"status": "error", "message": "instruction too short"})
+            return
+        task = voice_control.submit(instruction)
+        await params.result_callback({"status": "queued", "task_id": task["id"]})
+
+    async def handle_get_status(params: FunctionCallParams):
+        task = voice_control.latest()
+        if not task:
+            await params.result_callback({"status": "empty", "message": "No tasks have been submitted yet."})
+            return
+        await params.result_callback({
+            "task_id": task["id"],
+            "instruction": task["instruction"][:200],
+            "status": task["status"],
+            "result": task["result"][:600],
+        })
+
+    async def handle_switch_session(params: FunctionCallParams):
+        name = str(params.arguments.get("name", "")).strip()
+        # Live interactive sessions on Von's machine win over named worker
+        # sessions when the spoken name matches one.
+        live = voice_control.resolve_live_session(name)
+        if live is not None:
+            voice_control.set_active_resume(live["id"], live["project"])
+            await params.result_callback({
+                "status": "targeting_live_session",
+                "session": live["project"],
+                "last_active_minutes_ago": live.get("minutes_ago"),
+                "note": "Tasks now run inside this session's full context.",
+            })
+            return
+        active = voice_control.switch_session(name)
+        await params.result_callback({"status": "switched", "active_session": active})
+
+    async def handle_list_sessions(params: FunctionCallParams):
+        resume_id, resume_label = voice_control.active_resume()
+        await params.result_callback({
+            "active": resume_label or voice_control.active_session(),
+            "named_sessions": voice_control.session_names(),
+            "live_sessions_on_von_machine": [
+                {"project": s.get("project"), "last_active_minutes_ago": s.get("minutes_ago")}
+                for s in voice_control.live_sessions()
+            ],
+        })
+
+    async def handle_call_contact(params: FunctionCallParams):
+        name = str(params.arguments.get("name", "")).strip()
+        topic = str(params.arguments.get("topic", "")).strip()
+        resolved = voice_control.resolve_contact(name)
+        if not resolved:
+            await params.result_callback({
+                "status": "unknown_contact",
+                "message": "Only registered contacts can be called.",
+                "registered": sorted(voice_control.contacts().keys()),
+            })
+            return
+        contact_name, number = resolved
+        if len(topic) < 5:
+            await params.result_callback({
+                "status": "error", "message": "A topic for the feedback call is required.",
+            })
+            return
+        fb = voice_control.submit_feedback(contact_name, number, topic)
+        asyncio.create_task(_dial_feedback_call(fb))
+        await params.result_callback({
+            "status": "calling", "contact": contact_name, "feedback_id": fb["id"],
+        })
+
+    def _safe(handler):
+        async def wrapped(params: FunctionCallParams):
+            name = getattr(handler, "__name__", "tool")
+            logger.info(f"[VoiceControl] tool invoked: {name} args={dict(params.arguments)!r}")
+            try:
+                await handler(params)
+            except Exception as error:
+                logger.exception(f"[VoiceControl] tool {name} failed")
+                try:
+                    await params.result_callback({
+                        "status": "error",
+                        "message": f"The tool failed: {type(error).__name__}. Tell Von it did not work.",
+                    })
+                except Exception:
+                    pass
+        return wrapped
+
+    llm.register_function("submit_task", _safe(handle_submit_task))
+    llm.register_function("get_status", _safe(handle_get_status))
+    llm.register_function("switch_session", _safe(handle_switch_session))
+    llm.register_function("list_sessions", _safe(handle_list_sessions))
+    llm.register_function("call_contact", _safe(handle_call_contact))
+
+    switch_schema = FunctionSchema(
+        name="switch_session",
+        description=(
+            "Switch which named Claude Code session future tasks go to. Sessions keep their "
+            "own conversation context. A new name creates a fresh session."
+        ),
+        properties={"name": {"type": "string", "description": "Session name, e.g. 'watch app' or 'main'."}},
+        required=["name"],
+    )
+    list_schema = FunctionSchema(
+        name="list_sessions",
+        description="List the named Claude Code sessions and which one is active.",
+        properties={},
+        required=[],
+    )
+    contact_schema = FunctionSchema(
+        name="call_contact",
+        description=(
+            "Place a feedback call to a REGISTERED contact on Von's behalf. The agent on that "
+            "call collects their feedback on the topic, and Von gets a call-back with the "
+            "summary afterwards. Only registered contact names work — never digits dictated "
+            "over the phone."
+        ),
+        properties={
+            "name": {"type": "string", "description": "Contact name as Von said it, e.g. 'Nolan'."},
+            "topic": {"type": "string", "description": "What to ask them for feedback on."},
+        },
+        required=["name", "topic"],
+    )
+
+    submit_schema = FunctionSchema(
+        name="submit_task",
+        description=(
+            "Queue an instruction for Von's Claude Code session. Call this only after "
+            "reading the instruction back and getting an explicit yes."
+        ),
+        properties={"instruction": {
+            "type": "string",
+            "description": "The complete instruction, in the caller's words, cleaned of filler.",
+        }},
+        required=["instruction"],
+    )
+    status_schema = FunctionSchema(
+        name="get_status",
+        description="Fetch the latest task's status and result. Call when asked for progress or status.",
+        properties={},
+        required=[],
+    )
+    context = LLMContext(tools=ToolsSchema(standard_tools=[
+        submit_schema, status_schema, switch_schema, list_schema, contact_schema,
+    ]))
+    user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
+        context,
+        user_params=LLMUserAggregatorParams(
+            vad_analyzer=create_vad_analyzer(),
+            user_turn_strategies=UserTurnStrategies(
+                start=[MinWordsUserTurnStartStrategy(min_words=1, use_interim=True)],
+            ),
+        ),
+    )
+
+    pipeline = Pipeline([
+        transport.input(),
+        stt,
+        user_aggregator,
+        llm,
+        tts,
+        transport.output(),
+        assistant_aggregator,
+    ])
+    task = PipelineTask(pipeline, params=PipelineParams(enable_metrics=True))
+
+    @transport.event_handler("on_client_connected")
+    async def on_client_connected(transport, client):
+        logger.info(f"[VoiceControl] task bot connected (enc={outbound_encoding}) — greeting")
+        context.add_message({"role": "user", "content": connect_directive})
+        await task.queue_frames([LLMRunFrame()])
+
+    @transport.event_handler("on_client_disconnected")
+    async def on_client_disconnected(transport, client):
+        logger.info("[VoiceControl] task bot disconnected")
+        await task.cancel()
+
+    runner = PipelineRunner(handle_sigint=False)
+    try:
+        await runner.run(task)
+    except Exception:
+        logger.exception("[VoiceControl] task bot pipeline crashed")
+        raise
+
+
+async def _telnyx_dial(client_state: str, to_number: str, label: str) -> Optional[str]:
+    """Place an outbound Call Control call; returns call_control_id or None."""
+    api_key = os.getenv("TELNYX_API_KEY", "").strip()
+    app_id = os.getenv("TELNYX_CALL_CONTROL_APP_ID", "").strip()
+    from_number = os.getenv("TELNYX_PHONE_NUMBER", "").strip()
+    if not all([api_key, app_id, from_number, to_number]):
+        logger.error(f"[{label}] dial skipped — Telnyx env incomplete")
+        return None
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.telnyx.com/v2/calls",
+                json={
+                    "connection_id": app_id,
+                    "to": to_number,
+                    "from": from_number,
+                    "client_state": client_state,
+                    "timeout_secs": 40,
+                },
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                },
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                body = await resp.text()
+                if resp.status in (200, 201, 202):
+                    return json.loads(body)["data"]["call_control_id"]
+                logger.error(f"[{label}] dial failed: {resp.status} {body[:200]}")
+    except Exception:
+        logger.exception(f"[{label}] dial exception")
+    return None
+
+
+async def _dial_feedback_call(fb: dict) -> None:
+    ccid = await _telnyx_dial(
+        voice_control.encode_state("feedback", fb["id"]), fb["number"], f"Feedback:{fb['id']}"
+    )
+    if ccid:
+        voice_control.bind_feedback_call(ccid, fb["id"])
+    else:
+        fb["status"] = "no_feedback"
+        fb["summary"] = "The call to the contact could not be placed."
+        await _dial_feedback_report(fb)
+
+
+async def _dial_feedback_report(fb: dict) -> None:
+    ccid = await _telnyx_dial(
+        voice_control.encode_state("fbreport", fb["id"]),
+        phone_approval.approver_number(),
+        f"FeedbackReport:{fb['id']}",
+    )
+    if ccid:
+        voice_control.bind_feedback_report(ccid, fb["id"])
+
+
+async def run_telnyx_feedback_bot(websocket, stream_id, call_control_id, outbound_encoding, fb):
+    """Agent for the contact leg: collects feedback on Von's behalf."""
+    serializer = TelnyxFrameSerializer(
+        stream_id=stream_id,
+        call_control_id=call_control_id,
+        # The start event's media_format is authoritative for BOTH directions:
+        # despite requesting PCMU in answer/streaming_start, Telnyx expects sent
+        # audio in the negotiated leg codec (PCMA on many AU carriers). Pinning
+        # outbound to PCMU produced distorted audio on PCMA calls.
+        outbound_encoding=outbound_encoding,
+        inbound_encoding=outbound_encoding,
+        api_key=os.getenv("TELNYX_API_KEY"),
+    )
+    transport = FastAPIWebsocketTransport(
+        websocket=websocket,
+        params=FastAPIWebsocketParams(
+            audio_in_enabled=True,
+            audio_out_enabled=True,
+            audio_out_10ms_chunks=16,
+            serializer=serializer,
+        ),
+    )
+    contact_display = fb["contact"].title()
+    system_instruction = (
+        f"You are an AI assistant calling {contact_display} on behalf of Von Viray. Von asked "
+        f"you to collect {contact_display}'s feedback and suggestions on this topic:\n"
+        f"{fb['topic']}\n\n"
+        "Rules:\n"
+        "- Open by identifying yourself as Von's AI assistant and say why you are calling. "
+        "Ask if now is a quick okay moment.\n"
+        "- Ask for their feedback and suggestions on the topic. Ask one short follow-up if "
+        "an answer is vague. Keep the whole call under a few minutes.\n"
+        "- When they are done (or decline), call record_feedback with a faithful two-to-four "
+        "sentence summary of what they said, thank them, and say goodbye.\n"
+        "- Do not commit Von to anything, and do not discuss other topics."
+    )
+    stt = create_stt("elevenlabs")
+    llm = create_llm(_env("LLM_PROVIDER"), system_instruction=system_instruction)
+    tts = create_tts("elevenlabs", voice_id=os.getenv("APPROVAL_VOICE_ID", ""))
+
+    async def handle_record_feedback(params: FunctionCallParams):
+        summary = str(params.arguments.get("summary", "")).strip()
+        voice_control.record_feedback(fb["id"], summary)
+        await params.result_callback({"status": "recorded"})
+
+        async def _end_soon():
+            await asyncio.sleep(6)
+            await _telnyx_hangup(call_control_id)
+
+        asyncio.create_task(_end_soon())
+
+    llm.register_function("record_feedback", handle_record_feedback)
+    feedback_schema = FunctionSchema(
+        name="record_feedback",
+        description="Record the collected feedback summary. Call exactly once, near the end of the call.",
+        properties={"summary": {"type": "string"}},
+        required=["summary"],
+    )
+    context = LLMContext(tools=ToolsSchema(standard_tools=[feedback_schema]))
+    user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
+        context,
+        user_params=LLMUserAggregatorParams(
+            vad_analyzer=create_vad_analyzer(),
+            user_turn_strategies=UserTurnStrategies(
+                start=[MinWordsUserTurnStartStrategy(min_words=1, use_interim=True)],
+            ),
+        ),
+    )
+    pipeline = Pipeline([
+        transport.input(), stt, user_aggregator, llm, tts, transport.output(), assistant_aggregator,
+    ])
+    task = PipelineTask(pipeline, params=PipelineParams(enable_metrics=True))
+
+    @transport.event_handler("on_client_connected")
+    async def on_client_connected(transport, client):
+        context.add_message({
+            "role": "user",
+            "content": "The call has connected. Introduce yourself and why you are calling.",
+        })
+        await task.queue_frames([LLMRunFrame()])
+
+    @transport.event_handler("on_client_disconnected")
+    async def on_client_disconnected(transport, client):
+        voice_control.feedback_call_ended(fb["id"])
+        await task.cancel()
+        asyncio.create_task(_dial_feedback_report(fb))
+
+    runner = PipelineRunner(handle_sigint=False)
+    await runner.run(task)
+
+
+CONTROL_AGENT_PROMPT = (
+    "You are the voice control line for Von's Claude Code session — Von has called you "
+    "to give the session work to do.\n\n"
+    "Rules:\n"
+    "- Be brief and operational. No small talk beyond a one-line greeting.\n"
+    "- Listen for an instruction (a coding or ops task). Read it back in one sentence and "
+    "ask for a yes before calling submit_task. Never submit without an explicit yes.\n"
+    "- After submitting, say the task is queued and that you will call back when it finishes. "
+    "Ask if there is anything else.\n"
+    "- If asked about progress, call get_status and summarize it in one or two sentences.\n"
+    "- If an instruction sounds destructive (deleting data, force-pushing, dropping "
+    "infrastructure), read it back with a warning before asking for the yes.\n"
+    "- Tasks go to the ACTIVE Claude session. list_sessions shows both named phone "
+    "sessions and the LIVE Claude Code sessions currently open on Von's machine with "
+    "how recently each was active. switch_session with a project name (e.g. 'the "
+    "vocare demo session', 'the ai brain session') targets that live session — tasks "
+    "then run with that session's full context. Mention the active session when "
+    "confirming a task.\n"
+    "- If Von asks you to call a friend or teammate for feedback (e.g. 'call Nolan for "
+    "feedback on the new UI'), use call_contact with the name and topic. Only registered "
+    "contacts can be called; tell Von the registered names if the lookup fails. Von will "
+    "be called back with the summary after that call ends."
+)
+
+
+async def _telnyx_hangup(call_control_id: str):
+    try:
+        async with aiohttp.ClientSession() as session:
+            await session.post(
+                f"https://api.telnyx.com/v2/calls/{call_control_id}/actions/hangup",
+                json={},
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {os.getenv('TELNYX_API_KEY', '')}",
+                },
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
+    except Exception:
+        logger.exception(f"[Approval] hangup failed for {call_control_id}")
+
+
+async def run_telnyx_approval_bot(websocket, stream_id, call_control_id, outbound_encoding, record):
+    """Voice agent for a Claude Code approval call.
+
+    Reads the pending action aloud, captures an explicit approve/deny, writes it
+    into the approval store (which the Claude Code hook is polling), then ends
+    the call.
+    """
+    serializer = TelnyxFrameSerializer(
+        stream_id=stream_id,
+        call_control_id=call_control_id,
+        # The start event's media_format is authoritative for BOTH directions:
+        # despite requesting PCMU in answer/streaming_start, Telnyx expects sent
+        # audio in the negotiated leg codec (PCMA on many AU carriers). Pinning
+        # outbound to PCMU produced distorted audio on PCMA calls.
+        outbound_encoding=outbound_encoding,
+        inbound_encoding=outbound_encoding,
+        api_key=os.getenv("TELNYX_API_KEY"),
+    )
+    transport = FastAPIWebsocketTransport(
+        websocket=websocket,
+        params=FastAPIWebsocketParams(
+            audio_in_enabled=True,
+            audio_out_enabled=True,
+            audio_out_10ms_chunks=16,
+            serializer=serializer,
+        ),
+    )
+
+    system_instruction = (
+        "You are the approval line for Von's Claude Code session. You have called Von "
+        "because the session needs a yes-or-no decision before it may continue.\n\n"
+        f"The pending action is:\nTitle: {record['title']}\nDetails: {record['detail']}\n\n"
+        "Rules:\n"
+        "- PLAIN ENGLISH ONLY. Never read out command syntax, flags, file paths, tool "
+        "names, or technical jargon (no 'grep', 'git push', 'dash dash' anything). "
+        "Describe what the action DOES in everyday terms, as if to a non-programmer.\n"
+        "- Keep the entire explanation under fifteen seconds of speech — one or two short "
+        "sentences — then ask: 'Approve or deny?'\n"
+        "- Only if Von explicitly asks for the exact command may you read the technical text.\n"
+        "- Accept only an explicit decision. Approve, yes, go ahead mean approve; deny, "
+        "reject, no, stop mean deny. If ambiguous, ask again briefly.\n"
+        "- The moment you have a clear decision, call the record_decision function. "
+        "Never call it before Von has clearly decided.\n"
+        "- After recording, confirm in a few words and say goodbye."
+    )
+
+    stt = create_stt("elevenlabs")
+    llm = create_llm(_env("LLM_PROVIDER"), system_instruction=system_instruction)
+    tts = create_tts("elevenlabs", voice_id=os.getenv("APPROVAL_VOICE_ID", ""))
+
+    async def handle_record_decision(params: FunctionCallParams):
+        decision = str(params.arguments.get("decision", "")).strip().lower()
+        spoken = str(params.arguments.get("caller_words", ""))
+        if decision not in ("approve", "deny"):
+            await params.result_callback({"status": "error", "message": "decision must be approve or deny"})
+            return
+        ok = phone_approval.record_decision(record["id"], decision, spoken)
+        await params.result_callback({
+            "status": "recorded" if ok else "already_closed",
+            "decision": decision,
+        })
+
+        async def _end_call_soon():
+            await asyncio.sleep(6)  # let the confirmation sentence play out
+            await _telnyx_hangup(call_control_id)
+
+        asyncio.create_task(_end_call_soon())
+
+    llm.register_function("record_decision", handle_record_decision)
+
+    record_decision_schema = FunctionSchema(
+        name="record_decision",
+        description=(
+            "Record the caller's explicit approval decision for the pending Claude Code action. "
+            "Call this exactly once, only after the caller has clearly said approve or deny."
+        ),
+        properties={
+            "decision": {"type": "string", "enum": ["approve", "deny"]},
+            "caller_words": {
+                "type": "string",
+                "description": "The caller's own words that expressed the decision.",
+            },
+        },
+        required=["decision"],
+    )
+    context = LLMContext(tools=ToolsSchema(standard_tools=[record_decision_schema]))
+    user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
+        context,
+        user_params=LLMUserAggregatorParams(
+            vad_analyzer=create_vad_analyzer(),
+            user_turn_strategies=UserTurnStrategies(
+                start=[MinWordsUserTurnStartStrategy(min_words=1, use_interim=True)],
+            ),
+        ),
+    )
+
+    pipeline = Pipeline([
+        transport.input(),
+        stt,
+        user_aggregator,
+        llm,
+        tts,
+        transport.output(),
+        assistant_aggregator,
+    ])
+    task = PipelineTask(pipeline, params=PipelineParams(enable_metrics=True))
+
+    @transport.event_handler("on_client_connected")
+    async def on_client_connected(transport, client):
+        logger.info(f"[Approval:{record['id']}] call connected — reading request")
+        context.add_message({
+            "role": "user",
+            "content": (
+                "The call has connected. Greet Von, say this is the Claude Code approval line, "
+                "state the pending action, and ask for approve or deny."
+            ),
+        })
+        await task.queue_frames([LLMRunFrame()])
+
+    @transport.event_handler("on_client_disconnected")
+    async def on_client_disconnected(transport, client):
+        logger.info(f"[Approval:{record['id']}] call disconnected")
+        phone_approval.mark_call_ended(record["id"])
+        await task.cancel()
+
+    runner = PipelineRunner(handle_sigint=False)
+    await runner.run(task)
+
 
 async def run_telnyx_bot(websocket: WebSocket):
     """Run the GRC bot over a Telnyx Call Control media-streaming WebSocket.
@@ -3141,6 +3757,113 @@ async def run_telnyx_bot(websocket: WebSocket):
     if not stream_id:
         logger.warning("No Telnyx start event received")
         return
+
+    # Routing bindings are in-memory, so a deploy rollover between the webhook
+    # and this WS start loses them — which used to dump Von's control calls
+    # into the public GRC bot. If nothing matches locally, ask Telnyx for the
+    # call's client_state and caller and rebuild the binding statelessly.
+    if (
+        phone_approval.get_by_call_control(call_control_id) is None
+        and voice_control.report_task_for_call(call_control_id) is None
+        and voice_control.feedback_for_call(call_control_id) is None
+        and voice_control.feedback_report_for_call(call_control_id) is None
+        and not voice_control.is_control_call(call_control_id)
+    ):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"https://api.telnyx.com/v2/calls/{call_control_id}",
+                    headers={"Authorization": f"Bearer {os.getenv('TELNYX_API_KEY', '')}"},
+                    timeout=aiohttp.ClientTimeout(total=8),
+                ) as resp:
+                    if resp.status == 200:
+                        info = (await resp.json()).get("data", {})
+                        state = info.get("client_state")
+                        caller = info.get("from")
+                        approval_id = phone_approval.decode_client_state(state)
+                        if approval_id and phone_approval.get(approval_id):
+                            phone_approval.bind_call(approval_id, call_control_id)
+                        elif (task_id := voice_control.decode_report_state(state)):
+                            voice_control.bind_report_call(call_control_id, task_id)
+                        elif (fb_id := voice_control.decode_state(state, "feedback")):
+                            voice_control.bind_feedback_call(call_control_id, fb_id)
+                        elif (fb_id := voice_control.decode_state(state, "fbreport")):
+                            voice_control.bind_feedback_report(call_control_id, fb_id)
+                        elif voice_control.is_controller(caller):
+                            voice_control.bind_control_call(call_control_id)
+                            logger.info("[VoiceControl] rebound control call after state loss")
+        except Exception:
+            logger.exception("[Telnyx] stateless call-info lookup failed")
+
+    approval_record = phone_approval.get_by_call_control(call_control_id)
+    if approval_record is not None:
+        await run_telnyx_approval_bot(
+            websocket, stream_id, call_control_id, outbound_encoding, approval_record
+        )
+        return
+
+    report_task = voice_control.report_task_for_call(call_control_id)
+    if report_task is not None:
+        outcome = "finished" if report_task["status"] == "done" else "failed"
+        await run_telnyx_task_bot(
+            websocket, stream_id, call_control_id, outbound_encoding,
+            system_instruction=(
+                "You are the voice control line for Von's Claude Code session, calling Von "
+                "back with the result of a task he dictated earlier.\n\n"
+                f"The task was: {report_task['instruction']}\n"
+                f"It has {outcome}. Result summary: {report_task['result'] or 'no summary was produced'}\n\n"
+                "Rules:\n"
+                "- Open by saying the task " + outcome + " and give the summary in one or two sentences.\n"
+                "- Ask if Von wants any follow-up changes. If he dictates one, read it back, "
+                "get an explicit yes, then call submit_task.\n"
+                "- If no follow-up, say goodbye briefly.\n"
+                "- get_status is available if he asks for details again."
+            ),
+            connect_directive=(
+                "The call has connected. Greet Von briefly and report the task outcome."
+            ),
+        )
+        return
+
+    fb = voice_control.feedback_for_call(call_control_id)
+    if fb is not None:
+        await run_telnyx_feedback_bot(websocket, stream_id, call_control_id, outbound_encoding, fb)
+        return
+
+    fb_report = voice_control.feedback_report_for_call(call_control_id)
+    if fb_report is not None:
+        await run_telnyx_task_bot(
+            websocket, stream_id, call_control_id, outbound_encoding,
+            system_instruction=(
+                "You are the voice control line for Von's Claude Code session, calling Von "
+                f"back after a feedback call to {fb_report['contact'].title()}.\n\n"
+                f"The topic was: {fb_report['topic']}\n"
+                f"Outcome: {fb_report['status']}\n"
+                f"Feedback collected: {fb_report['summary'] or 'none'}\n\n"
+                "Rules:\n"
+                "- Relay the feedback faithfully in a few sentences.\n"
+                "- If Von wants changes made based on it, capture the instruction, read it "
+                "back, get a yes, then call submit_task.\n"
+                "- switch_session/list_sessions are available if he wants a different session.\n"
+                "- Otherwise say goodbye briefly."
+            ),
+            connect_directive=(
+                "The call has connected. Greet Von and relay the feedback from the call."
+            ),
+        )
+        return
+
+    if voice_control.is_control_call(call_control_id):
+        await run_telnyx_task_bot(
+            websocket, stream_id, call_control_id, outbound_encoding,
+            system_instruction=CONTROL_AGENT_PROMPT,
+            connect_directive=(
+                "The call has connected. Say: 'Claude Code control line — what would you "
+                "like the session to do?'"
+            ),
+        )
+        return
+
     monitor_id = _start_live_call(
         "Telnyx",
         call_id=call_control_id,
@@ -3155,8 +3878,12 @@ async def run_telnyx_bot(websocket: WebSocket):
     serializer = TelnyxFrameSerializer(
         stream_id=stream_id,
         call_control_id=call_control_id,
+        # The start event's media_format is authoritative for BOTH directions:
+        # despite requesting PCMU in answer/streaming_start, Telnyx expects sent
+        # audio in the negotiated leg codec (PCMA on many AU carriers). Pinning
+        # outbound to PCMU produced distorted audio on PCMA calls.
         outbound_encoding=outbound_encoding,
-        inbound_encoding="PCMU",
+        inbound_encoding=outbound_encoding,
         api_key=os.getenv("TELNYX_API_KEY"),
     )
 
@@ -3379,21 +4106,121 @@ async def telnyx_voice(request: Request):
     call_control_id = payload.get("call_control_id")
     logger.info(f"[Telnyx] webhook event={event_type} call_control_id={call_control_id}")
 
-    if event_type == "call.initiated" and payload.get("direction") == "incoming" and call_control_id:
+    async def _start_streaming(label: str) -> None:
         host = request.headers.get("host", "")
-        ws_url = f"wss://{host}/telnyx/ws"
-        api_key = os.getenv("TELNYX_API_KEY", "")
         try:
-            import aiohttp
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    f"https://api.telnyx.com/v2/calls/{call_control_id}/actions/answer",
+                    f"https://api.telnyx.com/v2/calls/{call_control_id}/actions/streaming_start",
                     json={
-                        "stream_url": ws_url,
+                        "stream_url": f"wss://{host}/telnyx/ws",
                         "stream_track": "inbound_track",
                         "stream_bidirectional_mode": "rtp",
                         "stream_bidirectional_codec": "PCMU",
                     },
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {os.getenv('TELNYX_API_KEY', '')}",
+                    },
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status in (200, 202):
+                        logger.info(f"[{label}] answered — streaming started")
+                    else:
+                        logger.error(f"[{label}] streaming_start failed: {resp.status}")
+                        await _telnyx_hangup(call_control_id)
+        except Exception as error:
+            logger.error(f"[{label}] streaming_start exception: {error!r}")
+            await _telnyx_hangup(call_control_id)
+
+    # Outbound legs: approval, task report, feedback contact, feedback report.
+    approval_id = phone_approval.decode_client_state(payload.get("client_state"))
+    report_task_id = voice_control.decode_report_state(payload.get("client_state"))
+    feedback_id = voice_control.decode_state(payload.get("client_state"), "feedback")
+    fbreport_id = voice_control.decode_state(payload.get("client_state"), "fbreport")
+    if feedback_id and call_control_id:
+        if event_type == "call.answered":
+            voice_control.bind_feedback_call(call_control_id, feedback_id)
+            await _start_streaming(f"Feedback:{feedback_id}")
+        elif event_type == "call.hangup":
+            fb = voice_control.get_feedback(feedback_id)
+            if fb and fb["status"] == "calling":
+                # Never answered: report back that the contact was unreachable.
+                voice_control.feedback_call_ended(feedback_id)
+                fb["summary"] = "The contact did not answer the call."
+                asyncio.create_task(_dial_feedback_report(fb))
+        return {"ok": True}
+    if fbreport_id and call_control_id:
+        if event_type == "call.answered":
+            voice_control.bind_feedback_report(call_control_id, fbreport_id)
+            await _start_streaming(f"FeedbackReport:{fbreport_id}")
+        return {"ok": True}
+    if report_task_id and call_control_id:
+        if event_type == "call.answered":
+            voice_control.bind_report_call(call_control_id, report_task_id)
+            await _start_streaming(f"VoiceTask:{report_task_id}")
+        return {"ok": True}
+    if approval_id and call_control_id:
+        if event_type == "call.answered":
+            phone_approval.bind_call(approval_id, call_control_id)
+            host = request.headers.get("host", "")
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        f"https://api.telnyx.com/v2/calls/{call_control_id}/actions/streaming_start",
+                        json={
+                            "stream_url": f"wss://{host}/telnyx/ws",
+                            "stream_track": "inbound_track",
+                            "stream_bidirectional_mode": "rtp",
+                            "stream_bidirectional_codec": "PCMU",
+                        },
+                        headers={
+                            "Content-Type": "application/json",
+                            "Authorization": f"Bearer {os.getenv('TELNYX_API_KEY', '')}",
+                        },
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as resp:
+                        if resp.status in (200, 202):
+                            logger.info(f"[Approval:{approval_id}] answered — streaming started")
+                        else:
+                            body_text = (await resp.text())[:200]
+                            logger.error(
+                                f"[Approval:{approval_id}] streaming_start failed: {resp.status} {body_text}"
+                            )
+                            record = phone_approval.get(approval_id)
+                            if record:
+                                record["status"] = "error"
+                                record["detail_status"] = f"streaming_start {resp.status}: {body_text}"
+                            await _telnyx_hangup(call_control_id)
+            except Exception as error:
+                logger.error(f"[Approval:{approval_id}] streaming_start exception: {error!r}")
+                record = phone_approval.get(approval_id)
+                if record:
+                    record["status"] = "error"
+                    record["detail_status"] = f"streaming_start exception: {error!r}"[:300]
+                await _telnyx_hangup(call_control_id)
+        elif event_type == "call.hangup":
+            phone_approval.mark_call_ended(approval_id)
+        return {"ok": True}
+
+    if event_type == "call.initiated" and payload.get("direction") == "incoming" and call_control_id:
+        # The approver's own number gets the Claude control agent; everyone else
+        # gets the public GRC bot.
+        if voice_control.is_controller(payload.get("from")):
+            voice_control.bind_control_call(call_control_id)
+            logger.info(f"[VoiceControl] inbound control call from approver — {call_control_id}")
+        # Answer WITHOUT stream params. Bundling them into the answer command
+        # produced PCMA media negotiation and badly distorted agent audio on
+        # inbound calls, while the outbound legs — which attach media with a
+        # separate streaming_start after answer — negotiate PCMU and sound
+        # clean. The call.answered branch below runs the same streaming_start
+        # for inbound, making both paths identical.
+        api_key = os.getenv("TELNYX_API_KEY", "")
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"https://api.telnyx.com/v2/calls/{call_control_id}/actions/answer",
+                    json={},
                     headers={
                         "Content-Type": "application/json",
                         "Authorization": f"Bearer {api_key}",
@@ -3401,12 +4228,21 @@ async def telnyx_voice(request: Request):
                     timeout=aiohttp.ClientTimeout(total=10),
                 ) as resp:
                     if resp.status in (200, 202):
-                        logger.info(f"[Telnyx] answered + streaming started → {ws_url}")
+                        logger.info(f"[Telnyx] inbound answered — streaming attaches on call.answered")
                     else:
                         text = await resp.text()
                         logger.error(f"[Telnyx] answer failed: {resp.status} {text}")
         except Exception as e:
             logger.error(f"[Telnyx] answer exception: {e}")
+        return {"ok": True}
+
+    if (
+        event_type == "call.answered"
+        and payload.get("direction") == "incoming"
+        and call_control_id
+    ):
+        await _start_streaming("Inbound")
+        return {"ok": True}
 
     return {"ok": True}
 
@@ -3415,6 +4251,104 @@ async def telnyx_voice(request: Request):
 async def telnyx_ws(websocket: WebSocket):
     """WebSocket endpoint for Telnyx Media Streams."""
     await run_telnyx_bot(websocket)
+
+
+@app.post("/api/approval/request")
+async def approval_request(request: Request):
+    """Create a phone approval and dial the approver. Auth: X-Approval-Secret."""
+    if not phone_approval.check_secret(request.headers.get("X-Approval-Secret")):
+        return JSONResponse(status_code=403, content={"error": "bad or missing approval secret"})
+    data = await request.json()
+    title = str(data.get("title", "")).strip()
+    detail = str(data.get("detail", "")).strip()
+    if not title:
+        return JSONResponse(status_code=400, content={"error": "title is required"})
+    try:
+        record = await phone_approval.create_and_dial(title, detail)
+    except RuntimeError as error:
+        return JSONResponse(status_code=503, content={"error": str(error)})
+    return {"id": record["id"], "status": record["status"]}
+
+
+@app.post("/api/voicetask")
+async def voicetask_submit(request: Request):
+    """Queue a task as if dictated (testing / non-voice submissions)."""
+    if not phone_approval.check_secret(request.headers.get("X-Approval-Secret")):
+        return JSONResponse(status_code=403, content={"error": "bad or missing approval secret"})
+    data = await request.json()
+    instruction = str(data.get("instruction", "")).strip()
+    if len(instruction) < 8:
+        return JSONResponse(status_code=400, content={"error": "instruction is required"})
+    task = voice_control.submit(instruction, source=str(data.get("source", "api")))
+    return {"id": task["id"], "status": task["status"]}
+
+
+@app.get("/api/voicetask/next")
+async def voicetask_next(request: Request):
+    """Worker poll: hand out the oldest queued task, marking it running."""
+    if not phone_approval.check_secret(request.headers.get("X-Approval-Secret")):
+        return JSONResponse(status_code=403, content={"error": "bad or missing approval secret"})
+    task = voice_control.next_pending()
+    if not task:
+        return {"task": None}
+    return {"task": {
+        "id": task["id"],
+        "instruction": task["instruction"],
+        "session": task.get("session", "main"),
+        "resume_id": task.get("resume_id"),
+    }}
+
+
+@app.post("/api/voicetask/sessions")
+async def voicetask_sessions(request: Request):
+    """Worker heartbeat: the live Claude sessions on the dev machine."""
+    if not phone_approval.check_secret(request.headers.get("X-Approval-Secret")):
+        return JSONResponse(status_code=403, content={"error": "bad or missing approval secret"})
+    data = await request.json()
+    sessions = data.get("sessions")
+    if not isinstance(sessions, list):
+        return JSONResponse(status_code=400, content={"error": "sessions list required"})
+    voice_control.update_live_sessions(sessions)
+    return {"ok": True, "count": len(sessions)}
+
+
+@app.post("/api/voicetask/{task_id}/result")
+async def voicetask_result(task_id: str, request: Request):
+    """Worker reports completion; the approver gets a call-back with the summary."""
+    if not phone_approval.check_secret(request.headers.get("X-Approval-Secret")):
+        return JSONResponse(status_code=403, content={"error": "bad or missing approval secret"})
+    data = await request.json()
+    task = voice_control.finish(task_id, bool(data.get("ok")), str(data.get("result", "")))
+    if not task:
+        return JSONResponse(status_code=404, content={"error": "unknown task id"})
+    if data.get("call_back", True):
+        asyncio.create_task(_dial_report_call(task))
+    return {"id": task["id"], "status": task["status"]}
+
+
+@app.get("/api/voicetask/{task_id}")
+async def voicetask_status(task_id: str, request: Request):
+    if not phone_approval.check_secret(request.headers.get("X-Approval-Secret")):
+        return JSONResponse(status_code=403, content={"error": "bad or missing approval secret"})
+    task = voice_control.get(task_id)
+    if not task:
+        return JSONResponse(status_code=404, content={"error": "unknown task id"})
+    return {k: task[k] for k in ("id", "instruction", "status", "result")}
+
+
+@app.get("/api/approval/{approval_id}")
+async def approval_status(approval_id: str, request: Request):
+    if not phone_approval.check_secret(request.headers.get("X-Approval-Secret")):
+        return JSONResponse(status_code=403, content={"error": "bad or missing approval secret"})
+    record = phone_approval.get(approval_id)
+    if not record:
+        return JSONResponse(status_code=404, content={"error": "unknown approval id"})
+    return {
+        "id": record["id"],
+        "status": record["status"],
+        "detail_status": record.get("detail_status", ""),
+        "spoken": record.get("spoken", ""),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -3816,15 +4750,65 @@ class TranslationSession:
         self.status = "waiting"     # waiting | live | ended
         self.created_at = datetime.now()
         self.ended_at = None
+        # Opaque id supplied by the creating device, used to scope the session
+        # list back to its owner. Not an identity or an authenticator - it only
+        # stops one device listing another's conversations.
+        self.client_id: str | None = None
 
 # Module-level registries
 translation_sessions: Dict[str, TranslationSession] = {}  # session_id -> session
 pc_to_translation: Dict[str, str] = {}                     # pc_id -> session_id
 
+def _translation_voice(code: str, *fallback_env_names: str) -> str:
+    """Voice id for a language.
+
+    Checks ELEVENLABS_VOICE_<CODE> first — the convention already used in the
+    deployed environment (ELEVENLABS_VOICE_YUE is configured there) — then any
+    legacy names for that language, then the shared multilingual voice.
+    """
+    for name in (f"ELEVENLABS_VOICE_{code.upper()}", *fallback_env_names):
+        value = os.getenv(name, "")
+        if value:
+            return value
+    return os.getenv("ELEVENLABS_MULTILINGUAL_VOICE_ID", os.getenv("ELEVENLABS_VOICE_ID", ""))
+
+
+# Voice + TTS language for each language the UI offers. This map previously held
+# only "en" and "zh", which caused two failures: the Apple Watch endpoint
+# rejected every other language outright, and the session path fell back to
+# TRANSLATION_VOICES["en"] — so a Cantonese or Japanese translation was handed
+# to ElevenLabs tagged as English.
+#
+# NOTE: "language" is NOT currently sent to ElevenLabs — the TTS service is
+# constructed with a voice and model only, and lets ElevenLabs infer the language
+# from the text. The value is kept here because it is the correct code to send if
+# that is ever wired up, and because it documents the Cantonese caveat below.
+# Only "voice_id" is read today.
+#
+# Cantonese caveat, checked against the live /v1/models API: no ElevenLabs model
+# (turbo_v2_5, flash_v2_5, multilingual_v2, v3) supports Cantonese — "zh" is the
+# only Chinese option. So Cantonese text is synthesised with the Chinese voice and
+# read with Mandarin pronunciation. The translation and transcript are correct
+# Cantonese; only the spoken audio is approximate. Fixing that needs a provider
+# with a yue-HK voice (Azure and Google both have one) or on-device synthesis.
 TRANSLATION_VOICES = {
-    "en": {"voice_id": os.getenv("ELEVENLABS_VOICE_ID", ""), "language": Language.EN},
-    "zh": {"voice_id": os.getenv("ELEVENLABS_VOICE_ID", os.getenv("ELEVENLABS_VOICE_ID", "")), "language": Language.ZH},
+    "en":  {"voice_id": _translation_voice("en", "ELEVENLABS_VOICE_ID"),          "language": Language.EN},
+    "zh":  {"voice_id": _translation_voice("zh", "ELEVENLABS_CHINESE_VOICE"),     "language": Language.ZH},
+    "yue": {"voice_id": _translation_voice("yue", "ELEVENLABS_CANTONESE_VOICE",
+                                           "ELEVENLABS_CHINESE_VOICE"),           "language": Language.ZH},  # see note above
+    "ja":  {"voice_id": _translation_voice("ja"),                                  "language": Language.JA},
+    "ko":  {"voice_id": _translation_voice("ko"),                                  "language": Language.KO},
+    "es":  {"voice_id": _translation_voice("es"),                                  "language": Language.ES},
+    "fr":  {"voice_id": _translation_voice("fr"),                                  "language": Language.FR},
+    "de":  {"voice_id": _translation_voice("de"),                                  "language": Language.DE},
+    "ar":  {"voice_id": _translation_voice("ar"),                                  "language": Language.AR},
+    "hi":  {"voice_id": _translation_voice("hi"),                                  "language": Language.HI},
+    "fil": {"voice_id": _translation_voice("fil"),                                 "language": Language.FIL},
 }
+
+
+WATCH_TRANSLATION_MAX_BYTES = 6 * 1024 * 1024
+watch_translation_slots = asyncio.Semaphore(4)
 
 class AudioProbeProcessor(FrameProcessor):
     """Debug: logs first audio frame out of TTS to confirm TTS is generating audio."""
@@ -3907,8 +4891,18 @@ class TranslationProcessor(FrameProcessor):
                 return
 
             target_lang = other.language
+            # Raw codes: these go into the session events as original_lang /
+            # translated_lang, and the web UI compares them against its own
+            # language codes to decide which half of the screen a turn belongs
+            # to. They must stay as codes.
             source_name = source_lang.value
             target_name = target_lang.value
+            # Human names for the LLM prompt only. Passing the bare code here
+            # ("Translate from en to yue.") is what made Cantonese come back as
+            # Mandarin: an ISO code for a Chinese variant carries no instruction
+            # about which variety or script is wanted.
+            source_prompt_name = translation_prompt_name(source_lang)
+            target_prompt_name = translation_prompt_name(target_lang)
             logger.info(f"[Translation] {source_name} → {target_name} | '{text[:60]}'")
 
             # Skip translation if same language
@@ -3931,8 +4925,11 @@ class TranslationProcessor(FrameProcessor):
 
             # Translate via direct API call (bypasses run_inference's NOT_GIVEN param clutter)
             system_instruction = (
-                f"Translate from {source_name} to {target_name}. "
+                f"Translate from {source_prompt_name} to {target_prompt_name}. "
                 "Output ONLY the translation, nothing else. "
+                "Translate into exactly the target language described, including its "
+                "specified script and regional variety. Never substitute a more common "
+                "related language or dialect. "
                 "If the input consists entirely of filler sounds (e.g. 'um', 'uh', 'ahh', 'hmm') with no meaningful content, output nothing."
             )
             logger.info(f"[Translation] Calling configured LLM for translation...")
@@ -4013,10 +5010,23 @@ async def run_agent_translation_participant(
     )
 
     def get_other():
+        """The counterpart whose language this participant's agent speaks.
+
+        This used to return the first entry with a different pc_id. A stale
+        participant left behind by a reconnect therefore won a race against the
+        real counterpart, and the agent was configured with that stale
+        participant's language — which is how a session could start speaking in
+        the wrong voice partway through. Prefer a live participant, and only
+        fall back to a disconnected one if there is nothing better.
+        """
+        stale = None
         for p in session.participants.values():
-            if p.pc_id != participant.pc_id:
+            if p.pc_id == participant.pc_id:
+                continue
+            if p.pipeline_task is not None:
                 return p
-        return None
+            stale = stale or p
+        return stale
 
     bridge = AgentTranslationBridge(
         session=session,
@@ -4061,6 +5071,12 @@ async def run_agent_translation_participant(
         session.ended_at = datetime.now()
         await session.event_queue.put({"type": "status", "status": "ended"})
         pc_to_translation.pop(participant.pc_id, None)
+        # Drop the participant from the session too. Leaving it behind meant a
+        # reconnect produced a session holding both the dead and the live entry,
+        # and get_other() could then pick the dead one — configuring the agent
+        # for the wrong language and voice.
+        participant.pipeline_task = None
+        session.participants.pop(participant.pc_id, None)
         # Both agents are billed per minute — tear the counterpart's down too rather than
         # leaving it open on a session that can no longer relay anywhere.
         for p in session.participants.values():
@@ -4174,6 +5190,78 @@ async def run_translation_participant(
 
 
 # ---------------------------------------------------------------------------
+# Language naming
+#
+# Three separate copies of a code->name map used to live inside the translation
+# processors, and they disagreed: one covered seven languages, another only two.
+# Any code missing from a copy was interpolated into the LLM prompt as a bare
+# ISO code ("Target language: yue"), and a bare code for a Chinese variant
+# reliably came back as Mandarin. That is what made Cantonese answer in
+# Mandarin. These two maps are now the single source of truth.
+#
+# PROMPT_NAMES are deliberately verbose: for languages that a model is prone to
+# collapse into a more common relative, the entry spells out the script and the
+# variety so the instruction cannot be read as "some kind of Chinese".
+# ---------------------------------------------------------------------------
+
+TRANSLATION_PROMPT_NAMES = {
+    "en": "English",
+    "zh": "Mandarin Chinese, written in Simplified Chinese characters",
+    "yue": (
+        "Cantonese as spoken in Hong Kong, written in Traditional Chinese characters, "
+        "using Cantonese vocabulary and grammar (e.g. 係, 唔, 嘅, 咗, 佢) — "
+        "this must NOT be Mandarin/Putonghua"
+    ),
+    "ja": "Japanese",
+    "ko": "Korean",
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+    "ar": "Arabic",
+    "hi": "Hindi",
+    "fil": "Filipino (Tagalog)",
+    "vi": "Vietnamese",
+    "el": "Greek",
+}
+
+# Short labels for transcripts and the UI.
+TRANSLATION_DISPLAY_NAMES = {
+    "en": "English",
+    "zh": "Mandarin",
+    "yue": "Cantonese",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+    "ar": "Arabic",
+    "hi": "Hindi",
+    "fil": "Filipino",
+    "vi": "Vietnamese",
+    "el": "Greek",
+}
+
+
+def _lang_code(lang) -> str:
+    """Accept a pipecat Language enum, a raw code, or None."""
+    if lang is None:
+        return "unknown"
+    return getattr(lang, "value", lang)
+
+
+def translation_prompt_name(lang) -> str:
+    """Name to interpolate into an LLM translation prompt."""
+    code = _lang_code(lang)
+    return TRANSLATION_PROMPT_NAMES.get(code, code)
+
+
+def translation_display_name(lang) -> str:
+    """Short human label for transcripts and session events."""
+    code = _lang_code(lang)
+    return TRANSLATION_DISPLAY_NAMES.get(code, code)
+
+
+# ---------------------------------------------------------------------------
 # Auto-detect translation — single WebRTC connection, no PTT required.
 # Detects language of each utterance and translates to the opposite language
 # in the configured pair.  Used by the "face-to-face / always-listening" mode.
@@ -4226,18 +5314,8 @@ class AutoTranslationProcessor(FrameProcessor):
 
     async def _translate_and_speak(self, text: str, source_lang: Language | None):
         try:
-            # Map Language enum values to human-readable names for the LLM prompt.
-            _LANG_NAMES = {
-                "en": "English",
-                "zh": "Chinese (Mandarin)",
-                "ar": "Arabic",
-                "vi": "Vietnamese",
-                "ko": "Korean",
-                "hi": "Hindi",
-                "el": "Greek",
-            }
-            a_name = _LANG_NAMES.get(self._lang_a.value, self._lang_a.value)
-            b_name = _LANG_NAMES.get(self._lang_b.value, self._lang_b.value)
+            a_name = translation_prompt_name(self._lang_a)
+            b_name = translation_prompt_name(self._lang_b)
 
             logger.info(f"[AutoTranslation] STT lang={source_lang.value if source_lang else 'unknown'} | '{text[:60]}'")
 
@@ -4310,17 +5388,8 @@ class FixedAutoTranslationProcessor(AutoTranslationProcessor):
 
     async def _translate_and_speak(self, text: str, source_lang: Language | None):
         try:
-            language_names = {
-                "en": "English",
-                "zh": "Chinese (Mandarin)",
-                "ar": "Arabic",
-                "vi": "Vietnamese",
-                "ko": "Korean",
-                "hi": "Hindi",
-                "el": "Greek",
-            }
-            a_name = language_names.get(self._lang_a.value, self._lang_a.value)
-            b_name = language_names.get(self._lang_b.value, self._lang_b.value)
+            a_name = translation_prompt_name(self._lang_a)
+            b_name = translation_prompt_name(self._lang_b)
 
             logger.info(
                 f"[AutoTranslation] STT lang={source_lang.value if source_lang else 'unknown'} | '{text[:60]}'"
@@ -4377,10 +5446,13 @@ class StrictAutoTranslationProcessor(FixedAutoTranslationProcessor):
         self._preview_task: asyncio.Task | None = None
 
     def _event_speaker(self, source_lang: Language | None) -> tuple[str, str]:
+        # These labels used to be the literals "Mandarin" and "English" whatever
+        # pair was actually configured, so a Cantonese/Japanese session still
+        # labelled its transcript rows Mandarin and English.
         if source_lang == self._lang_b:
-            return self._lang_b.value, "Mandarin"
+            return self._lang_b.value, translation_display_name(self._lang_b)
         if source_lang == self._lang_a:
-            return self._lang_a.value, "English"
+            return self._lang_a.value, translation_display_name(self._lang_a)
         return "unknown", "Speaker"
 
     def _target_lang(self, source_lang: Language | None) -> Language | None:
@@ -4391,21 +5463,20 @@ class StrictAutoTranslationProcessor(FixedAutoTranslationProcessor):
         return None
 
     async def _translate_text(self, text: str, source_lang: Language | None, *, max_tokens: int) -> tuple[str | None, Language | None]:
-        language_names = {
-            "en": "English",
-            "zh": "Chinese (Mandarin)",
-        }
-        a_name = language_names.get(self._lang_a.value, self._lang_a.value)
-        b_name = language_names.get(self._lang_b.value, self._lang_b.value)
+        a_name = translation_prompt_name(self._lang_a)
+        b_name = translation_prompt_name(self._lang_b)
 
         target_lang = self._target_lang(source_lang)
-        target_language = language_names.get(target_lang.value, target_lang.value) if target_lang else None
+        target_language = translation_prompt_name(target_lang) if target_lang else None
 
         system_instruction = (
             "You are a translation engine.\n"
             "Translate only.\n"
             "Never explain, define, annotate, answer questions, or add notes.\n"
             "Return only the translated text.\n"
+            "Translate into exactly the target language described, including its "
+            "specified script and regional variety. Never substitute a more common "
+            "related language or dialect.\n"
             "If the input is filler-only or has no meaningful content, return an empty string."
         )
 
@@ -4647,13 +5718,19 @@ async def auto_translation_offer(request: Request, background_tasks: BackgroundT
 async def create_translation_session(request: Request):
     """Create a new translation session. Returns session_id + join link."""
     data = await request.json()
-    session_id = f"GRC-{random.randint(1000, 9999)}"
+    # A 4-digit code gave 9,000 possibilities, and the session-detail endpoint is
+    # unauthenticated - so every transcript on the container could be enumerated
+    # in seconds. The id is the capability that guards a transcript, so it has to
+    # be unguessable.
+    session_id = f"GRC-{secrets.token_urlsafe(12)}"
     session = TranslationSession(
         session_id=session_id,
         caller_name=data.get("caller_name", "Unknown"),
         caller_lang=data.get("caller_language", "zh"),
         topic=data.get("topic", "General"),
     )
+    client_id = (data.get("client_id") or "").strip()
+    session.client_id = client_id or None
     translation_sessions[session_id] = session
     return {"session_id": session_id, "status": "waiting"}
 
@@ -4668,7 +5745,16 @@ async def translation_offer(request: Request, background_tasks: BackgroundTasks)
 
     language = data.get("language", "en")
     name = data.get("name", "Participant")
-    voice_config = TRANSLATION_VOICES.get(language, TRANSLATION_VOICES["en"])
+    voice_config = TRANSLATION_VOICES.get(language)
+    if voice_config is None:
+        # Falling back silently used to mean a Cantonese or Japanese session was
+        # synthesised as English with no trace in the logs. Still fall back so the
+        # session starts, but say so.
+        logger.warning(
+            f"[translation] no voice configured for language={language!r}; "
+            f"falling back to English. Supported: {sorted(TRANSLATION_VOICES)}"
+        )
+        voice_config = TRANSLATION_VOICES["en"]
 
     # Create WebRTC connection
     session_ice_servers, _ = fetch_twilio_ice_servers()
@@ -4695,11 +5781,195 @@ async def translation_offer(request: Request, background_tasks: BackgroundTasks)
 
     return answer
 
+@app.post("/api/translation/ptt")
+async def translation_ptt(request: Request):
+    """Control the server-side PTT audio gate for an ElevenLabs Agent participant."""
+    data = await request.json()
+    pc_id = data.get("pc_id")
+    action = data.get("action")
+    session_id = pc_to_translation.get(pc_id)
+    session = translation_sessions.get(session_id) if session_id else None
+    participant = session.participants.get(pc_id) if session else None
+    bridge = participant.bridge if participant else None
+    # The offer response can reach the browser a few milliseconds before FastAPI's
+    # participant background task assigns its bridge. Absorb that startup race so the
+    # user's first press is not rejected.
+    for _ in range(20):
+        if bridge is not None:
+            break
+        await asyncio.sleep(0.05)
+        bridge = participant.bridge if participant else None
+
+    if bridge is None:
+        return JSONResponse(
+            status_code=404,
+            content={"ok": False, "error": "Translation participant is not ready"},
+        )
+    from elevenlabs_agent_translation import BridgeDisconnected
+
+    if action == "hold":
+        opened = await bridge.hold_to_speak_started()
+        if opened == "disconnected":
+            return JSONResponse(
+                status_code=410,
+                content={
+                    "ok": False,
+                    "state": "disconnected",
+                    "error": "The live session is no longer connected. Rejoin and try again.",
+                },
+            )
+        if opened == "busy" or opened is False:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "ok": False,
+                    "state": "translating",
+                    "error": "This speaker's previous translation is still in progress",
+                },
+            )
+        return {"ok": True, "state": "recording"}
+    if action == "release":
+        try:
+            flushed_bytes = await bridge.hold_to_speak_released()
+        except BridgeDisconnected:
+            return JSONResponse(
+                status_code=410,
+                content={
+                    "ok": False,
+                    "state": "disconnected",
+                    "error": "The live session is no longer connected. Rejoin and try again.",
+                },
+            )
+        return {"ok": True, "state": "released", "flushed_bytes": flushed_bytes}
+    return JSONResponse(
+        status_code=400,
+        content={"ok": False, "error": "action must be 'hold' or 'release'"},
+    )
+
+@app.post("/api/watch/translate")
+async def watch_translate(request: Request):
+    """Translate a complete watchOS PTT recording only after the button is released."""
+    source = request.headers.get("X-Vocare-Source-Language", "en").lower().split("-")[0]
+    target = request.headers.get("X-Vocare-Target-Language", "zh").lower().split("-")[0]
+    # The watch runs through the ElevenLabs Agent stack, which needs a agent
+    # provisioned per spoken language. Check that here so an unprovisioned
+    # language is a clean 400 rather than a RuntimeError surfacing as a 502.
+    from elevenlabs_agent_translation import has_agent_for_language
+
+    watch_supported = sorted(c for c in TRANSLATION_VOICES if has_agent_for_language(c))
+    if source == target or source not in watch_supported or target not in watch_supported:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": (
+                    "Unsupported language pair. Languages available on the watch: "
+                    + (", ".join(watch_supported) or "none provisioned")
+                    + "; source and target must differ."
+                )
+            },
+        )
+
+    if request.headers.get("content-type", "").split(";")[0].lower() not in {"audio/wav", "audio/x-wav"}:
+        return JSONResponse(status_code=415, content={"error": "Expected an audio/wav recording."})
+
+    wav_data = await request.body()
+    if not wav_data or len(wav_data) > WATCH_TRANSLATION_MAX_BYTES:
+        return JSONResponse(status_code=413, content={"error": "Recording is empty or too large."})
+
+    try:
+        with wave.open(io.BytesIO(wav_data), "rb") as recording:
+            if (
+                recording.getnchannels() != 1
+                or recording.getsampwidth() != 2
+                or recording.getframerate() != 16000
+                or recording.getcomptype() != "NONE"
+            ):
+                raise ValueError("Expected mono 16-bit PCM WAV at 16 kHz")
+            frame_count = recording.getnframes()
+            if frame_count > 16000 * 90:
+                raise ValueError("Watch recordings are limited to 90 seconds")
+            pcm = recording.readframes(frame_count)
+    except (wave.Error, EOFError, ValueError) as error:
+        message = str(error) or "The recording was not a readable WAV file."
+        return JSONResponse(status_code=400, content={"error": message})
+
+    if len(pcm) < 3200:  # less than 100ms at PCM16/16kHz
+        return JSONResponse(status_code=400, content={"error": "Recording was too short."})
+
+    # Reject inaudible recordings before opening an agent session. A dead or
+    # disconnected microphone (e.g. a simulator with no audio input) produces a
+    # near-zero waveform; the agent hears nothing, never responds, and the
+    # request burns the full 30 s response timeout. The threshold must stay far
+    # below quiet-but-real speech: the watch records in measurement mode (no
+    # AGC), so genuine wrist-distance speech can peak surprisingly low.
+    samples = array.array("h", pcm)
+    peak = max(abs(sample) for sample in samples)
+    rms = int((sum(sample * sample for sample in samples) / len(samples)) ** 0.5)
+    logger.info(f"[WatchTranslate] {source}->{target} {len(pcm)}B peak={peak} rms={rms}")
+    if peak < 150:
+        return JSONResponse(
+            status_code=422,
+            content={"error": "No speech detected — check that the microphone is working."},
+        )
+
+    from elevenlabs_agent_translation import translate_buffered_utterance
+
+    if not TRANSLATION_VOICES[target]["voice_id"]:
+        return JSONResponse(status_code=503, content={"error": "The target-language voice is not configured."})
+
+    try:
+        async with watch_translation_slots:
+            original, translated, output_pcm = await asyncio.wait_for(
+                translate_buffered_utterance(
+                    pcm=pcm,
+                    source_language=source,
+                    target_language=target,
+                    voice_id=TRANSLATION_VOICES[target]["voice_id"],
+                ),
+                timeout=55,
+            )
+    except asyncio.TimeoutError:
+        return JSONResponse(status_code=504, content={"error": "Translation timed out. Please try again."})
+    except Exception:
+        logger.exception("[WatchTranslate] translation failed")
+        return JSONResponse(status_code=502, content={"error": "Translation service failed."})
+
+    if not translated or not output_pcm:
+        return JSONResponse(status_code=422, content={"error": "No translatable speech was detected."})
+
+    output = io.BytesIO()
+    with wave.open(output, "wb") as wav_output:
+        wav_output.setnchannels(1)
+        wav_output.setsampwidth(2)
+        wav_output.setframerate(16000)
+        wav_output.writeframes(output_pcm)
+
+    return {
+        "original": original,
+        "translated": translated,
+        "source_language": source,
+        "target_language": target,
+        "audio_wav_base64": base64.b64encode(output.getvalue()).decode("ascii"),
+    }
+
 @app.get("/api/translation/sessions")
-async def list_translation_sessions():
-    """List all active/recent translation sessions for the dashboard."""
+async def list_translation_sessions(request: Request):
+    """Sessions belonging to the calling device.
+
+    This used to return every session on the container to any anonymous caller,
+    which exposed other people's conversation metadata — caller names, topics and
+    session codes — and, combined with guessable codes, their transcripts too.
+    A caller now sees only sessions created with its own client_id; a request
+    without one gets an empty list rather than everyone else's.
+    """
+    client_id = (request.query_params.get("client_id") or "").strip()
+    if not client_id:
+        return {"sessions": []}
+
     sessions = []
     for s in translation_sessions.values():
+        if s.client_id != client_id:
+            continue
         end_time = s.ended_at if s.ended_at else datetime.now()
         elapsed = (end_time - s.created_at).total_seconds()
         mins, secs = divmod(int(elapsed), 60)
@@ -4751,6 +6021,21 @@ async def get_translation_session(session_id: str):
             for p in session.participants.values()
         ],
     }
+
+@app.get("/healthz")
+async def healthz():
+    """Liveness probe for the mobile shells, uptime monitoring and the container
+    health check. Deliberately touches no LLM, database or session state - it
+    answers one question: is this container awake?"""
+    return {"status": "ok", "service": "vocare-translate"}
+
+@app.get("/privacy", response_class=HTMLResponse)
+async def privacy_policy():
+    """Public privacy policy. Both app stores require a reachable URL, and Play
+    requires one unconditionally because the app declares RECORD_AUDIO."""
+    html_path = os.path.join(os.path.dirname(__file__), "static", "privacy.html")
+    with open(html_path) as f:
+        return HTMLResponse(content=f.read())
 
 @app.get("/vocare", response_class=HTMLResponse)
 async def vocare_app():

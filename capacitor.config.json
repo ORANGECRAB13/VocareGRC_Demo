@@ -1,0 +1,12 @@
+{
+	"appId": "com.vocare.translate",
+	"appName": "Vocare Translate",
+	"webDir": "www",
+	"server": {
+		"androidScheme": "https"
+	},
+	"ios": {
+		"contentInset": "always",
+		"allowsLinkPreview": false
+	}
+}

@@ -1,0 +1,46 @@
+name: Verify mobile bundle
+
+# www/ is generated from static/ by scripts/build-www.mjs and shipped inside the
+# iOS and Android apps. If someone changes the UI without regenerating it, the
+# native apps silently keep the old bundle — and nothing else would catch it.
+# This job is that guarantee; the npm scripts are only convenience.
+
+on:
+  pull_request:
+    paths:
+      - 'static/vocare.html'
+      - 'static/vocare-app.jsx'
+      - 'static/demo/**'
+      - 'static/vendor-fonts/**'
+      - 'www/**'
+      - 'scripts/build-www.mjs'
+      - 'package.json'
+  push:
+    branches:
+      - master
+    paths:
+      - 'static/vocare.html'
+      - 'static/vocare-app.jsx'
+      - 'static/demo/**'
+      - 'static/vendor-fonts/**'
+      - 'www/**'
+      - 'scripts/build-www.mjs'
+      - 'package.json'
+  workflow_dispatch:
+
+jobs:
+  verify-www:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check www/ matches static/
+        run: npm run verify:www

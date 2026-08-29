@@ -8,21 +8,47 @@ const { useState, useEffect, useRef, useCallback, useMemo } = React;
 // ─────────────────────────────────────────────
 
 const T = {
-  teal:        'oklch(0.60 0.13 187)',
-  tealLight:   'oklch(0.94 0.05 187)',
-  tealMid:     'oklch(0.75 0.10 187)',
-  amber:       'oklch(0.47 0.20 22)',
-  amberLight:  'oklch(0.95 0.05 22)',
-  bg:          'oklch(0.97 0.01 240)',
-  surface:     '#ffffff',
-  surface2:    'oklch(0.96 0.008 240)',
-  textPrimary: 'oklch(0.14 0.02 240)',
-  textMuted:   'oklch(0.52 0.02 240)',
-  textFaint:   'oklch(0.75 0.01 240)',
-  border:      'oklch(0.90 0.01 240)',
-  error:       'oklch(0.52 0.18 22)',
-  errorLight:  'oklch(0.96 0.04 22)',
-  success:     'oklch(0.52 0.14 158)',
+  teal:        '#58BFB4',
+  tealLight:   '#DDF4F1',
+  tealMid:     '#8FD5CE',
+  amber:       '#F47C36',
+  amberLight:  '#FCE4D5',
+  bg:          '#FBF3EB',
+  surface:     '#FFFFFF',
+  surface2:    '#E5EEF2',
+  textPrimary: '#3E4C5E',
+  textMuted:   '#71808F',
+  textFaint:   '#A6B1BA',
+  border:      '#D3DEE4',
+  error:       '#C52E42',
+  errorLight:  '#F8E1E5',
+  success:     '#409B76',
+  slate:       '#3E4C5E',
+  cream:       '#FBF3EB',
+
+  // ── Voca design canvas tokens ──
+  navy:        '#3E4C5E',  // brand navy / slate
+  gold:        '#FFD37E',  // hero italic + live indicator dot
+  tealDeep:    '#2E8E86',  // Person B ink on light surfaces
+  tealSoft:    '#7FD3C9',  // Person B ink on navy
+  tealPale:    '#9BDCD4',  // Person B ink, brightest (recording)
+  amberSoft:   '#FBB07A',  // Person A ink on navy
+  amberDeep:   '#D9631F',  // Person A pressed
+  panelIdle:   '#48586D',  // live panel resting background
+  panelA:      '#B05A24',  // live panel while A records
+  panelB:      '#2C7B73',  // live panel while B records
+
+  // Alpha washes lifted verbatim from the canvas
+  inkA08:      'rgba(244,124,54,.08)',
+  inkA14:      'rgba(244,124,54,.14)',
+  inkB09:      'rgba(88,191,180,.09)',
+  inkB14:      'rgba(88,191,180,.14)',
+  tileA:       'rgba(251,176,122,.18)',
+  tileB:       'rgba(88,191,180,.16)',
+  hairline:    'rgba(62,76,94,.08)',
+  inkMute:     'rgba(62,76,94,.45)',
+  creamMute:   'rgba(251,243,235,.45)',
+  creamFaint:  'rgba(251,243,235,.4)',
 };
 
 // ─────────────────────────────────────────────
@@ -32,12 +58,15 @@ const T = {
 const LANGUAGES = [
   { code: 'en', flag: '🇺🇸', label: 'English' },
   { code: 'zh', flag: '🇨🇳', label: 'Mandarin' },
+  { code: 'yue', flag: '🇭🇰', label: 'Cantonese' },
   { code: 'ja', flag: '🇯🇵', label: 'Japanese' },
   { code: 'ko', flag: '🇰🇷', label: 'Korean' },
   { code: 'es', flag: '🇪🇸', label: 'Spanish' },
   { code: 'fr', flag: '🇫🇷', label: 'French' },
   { code: 'de', flag: '🇩🇪', label: 'German' },
   { code: 'ar', flag: '🇦🇪', label: 'Arabic' },
+  { code: 'hi', flag: '🇮🇳', label: 'Hindi' },
+  { code: 'fil', flag: '🇵🇭', label: 'Filipino (Tagalog)' },
 ];
 
 function getLang(code) {
@@ -45,17 +74,189 @@ function getLang(code) {
 }
 
 // ─────────────────────────────────────────────
+// On-device translation capability
+// ─────────────────────────────────────────────
+
+// Which languages have a first-party on-device translation model, per platform.
+// Checked against Apple's published Translation framework list (21 languages)
+// and ML Kit's supported-language list (59).
+//
+// Two gaps matter for this app and are deliberate, not oversights:
+//   - Cantonese has NO on-device model on either platform. Apple's only Chinese
+//     is Mandarin; ML Kit's only Chinese is "zh", also Mandarin.
+//   - Filipino exists on Android (ML Kit calls it "tl") but not on Apple's list.
+// Those pairs stay server-only, which is why this table is per-platform rather
+// than a single list.
+const OFFLINE_TRANSLATION_LANGUAGES = {
+  ios: ['en', 'zh', 'ja', 'ko', 'es', 'fr', 'de', 'ar', 'hi'],
+  android: ['en', 'zh', 'ja', 'ko', 'es', 'fr', 'de', 'ar', 'hi', 'fil'],
+};
+
+// Our codes are BCP-47-ish and mostly pass straight through; ML Kit predates
+// the fil/tl rename and only knows "tl".
+const MLKIT_LANGUAGE_CODE = { fil: 'tl' };
+
+function nativePlatform() {
+  try {
+    return window.Capacitor?.getPlatform?.() || 'web';
+  } catch (_) {
+    return 'web';
+  }
+}
+
+function offlineTranslationLanguages() {
+  return OFFLINE_TRANSLATION_LANGUAGES[nativePlatform()] || [];
+}
+
+// Whether this pair could be translated with no network, on this platform.
+// Says nothing about whether the models are actually downloaded yet — that is a
+// separate, asynchronous question the plugin answers.
+function canTranslateOffline(a, b) {
+  if (!a || !b || a === b) return false;
+  const supported = offlineTranslationLanguages();
+  return supported.includes(a) && supported.includes(b);
+}
+
+// Two very different engines behind one interface.
+//
+//   mlkit (Android) — per-LANGUAGE models the app can download itself.
+//   apple (iOS 26+) — per-PAIR availability, and the headless API deliberately
+//                     CANNOT download. Packs come from Settings > Apps >
+//                     Translate. Pretending otherwise would mean offering a
+//                     button that cannot work.
+//
+// Both are absent in a browser, so this returns null and callers fall back to
+// the server — the same shape as nativeHistoryPlugin().
+function offlineEngine() {
+  const p = window.Capacitor?.Plugins;
+  if (!p) return null;
+  if (p.VocareOfflineTranslate) return { kind: 'apple', plugin: p.VocareOfflineTranslate };
+  if (p.Translation) return { kind: 'mlkit', plugin: p.Translation };
+  return null;
+}
+
+function mlkitCode(code) {
+  return MLKIT_LANGUAGE_CODE[code] || code;
+}
+
+// Can this engine fetch its own models, or must the user go to system settings?
+function offlineCanSelfDownload() {
+  return offlineEngine()?.kind === 'mlkit';
+}
+
+// Is this pair ready to translate with no network right now?
+// Returns 'installed' | 'supported' | 'unsupported' | null (engine absent).
+// 'supported' and 'unsupported' are different states deserving different UI:
+// one is a download away, the other will never work on this device.
+async function offlinePairStatus(a, b) {
+  const engine = offlineEngine();
+  if (!engine || !canTranslateOffline(a, b)) return null;
+  try {
+    if (engine.kind === 'apple') {
+      const { status } = await engine.plugin.pairStatus({ source: a, target: b });
+      return status || 'unsupported';
+    }
+    const { languages = [] } = await engine.plugin.getDownloadedModels();
+    const have = new Set(languages);
+    return have.has(mlkitCode(a)) && have.has(mlkitCode(b)) ? 'installed' : 'supported';
+  } catch (error) {
+    console.warn('Could not read offline translation availability:', error);
+    return null;
+  }
+}
+
+// Models are ~30MB each and download over any connection, so this stays an
+// explicit user action. Only meaningful on ML Kit.
+async function downloadOfflineModels(codes) {
+  const engine = offlineEngine();
+  if (engine?.kind !== 'mlkit') {
+    throw new Error('This device installs translation languages through system settings.');
+  }
+  for (const code of codes) {
+    await engine.plugin.downloadModel({ language: mlkitCode(code) });
+  }
+}
+
+async function translateOffline(text, sourceCode, targetCode) {
+  const engine = offlineEngine();
+  if (!engine || !canTranslateOffline(sourceCode, targetCode)) return null;
+  try {
+    if (engine.kind === 'apple') {
+      const { text: translated } = await engine.plugin.translate({
+        text, source: sourceCode, target: targetCode,
+      });
+      return (translated || '').trim() || null;
+    }
+    const { text: translated } = await engine.plugin.translate({
+      text,
+      sourceLanguage: mlkitCode(sourceCode),
+      targetLanguage: mlkitCode(targetCode),
+    });
+    return (translated || '').trim() || null;
+  } catch (error) {
+    // Usually a missing language pack. The caller decides whether to prompt for
+    // a download or fall back to the server.
+    console.warn('On-device translation failed:', error);
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────────
+// API base
+// ─────────────────────────────────────────────
+
+// The native shells bundle this UI locally, so their API calls are cross-origin
+// and need an absolute base injected at build time by scripts/build-www.mjs.
+// In the browser at /vocare nothing is injected, apiBase() is '', and every
+// request stays same-origin exactly as before.
+function apiBase() {
+  return window.VOCARE_API_BASE || '';
+}
+
+function isNativeBundle() {
+  return Boolean(window.VOCARE_NATIVE_BUNDLE);
+}
+
+function api(path, opts) {
+  return fetch(apiBase() + path, opts);
+}
+
+// Opaque per-install id so the server can scope the session list to this device.
+// The list endpoint used to return every session on the server to any caller.
+// This is deliberately NOT an identity or a credential — it only stops one
+// device seeing another's conversations. If storage is unavailable we fall back
+// to a per-load value, which just means history looks empty rather than leaking.
+let _clientId = null;
+function clientId() {
+  if (_clientId) return _clientId;
+  try {
+    _clientId = window.localStorage.getItem('vocare.clientId');
+    if (!_clientId) {
+      _clientId = (crypto.randomUUID && crypto.randomUUID())
+        || `c-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      window.localStorage.setItem('vocare.clientId', _clientId);
+    }
+  } catch (_) {
+    _clientId = _clientId || `c-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  }
+  return _clientId;
+}
+
+// ─────────────────────────────────────────────
 // WebRTC helpers
 // ─────────────────────────────────────────────
 
 async function fetchIceServers() {
-  try {
-    const r = await fetch('/api/ice');
-    const d = await r.json();
-    return d.iceServers || [];
-  } catch {
-    return [];
-  }
+  // Both peer connections run with iceTransportPolicy: 'relay', so an empty
+  // server list guarantees ICE failure and leaves the caller sitting on
+  // "Connecting…" until the connection state eventually flips to failed.
+  // Throwing here lets setupSession fail fast into the error path instead.
+  const r = await api('/api/ice');
+  if (!r.ok) throw new Error(`Could not fetch ICE servers (${r.status})`);
+  const d = await r.json();
+  const iceServers = d.iceServers || [];
+  if (!iceServers.length) throw new Error('No ICE servers available');
+  return iceServers;
 }
 
 async function waitForICE(pc) {
@@ -79,10 +280,22 @@ async function createOffer(pc, stream) {
   return { sdp: pc.localDescription.sdp, type: pc.localDescription.type };
 }
 
+async function setTranslationPttGate(pcId, action) {
+  if (!pcId) throw new Error('Translation participant is not connected');
+  const response = await api('/api/translation/ptt', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pc_id: pcId, action }),
+    keepalive: action === 'release',
+  });
+  if (!response.ok) throw new Error(`PTT gate ${action} failed (${response.status})`);
+  return response.json();
+}
+
 async function hangupPcId(pcId, { keepalive = false } = {}) {
   if (!pcId) return;
   try {
-    await fetch('/api/hangup', {
+    await api('/api/hangup', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ pc_id: pcId }),
@@ -93,14 +306,75 @@ async function hangupPcId(pcId, { keepalive = false } = {}) {
 
 function fireAndForgetHangup(pcId) {
   if (!pcId) return;
-  const body = JSON.stringify({ pc_id: pcId });
-  if (navigator.sendBeacon) {
+  // A beacon with an application/json body is a non-simple cross-origin
+  // request, and sendBeacon cannot preflight — from the native bundle it would
+  // be dropped silently and leak the peer connection server-side. Same-origin
+  // in the browser it is still the most reliable unload-time send, so keep it
+  // there and fall through to keepalive fetch on native.
+  if (!isNativeBundle() && navigator.sendBeacon) {
+    const body = JSON.stringify({ pc_id: pcId });
     try {
       const blob = new Blob([body], { type: 'application/json' });
-      if (navigator.sendBeacon('/api/hangup', blob)) return;
+      if (navigator.sendBeacon(apiBase() + '/api/hangup', blob)) return;
     } catch (_) {}
   }
   void hangupPcId(pcId, { keepalive: true });
+}
+
+// Capacitor injects this bridge only in the native iOS shell. Browsers continue
+// to use the Azure session endpoints, while iOS keeps its durable copy in SwiftData.
+function nativeHistoryPlugin() {
+  return window.Capacitor?.Plugins?.TranslationHistory || null;
+}
+
+async function saveNativeSession(session) {
+  const plugin = nativeHistoryPlugin();
+  if (!plugin) return;
+  try {
+    await plugin.saveSession({
+      ...session,
+      transcriptJSON: JSON.stringify(session.transcript || []),
+    });
+  } catch (error) {
+    console.warn('Could not save iOS session history:', error);
+  }
+}
+
+async function loadSessionHistory() {
+  const plugin = nativeHistoryPlugin();
+  if (!plugin) {
+    const response = await api(`/api/translation/sessions?client_id=${encodeURIComponent(clientId())}`);
+    return (await response.json()).sessions || [];
+  }
+
+  const local = (await plugin.listSessions()).sessions || [];
+  // Retain visibility of a currently running Azure session, but prefer the
+  // SwiftData record whenever both stores contain the same session id.
+  try {
+    const response = await api(`/api/translation/sessions?client_id=${encodeURIComponent(clientId())}`);
+    const remote = (await response.json()).sessions || [];
+    const localIds = new Set(local.map(session => session.session_id));
+    const remoteLive = remote.filter(session =>
+      (session.status === 'live' || session.status === 'active') && !localIds.has(session.session_id)
+    );
+    return [...remoteLive, ...local];
+  } catch {
+    return local;
+  }
+}
+
+async function loadSessionDetail(sessionId) {
+  const plugin = nativeHistoryPlugin();
+  if (plugin) {
+    try {
+      const result = await plugin.getSession({ sessionId });
+      if (result.session) return result.session;
+    } catch (error) {
+      console.warn('Could not load iOS session detail:', error);
+    }
+  }
+  const response = await api(`/api/translation/session/${sessionId}`);
+  return response.ok ? response.json() : null;
 }
 
 // ─────────────────────────────────────────────
@@ -397,15 +671,15 @@ function StatusPill({ status = 'idle', colorOverride }) {
 function TabBar({ active, onChange }) {
   const tabs = [
     { id: 'home',    icon: 'home',    label: 'Home' },
-    { id: 'live',    icon: 'mic',     label: 'Live' },
+    { id: 'live',    icon: 'mic',     label: 'Translate' },
     { id: 'history', icon: 'history', label: 'History' },
+    { id: 'settings', icon: 'settings', label: 'Settings' },
   ];
   return (
     <div style={{
-      display: 'flex',
-      background: T.surface,
-      borderTop: `1px solid ${T.border}`,
-      paddingBottom: 'env(safe-area-inset-bottom, 0px)',
+      height: 'calc(82px + env(safe-area-inset-bottom, 0px))', display: 'flex', alignItems: 'flex-start',
+      paddingTop: 11, background: 'rgba(251,243,235,.92)', backdropFilter: 'blur(18px)',
+      borderTop: '1px solid rgba(62,76,94,.08)', paddingBottom: 'env(safe-area-inset-bottom, 0px)', flexShrink: 0,
     }}>
       {tabs.map(t => {
         const isActive = active === t.id;
@@ -419,14 +693,12 @@ function TabBar({ active, onChange }) {
               flexDirection: 'column',
               alignItems: 'center',
               justifyContent: 'center',
-              padding: '10px 0 8px',
-              gap: 3,
-              color: isActive ? T.teal : T.textFaint,
+              padding: 0, gap: 5, color: isActive ? T.amber : 'rgba(62,76,94,.38)',
               transition: 'color 0.15s',
             }}
           >
             <Icon name={t.icon} size={22} />
-            <span style={{ fontSize: 10, fontWeight: isActive ? 600 : 400 }}>{t.label}</span>
+            <span style={{ fontSize: 10.5, fontWeight: 600, letterSpacing: '.02em' }}>{t.label}</span>
           </button>
         );
       })}
@@ -438,7 +710,7 @@ function TabBar({ active, onChange }) {
 // WelcomeScreen
 // ─────────────────────────────────────────────
 
-function WelcomeScreen({ langA, langB, onStart, onLangPair, onHistory, onSession }) {
+function WelcomeScreen({ langA, langB, onStart, onPickA, onPickB, onSwap, onHistory, onSession }) {
   const [sessions, setSessions] = useState([]);
   const langAInfo = getLang(langA);
   const langBInfo = getLang(langB);
@@ -447,9 +719,8 @@ function WelcomeScreen({ langA, langB, onStart, onLangPair, onHistory, onSession
     let active = true;
     const poll = async () => {
       try {
-        const r = await fetch('/api/translation/sessions');
-        const d = await r.json();
-        if (active) setSessions(d.sessions || []);
+        const history = await loadSessionHistory();
+        if (active) setSessions(history);
       } catch {}
     };
     poll();
@@ -460,126 +731,79 @@ function WelcomeScreen({ langA, langB, onStart, onLangPair, onHistory, onSession
   const topSessions = sessions.slice(0, 3);
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflowY: 'auto', background: T.bg }}>
-      {/* Hero header — solid teal, bottom corners rounded */}
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflowY: 'auto', background: T.cream }}>
       <div style={{
-        background: T.teal,
-        padding: '52px 24px 32px',
-        borderRadius: '0 0 32px 32px',
-        color: '#fff',
+        background: T.slate,
+        padding: '58px 26px 22px',
+        borderRadius: '0 0 34px 34px',
+        color: T.cream,
         flexShrink: 0,
       }}>
-        {/* Logo row */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 20 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <div style={{
-            width: 38, height: 38,
-            background: 'rgba(255,255,255,0.15)',
-            borderRadius: 12,
+            width: 30, height: 30, background: T.cream, color: T.slate, borderRadius: 9,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-            flexShrink: 0,
+            flexShrink: 0, fontFamily: "'Instrument Serif', serif", fontSize: 19,
           }}>
-            <Icon name="translate" size={21} color="#fff" />
+            A
           </div>
-          <div>
-            <h1 style={{ fontSize: 20, fontWeight: 700, letterSpacing: -0.3, lineHeight: 1.1 }}>Vocare</h1>
-            <p style={{ fontSize: 11, opacity: 0.65, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1.2 }}>Voice Translation</p>
-          </div>
+          <h1 style={{ color: T.cream, fontSize: 14, fontWeight: 600, letterSpacing: '.16em', textTransform: 'uppercase' }}>Voca</h1>
         </div>
 
-        {/* Tagline */}
-        <p style={{ fontSize: 28, fontWeight: 700, letterSpacing: '-0.02em', lineHeight: 1.2, marginBottom: 10 }}>
-          Speak freely.<br />Understand instantly.
+        <p style={{ fontFamily: "'Instrument Serif', serif", fontSize: 44, fontWeight: 400, letterSpacing: '-.015em', lineHeight: .98, margin: '26px 0 0' }}>
+          Speak freely.<br /><span style={{ fontStyle: 'italic', color: '#FFD37E' }}>Understand</span> instantly.
         </p>
-        <p style={{ fontSize: 14, opacity: 0.70, lineHeight: 1.5, marginBottom: 24 }}>
-          Real-time translation for face-to-face conversations.
+        <p style={{ fontSize: 13.5, color: 'rgba(251,243,235,.6)', lineHeight: 1.5, marginTop: 12, maxWidth: 230 }}>
+          One phone between two people.
         </p>
-
-        {/* Language pair selector — inside hero */}
-        <button
-          onClick={onLangPair}
-          style={{
-            width: '100%',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            padding: '14px 16px',
-            background: 'rgba(255,255,255,0.15)',
-            border: '1px solid rgba(255,255,255,0.25)',
-            borderRadius: 16,
-            cursor: 'pointer',
-            color: '#fff',
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 17 }}>{langAInfo.flag}</span>
-            <span style={{ fontSize: 14, fontWeight: 600 }}>
-              {langAInfo.code === 'auto' ? 'AUTO' : langAInfo.label}
-            </span>
-            <Icon name="swap" size={16} color="rgba(255,255,255,0.7)" />
-            <span style={{ fontSize: 17 }}>{langBInfo.flag}</span>
-            <span style={{ fontSize: 14, fontWeight: 600 }}>
-              {langBInfo.code === 'auto' ? 'AUTO' : langBInfo.label}
-            </span>
-          </div>
-          <Icon name="chevron" size={18} color="rgba(255,255,255,0.7)" />
-        </button>
       </div>
 
-      {/* Start button — outside hero, in bg */}
-      <div style={{ padding: '20px 24px 0' }}>
+      <div style={{ padding: '16px 20px 0' }}>
+        <div style={{ display: 'flex', alignItems: 'stretch', gap: 8, background: '#fff', border: '1px solid rgba(62,76,94,.09)', borderRadius: 22, padding: 8 }}>
+          <button onClick={onPickA} style={{ flex: 1, minWidth: 0, padding: '12px 14px', borderRadius: 15, background: 'rgba(244,124,54,.07)', textAlign: 'left' }}>
+            <div style={{ fontSize: 9.5, letterSpacing: '.14em', textTransform: 'uppercase', color: T.amber, fontWeight: 700 }}>Person A</div>
+            <div style={{ fontSize: 16, fontWeight: 600, color: T.slate, marginTop: 5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{langAInfo.label}</div>
+          </button>
+          <button onClick={onSwap} aria-label="Swap languages" style={{ width: 38, display: 'grid', placeItems: 'center', color: 'rgba(62,76,94,.4)', borderRadius: 12 }}><Icon name="swap" size={18} /></button>
+          <button onClick={onPickB} style={{ flex: 1, minWidth: 0, padding: '12px 14px', borderRadius: 15, background: T.inkB09, textAlign: 'right' }}>
+            <div style={{ fontSize: 9.5, letterSpacing: '.14em', textTransform: 'uppercase', color: T.tealDeep, fontWeight: 700 }}>Person B</div>
+            <div style={{ fontSize: 16, fontWeight: 600, color: T.slate, marginTop: 5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{langBInfo.label}</div>
+          </button>
+        </div>
         <button
           onClick={onStart}
           style={{
-            width: '100%',
-            padding: '18px',
-            background: T.teal,
-            color: '#fff',
-            border: 'none',
-            borderRadius: 18,
-            fontSize: 17,
-            fontWeight: 700,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            gap: 8,
-            boxShadow: '0 4px 20px oklch(0.60 0.13 187 / 0.35)',
+            width: '100%', height: 62, marginTop: 12, background: T.amber, color: '#fff', border: 'none', borderRadius: 20,
+            fontSize: 17, fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 11,
+            boxShadow: '0 12px 24px -8px rgba(244,124,54,.6)',
           }}
         >
-          <Icon name="mic" size={20} color="#fff" />
-          Start Translation
+          <Icon name="mic" size={19} color="#fff" /> Start a session
         </button>
       </div>
 
-      {/* Recent sessions */}
-      <div style={{ padding: '24px 16px 0' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-          <h2 style={{ fontSize: 12, fontWeight: 700, color: T.textMuted, textTransform: 'uppercase', letterSpacing: 0.6 }}>
-            Recent Sessions
-          </h2>
-          {sessions.length > 3 && (
-            <button onClick={onHistory} style={{ fontSize: 13, color: T.teal, fontWeight: 500 }}>
-              View all
-            </button>
-          )}
-        </div>
-
-        {topSessions.length === 0 ? (
-          <div style={{
-            padding: '32px 16px',
-            textAlign: 'center',
-            color: T.textFaint,
-            fontSize: 14,
-          }}>
-            No sessions yet. Start a translation above.
-          </div>
-        ) : (
-          topSessions.map(s => (
-            <SessionCard key={s.session_id} session={s} onClick={() => onSession(s.session_id)} />
-          ))
+      <div style={{ padding: '18px 20px 0' }}>
+        {topSessions.length > 0 && (
+          <>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 9 }}>
+              <h2 style={{ fontSize: 10.5, fontWeight: 700, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '.16em' }}>
+                Recent sessions
+              </h2>
+              <button onClick={onHistory} style={{ fontSize: 12, color: T.amber, fontWeight: 600 }}>All</button>
+            </div>
+            {topSessions.map(s => (
+              <SessionCard key={s.session_id} session={s} onClick={() => onSession(s.session_id)} />
+            ))}
+          </>
         )}
       </div>
 
-      <div style={{ height: 16 }} />
+      {/* Canvas footer hint — sits at the base of the scroll flow */}
+      <div style={{ flex: 1, display: 'flex', alignItems: 'flex-end', justifyContent: 'center', padding: '24px 34px 24px', minHeight: 96 }}>
+        <p style={{ fontSize: 12.5, lineHeight: 1.6, color: T.inkMute, textAlign: 'center' }}>
+          Lay the phone flat between you. Hold your half to talk; release and the other half hears it translated.
+        </p>
+      </div>
     </div>
   );
 }
@@ -593,42 +817,30 @@ function SessionCard({ session, onClick }) {
     <button
       onClick={onClick}
       style={{
-        width: '100%',
-        display: 'flex',
-        alignItems: 'flex-start',
-        gap: 12,
-        padding: '14px 16px',
-        background: T.surface,
-        border: `1px solid ${T.border}`,
-        borderRadius: 14,
-        marginBottom: 10,
-        cursor: 'pointer',
-        textAlign: 'left',
-        animation: 'fade-in-up 0.3s ease-out both',
+        width: '100%', display: 'flex', alignItems: 'center', gap: 12, padding: '14px 15px', background: '#fff',
+        border: '1px solid rgba(62,76,94,.08)', borderRadius: 18, marginBottom: 8, cursor: 'pointer', textAlign: 'left',
       }}
     >
       <div style={{
-        width: 40, height: 40,
-        background: isLive ? T.tealLight : T.surface2,
-        borderRadius: 12,
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        flexShrink: 0,
+        width: 38, height: 38, background: isLive ? 'rgba(88,191,180,.12)' : 'rgba(244,124,54,.08)',
+        color: isLive ? '#2E8E86' : T.amber, borderRadius: 12, display: 'grid', placeItems: 'center', flexShrink: 0,
+        fontSize: 11, fontWeight: 700,
       }}>
-        <Icon name={isLive ? 'mic' : 'history'} size={18} color={isLive ? T.teal : T.textFaint} />
+        {String(session.lang || 'EN').toUpperCase()}
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
-          <span style={{ fontSize: 14, fontWeight: 600, color: T.textPrimary, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          <span style={{ fontSize: 14.5, fontWeight: 600, color: T.slate, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {session.topic || session.caller_name || 'Translation Session'}
           </span>
           {isLive && (
-            <span style={{ fontSize: 11, fontWeight: 700, color: T.teal, background: T.tealLight, padding: '2px 7px', borderRadius: 99 }}>
-              LIVE
+            <span style={{ fontSize: 10, fontWeight: 700, color: '#2E8E86', background: 'rgba(88,191,180,.12)', padding: '4px 8px', borderRadius: 99, letterSpacing: '.1em' }}>
+              Live
             </span>
           )}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 12, color: T.textMuted }}>{lang.flag} {session.caller_name}</span>
+          <span style={{ fontSize: 11.5, color: 'rgba(62,76,94,.5)' }}>{session.caller_name}</span>
           {session.participant_count != null && (
             <span style={{ fontSize: 12, color: T.textFaint }}>· {session.participant_count} people</span>
           )}
@@ -637,25 +849,121 @@ function SessionCard({ session, onClick }) {
           )}
         </div>
       </div>
-      <Icon name="chevron" size={16} color={T.textFaint} style={{ flexShrink: 0, marginTop: 2 }} />
     </button>
   );
 }
 
 function formatDuration(secs) {
   if (secs == null) return '';
+  if (typeof secs === 'string') return secs;
   const m = Math.floor(secs / 60);
   const s = secs % 60;
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+
+// Live-bar clock: tabular MM:SS, as drawn on the canvas.
+function formatClock(secs) {
+  const n = typeof secs === 'number' ? Math.max(0, secs) : 0;
+  return `${String(Math.floor(n / 60)).padStart(2, '0')}:${String(n % 60).padStart(2, '0')}`;
 }
 
 // ─────────────────────────────────────────────
 // SessionSetupScreen
 // ─────────────────────────────────────────────
 
+// ─────────────────────────────────────────────
+// Microphone disclosure
+// ─────────────────────────────────────────────
+
+// Google Play requires a prominent disclosure before a sensitive permission is
+// requested, and Apple expects the same in substance. Until this is accepted the
+// app must not reach getUserMedia. Stored per-device; localStorage can throw in
+// a locked-down WebView, so a failure to read means "not yet consented" and a
+// failure to write just costs the user one extra tap next time.
+const MIC_CONSENT_KEY = 'vocare.micConsent.v1';
+
+function hasMicConsent() {
+  try {
+    return window.localStorage.getItem(MIC_CONSENT_KEY) === 'granted';
+  } catch (_) {
+    return false;
+  }
+}
+
+function recordMicConsent() {
+  try {
+    window.localStorage.setItem(MIC_CONSENT_KEY, 'granted');
+  } catch (_) {}
+}
+
+function MicDisclosure({ onAccept, onCancel }) {
+  return (
+    <div style={{
+      position: 'absolute', inset: 0, zIndex: 40, display: 'flex', alignItems: 'flex-end',
+      background: 'rgba(62,76,94,.55)', animation: 'fade-in .2s ease-out',
+    }}>
+      <div style={{
+        width: '100%', background: T.cream, borderRadius: '26px 26px 0 0', padding: '24px 22px 28px',
+        boxShadow: '0 -18px 40px -12px rgba(62,76,94,.4)',
+      }}>
+        <div style={{ width: 46, height: 46, borderRadius: 15, display: 'grid', placeItems: 'center', background: T.slate }}>
+          <Icon name="mic" size={21} color={T.cream} />
+        </div>
+        <h2 style={{ fontFamily: "'Instrument Serif', serif", fontSize: 25, fontWeight: 400, color: T.slate, marginTop: 14 }}>
+          Before we turn on the microphone
+        </h2>
+        <div style={{ fontSize: 14, lineHeight: 1.6, color: 'rgba(62,76,94,.78)', marginTop: 12 }}>
+          To translate your conversation, Vocare records audio while you hold the speak
+          button and sends it to our servers, where it is transcribed and translated.
+        </div>
+        <ul style={{ listStyle: 'none', marginTop: 14, display: 'flex', flexDirection: 'column', gap: 9 }}>
+          {[
+            'Audio is captured only while a speak button is held down — never in the background.',
+            'Transcripts of the conversation are saved on this device so you can read them later.',
+            'There are no accounts, and nothing is used for advertising or tracking.',
+          ].map(line => (
+            <li key={line} style={{ display: 'flex', gap: 9, fontSize: 13, lineHeight: 1.5, color: 'rgba(62,76,94,.7)' }}>
+              <span style={{ color: T.amber, fontWeight: 700 }}>·</span>
+              <span>{line}</span>
+            </li>
+          ))}
+        </ul>
+        {/* Absolute, and no target="_blank". The native bundle is served from
+            capacitor://localhost (iOS) / https://localhost (Android), where a
+            relative /privacy does not exist, and neither WebView opens _blank
+            links without a window handler. An off-origin https URL is handed to
+            the system browser by Capacitor's navigation policy. */}
+        <a
+          href={`${apiBase()}/privacy`}
+          rel="noopener noreferrer"
+          style={{ display: 'inline-block', marginTop: 14, fontSize: 13, fontWeight: 600, color: T.amber, textDecoration: 'underline' }}
+        >
+          Read the privacy policy
+        </a>
+        <button
+          onClick={() => { recordMicConsent(); onAccept(); }}
+          style={{
+            width: '100%', height: 58, marginTop: 18, background: T.amber, color: '#fff', border: 'none',
+            borderRadius: 19, fontSize: 16.5, fontWeight: 600,
+          }}
+        >
+          Allow and continue
+        </button>
+        <button
+          onClick={onCancel}
+          style={{
+            width: '100%', height: 48, marginTop: 8, background: 'transparent', color: 'rgba(62,76,94,.6)',
+            border: 'none', fontSize: 15, fontWeight: 600,
+          }}
+        >
+          Not now
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function SessionSetupScreen({ langA, langB, onBack, onStart, onLangPick }) {
-  const [mode, setMode] = useState('my-device');      // 'my-device' | 'face-to-face'
-  const [micMode, setMicMode] = useState('always');   // 'hold' | 'always'
   const [nameA, setNameA] = useState('Person A');
   const [nameB, setNameB] = useState('Person B');
   const [localLangA, setLocalLangA] = useState(langA);
@@ -665,14 +973,14 @@ function SessionSetupScreen({ langA, langB, onBack, onStart, onLangPick }) {
   const langAInfo = getLang(localLangA);
   const langBInfo = getLang(localLangB);
 
-  const showInfo = mode === 'face-to-face' && micMode === 'hold';
-
+  // The microphone disclosure is gated centrally in App.handleStart, which both
+  // this screen and the home card route through.
   function handleStart() {
     onStart({
-      mode,
-      micMode,
+      mode: 'face-to-face',
+      micMode: 'hold',
       nameA,
-      nameB: mode === 'face-to-face' ? nameB : nameA,
+      nameB,
       langA: localLangA,
       langB: localLangB,
     });
@@ -681,6 +989,9 @@ function SessionSetupScreen({ langA, langB, onBack, onStart, onLangPick }) {
   if (pickingFor !== null) {
     return (
       <LangScreen
+        targetName={pickingFor === 'a' ? nameA : nameB}
+        variant={pickingFor === 'a' ? 'amber' : 'teal'}
+        selected={pickingFor === 'a' ? localLangA : localLangB}
         onBack={() => setPickingFor(null)}
         onSelect={code => {
           if (pickingFor === 'a') setLocalLangA(code);
@@ -692,134 +1003,54 @@ function SessionSetupScreen({ langA, langB, onBack, onStart, onLangPick }) {
   }
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflowY: 'auto' }}>
-      {/* Header */}
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 12,
-        padding: '52px 16px 16px',
-        background: T.surface,
-        borderBottom: `1px solid ${T.border}`,
-      }}>
-        <button onClick={onBack} style={{ padding: 4, color: T.textMuted }}>
-          <Icon name="chevron-left" size={24} />
-        </button>
-        <h1 style={{ fontSize: 18, fontWeight: 700 }}>Session Setup</h1>
+    <div style={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', overflowY: 'auto', background: T.cream }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '60px 22px 18px' }}>
+        <button onClick={onBack} style={{ width: 34, height: 34, borderRadius: 11, display: 'grid', placeItems: 'center', background: 'rgba(62,76,94,.05)', color: T.slate }}><Icon name="chevron-left" size={17} /></button>
+        <h1 style={{ fontFamily: "'Instrument Serif', serif", fontSize: 26, fontWeight: 400, color: T.slate }}>Session setup</h1>
       </div>
 
-      <div style={{ padding: '20px 16px', display: 'flex', flexDirection: 'column', gap: 20 }}>
-        {/* Device Setup */}
-        <Section title="Device Setup">
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-            <ToggleCard
-              active={mode === 'my-device'}
-              title="My Device"
-              subtitle="Single connection"
-              icon="mic"
-              onClick={() => setMode('my-device')}
-            />
-            <ToggleCard
-              active={mode === 'face-to-face'}
-              title="Face-to-Face"
-              subtitle="Split screen"
-              icon="swap"
-              onClick={() => setMode('face-to-face')}
-            />
-          </div>
-        </Section>
-
-        {/* Microphone Control */}
-        <Section title="Microphone Control">
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-            <ToggleCard
-              active={micMode === 'always'}
-              title="Always On"
-              subtitle="Auto-detect"
-              icon="volume"
-              onClick={() => setMicMode('always')}
-            />
-            <ToggleCard
-              active={micMode === 'hold'}
-              title="Hold to Speak"
-              subtitle="Push-to-talk"
-              icon="pause"
-              onClick={() => setMicMode('hold')}
-            />
-          </div>
-        </Section>
-
-        {/* Info tip */}
-        {showInfo && (
-          <div style={{
-            padding: '12px 14px',
-            background: T.tealLight,
-            borderRadius: 12,
-            display: 'flex',
-            gap: 10,
-            animation: 'fade-in 0.2s ease-out',
-          }}>
-            <Icon name="alert" size={18} color={T.teal} style={{ flexShrink: 0, marginTop: 1 }} />
-            <p style={{ fontSize: 13, color: T.teal, lineHeight: 1.5 }}>
-              In face-to-face mode each person holds the button while speaking. Hand the device to the other person to reply.
-            </p>
-          </div>
-        )}
-
-        {/* People */}
-        <Section title="People">
+      <div style={{ padding: '0 20px 28px' }}>
+        <Section title="Who is talking">
           <PersonRow
-            label="Person A"
+            label="Person A · this side"
             name={nameA}
             lang={localLangA}
             onNameChange={setNameA}
             onLangTap={() => setPickingFor('a')}
+            variant="amber"
           />
-          {mode === 'face-to-face' && (
-            <PersonRow
-              label="Person B"
-              name={nameB}
-              lang={localLangB}
-              onNameChange={setNameB}
-              onLangTap={() => setPickingFor('b')}
-              style={{ marginTop: 10 }}
-            />
-          )}
-          {mode === 'my-device' && (
-            <div style={{ marginTop: 10 }}>
-              <PersonRow
-                label="Person B"
-                name={nameB}
-                lang={localLangB}
-                onNameChange={setNameB}
-                onLangTap={() => setPickingFor('b')}
-                dimmed
-              />
-            </div>
-          )}
+          <PersonRow
+            label="Person B · far side"
+            name={nameB}
+            lang={localLangB}
+            onNameChange={setNameB}
+            onLangTap={() => setPickingFor('b')}
+            variant="teal"
+            style={{ marginTop: 8 }}
+          />
         </Section>
 
-        {/* Start button */}
+        <div style={{ fontSize: 10.5, letterSpacing: '.16em', textTransform: 'uppercase', color: 'rgba(62,76,94,.45)', fontWeight: 700, margin: '22px 0 9px' }}>Microphone</div>
+        <div style={{ borderRadius: 18, padding: 15, background: T.slate, border: `1px solid ${T.slate}`, color: T.cream }}>
+          <Icon name="mic" size={19} color={T.cream} />
+          <div style={{ fontSize: 14.5, fontWeight: 600, marginTop: 8 }}>Hold to speak</div>
+        </div>
+
+        <div style={{ marginTop: 22, background: T.slate, borderRadius: 22, padding: '18px 18px 20px', color: T.cream }}>
+          <div style={{ fontSize: 10.5, letterSpacing: '.16em', textTransform: 'uppercase', color: 'rgba(251,243,235,.5)', fontWeight: 700 }}>How it works</div>
+          <div style={{ fontSize: 13.5, lineHeight: 1.55, color: 'rgba(251,243,235,.78)', marginTop: 10 }}>Lay the phone flat between you. Hold your half to talk; release and the other half hears it translated.</div>
+        </div>
+
         <button
           onClick={handleStart}
           style={{
-            width: '100%',
-            padding: '16px',
-            background: T.teal,
-            color: '#fff',
-            border: 'none',
-            borderRadius: 16,
-            fontSize: 16,
-            fontWeight: 600,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            gap: 8,
+            width: '100%', height: 62, marginTop: 18, background: T.amber, color: '#fff', border: 'none', borderRadius: 20,
+            fontSize: 17, fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
+            boxShadow: '0 12px 24px -8px rgba(244,124,54,.55)',
           }}
         >
-          <Icon name="mic" size={20} color="#fff" />
-          Start Session
+          Start session
         </button>
-
-        <div style={{ height: 24 }} />
       </div>
     </div>
   );
@@ -828,7 +1059,7 @@ function SessionSetupScreen({ langA, langB, onBack, onStart, onLangPick }) {
 function Section({ title, children }) {
   return (
     <div>
-      <h3 style={{ fontSize: 12, fontWeight: 700, color: T.textMuted, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 10 }}>
+      <h3 style={{ fontSize: 10.5, fontWeight: 700, color: 'rgba(62,76,94,.45)', textTransform: 'uppercase', letterSpacing: '.16em', margin: '6px 0 9px' }}>
         {title}
       </h3>
       {children}
@@ -860,59 +1091,34 @@ function ToggleCard({ active, title, subtitle, icon, onClick }) {
   );
 }
 
-function PersonRow({ label, name, lang, onNameChange, onLangTap, dimmed = false, style = {} }) {
+function PersonRow({ label, name, lang, onNameChange, onLangTap, dimmed = false, variant = 'amber', style = {} }) {
   const langInfo = getLang(lang);
+  const accent = variant === 'teal' ? T.teal : T.amber;
+  const ink = variant === 'teal' ? '#2E8E86' : T.amber;
   return (
     <div style={{
-      display: 'flex',
-      alignItems: 'center',
-      gap: 10,
-      padding: '12px 14px',
-      background: T.surface,
-      border: `1px solid ${T.border}`,
-      borderRadius: 12,
+      display: 'flex', alignItems: 'center', gap: 12, padding: '13px 15px', background: '#fff',
+      border: `1px solid ${accent}38`, borderRadius: 18,
       opacity: dimmed ? 0.55 : 1,
       ...style,
     }}>
-      <div style={{ fontSize: 11, fontWeight: 700, color: T.textFaint, width: 56, flexShrink: 0 }}>
-        {label}
+      <div style={{ width: 8, height: 34, borderRadius: 99, background: accent, flexShrink: 0 }} />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 9.5, letterSpacing: '.14em', textTransform: 'uppercase', fontWeight: 700, color: ink }}>{label}</div>
+        <input value={name} onChange={e => onNameChange(e.target.value)} disabled={dimmed} style={{ width: '100%', marginTop: 3, padding: 0, fontSize: 16, fontWeight: 600, color: T.slate, background: 'none', border: 'none', outline: 'none', fontFamily: "'Space Grotesk', sans-serif" }} />
       </div>
-      <input
-        value={name}
-        onChange={e => onNameChange(e.target.value)}
-        disabled={dimmed}
-        style={{
-          flex: 1,
-          fontSize: 14,
-          fontWeight: 500,
-          color: T.textPrimary,
-          background: 'none',
-          border: 'none',
-          outline: 'none',
-          fontFamily: "'DM Sans', sans-serif",
-        }}
-      />
       <button
         onClick={onLangTap}
         disabled={dimmed}
         style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 4,
-          padding: '4px 10px',
-          background: T.surface2,
-          border: `1px solid ${T.border}`,
-          borderRadius: 99,
+          display: 'flex', alignItems: 'center', gap: 4, padding: '8px 12px', background: accent + '14', border: 'none', borderRadius: 12,
           fontSize: 13,
-          fontWeight: 500,
-          color: T.textPrimary,
+          fontWeight: 600, color: ink,
           cursor: 'pointer',
           flexShrink: 0,
         }}
       >
-        <span>{langInfo.flag}</span>
         <span>{langInfo.label}</span>
-        <Icon name="chevron" size={12} color={T.textFaint} />
       </button>
     </div>
   );
@@ -923,25 +1129,57 @@ function PersonRow({ label, name, lang, onNameChange, onLangTap, dimmed = false,
 // Used in FaceToFace and Auto live screens
 // ─────────────────────────────────────────────
 
-function PersonNameTag({ langInfo, name, color, pressing }) {
-  const textColor = pressing ? '#fff' : T.textPrimary;
-  const subColor = pressing ? 'rgba(255,255,255,0.75)' : T.textMuted;
+function PersonNameTag({ langInfo, name, color, pressing, tint, ink }) {
+  const textColor = T.cream;
+  const subColor = T.creamMute;
+  const tileBg = tint || (color + '29');
+  const tileInk = ink || color;
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
       <div style={{
-        width: 28, height: 28,
-        background: pressing ? 'rgba(255,255,255,0.22)' : color + '22',
-        borderRadius: 8,
+        width: 30, height: 30, background: tileBg, color: tileInk, borderRadius: 10,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
         flexShrink: 0,
         transition: 'background 0.2s',
       }}>
-        <span style={{ fontSize: 16 }}>{langInfo.flag}</span>
+        <span style={{ fontSize: 11, fontWeight: 700 }}>{langInfo.code.toUpperCase()}</span>
       </div>
       <div>
         <p style={{ fontSize: 14, fontWeight: 600, color: textColor, transition: 'color 0.2s' }}>{name}</p>
-        <p style={{ fontSize: 12, color: subColor, transition: 'color 0.2s' }}>{langInfo.label}</p>
+        <p style={{ fontSize: 11, color: subColor, transition: 'color 0.2s' }}>{langInfo.label}</p>
       </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+// LiveTurn — one bubble inside a live half-screen.
+// `mine` turns are the reader's own words; the rest are the
+// translation they are meant to read, with the source underneath.
+// ─────────────────────────────────────────────
+
+function LiveTurn({ turn, mine, side }) {
+  const tagColor = mine ? T.creamFaint : (side === 'A' ? T.amberSoft : T.tealPale);
+  const bg = mine ? 'rgba(251,243,235,.08)' : (side === 'A' ? 'rgba(244,124,54,.9)' : 'rgba(88,191,180,.9)');
+  const fg = mine ? 'rgba(251,243,235,.82)' : '#fff';
+  const text = mine ? turn.original : turn.translated;
+  const sub = mine ? null : turn.original;
+  const zhFont = { fontFamily: "'Noto Sans SC', 'Space Grotesk', sans-serif" };
+  const isZh = v => typeof v === 'string' && /[一-鿿]/.test(v);
+
+  return (
+    <div style={{ maxWidth: '88%', alignSelf: mine ? 'flex-end' : 'flex-start', animation: 'fade-in-up .3s ease-out both' }}>
+      <div style={{ fontSize: 9.5, letterSpacing: '.12em', textTransform: 'uppercase', fontWeight: 700, color: tagColor, marginBottom: 4 }}>
+        {mine ? 'You said' : 'Translated'}
+      </div>
+      <div style={{ background: bg, color: fg, borderRadius: 16, padding: '11px 13px', fontSize: 15.5, lineHeight: 1.4, ...(isZh(text) ? zhFont : {}) }}>
+        {text}
+      </div>
+      {sub && (
+        <div style={{ fontSize: 11.5, color: T.creamFaint, marginTop: 5, fontStyle: 'italic', ...(isZh(sub) ? zhFont : {}) }}>
+          {sub}
+        </div>
+      )}
     </div>
   );
 }
@@ -959,6 +1197,8 @@ function FaceToFaceLiveScreen({ config, onStop, onError }) {
   const [phase, setPhase] = useState('connecting'); // connecting | connected | error
   const [pressA, setPressA] = useState(false);
   const [pressB, setPressB] = useState(false);
+  const [turnStateA, setTurnStateA] = useState('ready'); // ready | recording | translating
+  const [turnStateB, setTurnStateB] = useState('ready'); // ready | recording | translating
   const [elapsed, setElapsed] = useState(0);
   const [turnsA, setTurnsA] = useState([]); // spoken by A
   const [turnsB, setTurnsB] = useState([]); // spoken by B
@@ -974,11 +1214,19 @@ function FaceToFaceLiveScreen({ config, onStop, onError }) {
   const pcBRef = useRef(null);
   const pcAIdRef = useRef(null);
   const pcBIdRef = useRef(null);
+  const pointerARef = useRef(null);
+  const pointerBRef = useRef(null);
+  const gateQueueARef = useRef(Promise.resolve());
+  const gateQueueBRef = useRef(Promise.resolve());
   const streamRef = useRef(null);
   const timerRef = useRef(null);
   const pollRef = useRef(null);
   const sessionIdRef = useRef(null);
+  const transcriptRef = useRef([]);
+  const elapsedRef = useRef(0);
   const mountedRef = useRef(true);
+  const turnTimeoutARef = useRef(null);
+  const turnTimeoutBRef = useRef(null);
 
   // Setup WebRTC on mount
   useEffect(() => {
@@ -1003,16 +1251,17 @@ function FaceToFaceLiveScreen({ config, onStop, onError }) {
       const iceServers = await fetchIceServers();
 
       // 3. Create session
-      const sessionRes = await fetch('/api/translation/session', {
+      const sessionRes = await api('/api/translation/session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ caller_name: nameA, caller_language: langA, topic: 'Translation Session' }),
+        body: JSON.stringify({ caller_name: nameA, caller_language: langA, topic: 'Translation Session', client_id: clientId() }),
       });
       if (!sessionRes.ok) throw new Error('Session create failed');
       const { session_id } = await sessionRes.json();
       if (!mountedRef.current) return;
       sessionIdRef.current = session_id;
       setSessionId(session_id);
+      void persistSession('active');
 
       // 4. Create peer connections
       const pcCfg = { iceServers, iceTransportPolicy: 'relay' };
@@ -1021,11 +1270,12 @@ function FaceToFaceLiveScreen({ config, onStop, onError }) {
       pcARef.current = pcA;
       pcBRef.current = pcB;
 
-      // 5. Clone mic tracks (both start disabled)
-      const trackA = stream.getTracks()[0].clone();
-      const trackB = stream.getTracks()[0].clone();
-      trackA.enabled = false;
-      trackB.enabled = false;
+      // 5. Clone the microphone directly for each leg. Keep both clones live while
+      // negotiating so mobile Safari establishes RTP for them; starting negotiation
+      // with disabled tracks can leave them permanently silent when enabled later.
+      const sourceTrack = stream.getAudioTracks()[0];
+      const trackA = sourceTrack.clone();
+      const trackB = sourceTrack.clone();
       trackARef.current = trackA;
       trackBRef.current = trackB;
 
@@ -1061,7 +1311,7 @@ function FaceToFaceLiveScreen({ config, onStop, onError }) {
       if (!mountedRef.current) return;
 
       // 9. Connect A
-      const ansA = await fetch('/api/translation/offer', {
+      const ansA = await api('/api/translation/offer', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session_id, language: langA, name: nameA, sdp: offerA.sdp, type: offerA.type }),
@@ -1074,7 +1324,7 @@ function FaceToFaceLiveScreen({ config, onStop, onError }) {
       if (!mountedRef.current) return;
 
       // 10. Connect B
-      const ansB = await fetch('/api/translation/offer', {
+      const ansB = await api('/api/translation/offer', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session_id, language: langB, name: nameB, sdp: offerB.sdp, type: offerB.type }),
@@ -1084,14 +1334,27 @@ function FaceToFaceLiveScreen({ config, onStop, onError }) {
       pcBIdRef.current = ansBData.pc_id;
       await pcB.setRemoteDescription({ sdp: ansBData.sdp, type: ansBData.type });
 
+      // RTP is established; push-to-talk owns the tracks from this point onward.
+      trackA.enabled = false;
+      trackB.enabled = false;
+
     } catch (err) {
-      console.error('FaceToFace setup error:', err);
+      console.error(
+        'FaceToFace setup error:',
+        err?.name || 'Error',
+        err?.message || String(err),
+        err?.stack || ''
+      );
       if (!mountedRef.current) return;
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
         onError('mic');
       } else {
+        // Previously this only set local state, leaving a dead panel with no way
+        // out but "End" — the failure a reviewer on a flaky connection hits.
+        // ErrorScreen already handles this case and offers a retry.
         setPhase('error');
         setConnState('Connection failed');
+        onError('network');
       }
     }
   }
@@ -1099,8 +1362,38 @@ function FaceToFaceLiveScreen({ config, onStop, onError }) {
   function startTimer() {
     if (timerRef.current) return;
     timerRef.current = setInterval(() => {
-      if (mountedRef.current) setElapsed(e => e + 1);
+      if (mountedRef.current) setElapsed(e => {
+        elapsedRef.current = e + 1;
+        return elapsedRef.current;
+      });
     }, 1000);
+  }
+
+  function clearTurnTimeout(side) {
+    const timeoutRef = side === 'A' ? turnTimeoutARef : turnTimeoutBRef;
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current);
+      timeoutRef.current = null;
+    }
+  }
+
+  function markTurnReady(side) {
+    clearTurnTimeout(side);
+    if (!mountedRef.current) return;
+    if (side === 'A') setTurnStateA('ready');
+    else setTurnStateB('ready');
+  }
+
+  function markTurnTranslating(side) {
+    clearTurnTimeout(side);
+    if (side === 'A') setTurnStateA('translating');
+    else setTurnStateB('translating');
+
+    // If an upstream translation fails without producing a turn event, don't
+    // permanently strand this speaker. The backend uses the same stale-turn
+    // recovery window, so the next press starts a fresh independent utterance.
+    const timeoutRef = side === 'A' ? turnTimeoutARef : turnTimeoutBRef;
+    timeoutRef.current = setTimeout(() => markTurnReady(side), 36000);
   }
 
   function startPoll() {
@@ -1108,20 +1401,36 @@ function FaceToFaceLiveScreen({ config, onStop, onError }) {
     pollRef.current = setInterval(async () => {
       if (!mountedRef.current || !sessionIdRef.current) return;
       try {
-        const r = await fetch(`/api/translation/poll?session_id=${sessionIdRef.current}`);
+        const r = await api(`/api/translation/poll?session_id=${sessionIdRef.current}`);
         if (!r.ok || !mountedRef.current) return;
         const d = await r.json();
         if (d.events && d.events.length > 0) {
           const turnEvents = d.events.filter(e => e.type === 'turn');
           if (turnEvents.length > 0) {
             turnEvents.forEach(ev => {
-              const isA = ev.original_lang === langA;
-              if (isA) setTurnsB(prev => [...prev, ev]);
-              else setTurnsA(prev => [...prev, ev]);
+              transcriptRef.current = [...transcriptRef.current, ev];
+              const isA = ev.speaker
+                ? ev.speaker === pcAIdRef.current
+                : ev.original_lang === langA;
+              if (isA) {
+                setTurnsB(prev => [...prev, ev]);
+                markTurnReady('A');
+              } else {
+                setTurnsA(prev => [...prev, ev]);
+                markTurnReady('B');
+              }
             });
+            void persistSession('active');
           }
+          // A turn the server gave up on (agent never answered): release the
+          // speaker's "Translating" state immediately instead of waiting for
+          // the 36s client fallback.
+          d.events.filter(e => e.type === 'turn_failed').forEach(ev => {
+            markTurnReady(ev.speaker === pcAIdRef.current ? 'A' : 'B');
+          });
         }
         if (d.closed) {
+          await persistSession('ended');
           cleanup();
           if (mountedRef.current) onStop();
         }
@@ -1129,9 +1438,29 @@ function FaceToFaceLiveScreen({ config, onStop, onError }) {
     }, 1000);
   }
 
+  async function persistSession(status) {
+    if (!sessionIdRef.current) return;
+    await saveNativeSession({
+      sessionId: sessionIdRef.current,
+      callerName: nameA,
+      topic: 'Translation Session',
+      languageA: langA,
+      languageB: langB,
+      participantA: nameA,
+      participantB: nameB,
+      status,
+      durationSeconds: elapsedRef.current,
+      transcript: transcriptRef.current,
+    });
+  }
+
   function cleanup() {
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+    pointerARef.current = null;
+    pointerBRef.current = null;
+    clearTurnTimeout('A');
+    clearTurnTimeout('B');
     if (pcAIdRef.current) { fireAndForgetHangup(pcAIdRef.current); pcAIdRef.current = null; }
     if (pcBIdRef.current) { fireAndForgetHangup(pcBIdRef.current); pcBIdRef.current = null; }
     if (audioRefA.current) audioRefA.current.srcObject = null;
@@ -1144,35 +1473,129 @@ function FaceToFaceLiveScreen({ config, onStop, onError }) {
     if (mountedRef.current) {
       setPressA(false);
       setPressB(false);
+      setTurnStateA('ready');
+      setTurnStateB('ready');
     }
   }
 
-  // PTT handlers
-  const pressBStart = useCallback(() => {
-    if (trackBRef.current) trackBRef.current.enabled = true;
-    if (trackARef.current) trackARef.current.enabled = false;
-    setPressB(true);
+  // PTT handlers — the mic track is only unmuted once the server-side gate for
+  // this participant has actually opened, so a turn never starts mid-flight.
+  const queueGate = useCallback((queueRef, pcId, action) => {
+    const operation = queueRef.current
+      .catch(() => {})
+      .then(() => setTranslationPttGate(pcId, action));
+    queueRef.current = operation;
+    return operation;
   }, []);
-  const pressBEnd = useCallback(() => {
-    if (trackBRef.current) trackBRef.current.enabled = false;
-    setPressB(false);
-  }, []);
-  const pressAStart = useCallback(() => {
-    if (trackARef.current) trackARef.current.enabled = true;
-    if (trackBRef.current) trackBRef.current.enabled = false;
-    setPressA(true);
-  }, []);
-  const pressAEnd = useCallback(() => {
+
+  const pressBStart = useCallback((event) => {
+    event.preventDefault();
+    if (turnStateB !== 'ready' || pressA) return;
+    const pointerId = event.pointerId;
+    pointerBRef.current = pointerId;
+    try { event.currentTarget.setPointerCapture(event.pointerId); } catch (_) {}
     if (trackARef.current) trackARef.current.enabled = false;
     setPressA(false);
-  }, []);
+    setPressB(true);
+    setTurnStateB('recording');
+    void queueGate(gateQueueBRef, pcBIdRef.current, 'hold')
+      .then(() => {
+        if (pointerBRef.current === pointerId && trackBRef.current) {
+          trackBRef.current.enabled = true;
+        }
+      })
+      .catch(error => {
+        console.error('Person B PTT gate failed:', error);
+        if (pointerBRef.current === pointerId) {
+          pointerBRef.current = null;
+          setPressB(false);
+          setTurnStateB('ready');
+        }
+      });
+  }, [queueGate, turnStateB, pressA]);
+  const pressBEnd = useCallback((event) => {
+    const activePointer = pointerBRef.current;
+    if (activePointer == null) return;
+    if (event?.pointerId != null && event.pointerId !== activePointer) return;
+    if (trackBRef.current) trackBRef.current.enabled = false;
+    if (event?.currentTarget) {
+      try { event.currentTarget.releasePointerCapture(activePointer); } catch (_) {}
+    }
+    pointerBRef.current = null;
+    setPressB(false);
+    markTurnTranslating('B');
+    void queueGate(gateQueueBRef, pcBIdRef.current, 'release')
+      .then(result => {
+        if (!result?.flushed_bytes) markTurnReady('B');
+      })
+      .catch(error => {
+        console.error('Person B PTT release failed:', error);
+        markTurnReady('B');
+      });
+  }, [queueGate]);
+  const pressAStart = useCallback((event) => {
+    event.preventDefault();
+    if (turnStateA !== 'ready' || pressB) return;
+    const pointerId = event.pointerId;
+    pointerARef.current = pointerId;
+    try { event.currentTarget.setPointerCapture(event.pointerId); } catch (_) {}
+    if (trackBRef.current) trackBRef.current.enabled = false;
+    setPressB(false);
+    setPressA(true);
+    setTurnStateA('recording');
+    void queueGate(gateQueueARef, pcAIdRef.current, 'hold')
+      .then(() => {
+        if (pointerARef.current === pointerId && trackARef.current) {
+          trackARef.current.enabled = true;
+        }
+      })
+      .catch(error => {
+        console.error('Person A PTT gate failed:', error);
+        if (pointerARef.current === pointerId) {
+          pointerARef.current = null;
+          setPressA(false);
+          setTurnStateA('ready');
+        }
+      });
+  }, [queueGate, turnStateA, pressB]);
+  const pressAEnd = useCallback((event) => {
+    const activePointer = pointerARef.current;
+    if (activePointer == null) return;
+    if (event?.pointerId != null && event.pointerId !== activePointer) return;
+    if (trackARef.current) trackARef.current.enabled = false;
+    if (event?.currentTarget) {
+      try { event.currentTarget.releasePointerCapture(activePointer); } catch (_) {}
+    }
+    pointerARef.current = null;
+    setPressA(false);
+    markTurnTranslating('A');
+    void queueGate(gateQueueARef, pcAIdRef.current, 'release')
+      .then(result => {
+        if (!result?.flushed_bytes) markTurnReady('A');
+      })
+      .catch(error => {
+        console.error('Person A PTT release failed:', error);
+        markTurnReady('A');
+      });
+  }, [queueGate]);
 
   const lastTurnA = turnsA[turnsA.length - 1];
   const lastTurnB = turnsB[turnsB.length - 1];
-  const elapsedStr = formatDuration(elapsed);
+  const elapsedStr = formatClock(elapsed);
+
+  // Chronological view of the same events the poll already banked. Read-only —
+  // turnsA/turnsB drive the re-render, this ref only supplies stable ordering.
+  const allTurns = transcriptRef.current;
+  const spokenByA = ev => ev.original_lang === langA;
+  const hasSpokenA = allTurns.some(ev => ev.speaker
+    ? ev.speaker === pcAIdRef.current
+    : spokenByA(ev));
+  const hasSpokenB = allTurns.some(ev => ev.speaker
+    ? ev.speaker === pcBIdRef.current
+    : !spokenByA(ev));
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.bg, overflow: 'hidden' }}>
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.navy, overflow: 'hidden', userSelect: 'none', WebkitUserSelect: 'none', WebkitTouchCallout: 'none' }}>
       {/* Hidden audio elements */}
       <audio ref={audioRefA} autoPlay playsInline style={{ display: 'none' }} />
       <audio ref={audioRefB} autoPlay playsInline style={{ display: 'none' }} />
@@ -1180,181 +1603,167 @@ function FaceToFaceLiveScreen({ config, onStop, onError }) {
       {/* Person B panel — top half, rotated 180° */}
       <div style={{
         flex: 1,
+        minHeight: 0,
         transform: 'rotate(180deg)',
-        background: pressB ? T.teal : T.bg,
+        background: pressB ? T.panelB : T.panelIdle,
         display: 'flex',
         flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        padding: '24px 24px 20px',
-        transition: 'background 0.2s',
+        transition: 'background 0.3s',
         position: 'relative',
       }}>
         {/* Person info */}
-        <div style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 10 }}>
-          <PersonNameTag langInfo={langBInfo} name={nameB} color={T.teal} pressing={pressB} />
-          {pressB && (
-            <div style={{ marginLeft: 'auto' }}>
-              <Waveform color={pressB ? '#fff' : T.teal} active={true} height={24} />
-            </div>
-          )}
+        <div style={{ padding: '14px 18px 6px', display: 'flex', alignItems: 'center', gap: 10 }}>
+          <PersonNameTag langInfo={langBInfo} name={nameB} tint={T.tileB} ink={T.tealSoft} pressing={pressB} />
+          <div style={{ marginLeft: 'auto', fontSize: 10.5, letterSpacing: '.1em', textTransform: 'uppercase', fontWeight: 700, color: pressB ? T.tealPale : T.creamFaint }}>{pressB ? 'Recording' : turnStateB === 'translating' ? 'Translating...' : pressA ? `Listening to ${nameA}` : phase === 'connected' ? hasSpokenB ? 'Ready - speak again' : 'Ready' : connState}</div>
         </div>
 
-        {/* Last phrase */}
-        <div style={{ width: '100%' }}>
-          {lastTurnB && (
-            <ConvTurn turn={lastTurnB} colorHex={T.teal} />
-          )}
+        {/* Transcript — newest nearest the mic */}
+        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column-reverse', gap: 10, padding: '6px 18px 4px' }}>
+          {allTurns.slice().reverse().map((t, i) => (
+            <LiveTurn key={allTurns.length - 1 - i} turn={t} side="B" mine={!spokenByA(t)} />
+          ))}
           {phase === 'connecting' && !lastTurnB && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <TypingDots color={pressB ? 'rgba(255,255,255,0.5)' : T.textFaint} />
-              <span style={{ fontSize: 13, color: pressB ? 'rgba(255,255,255,0.5)' : T.textFaint }}>{connState}</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, alignSelf: 'flex-start' }}>
+              <TypingDots color={T.creamFaint} />
+              <span style={{ fontSize: 13, color: T.creamMute }}>{connState}</span>
             </div>
           )}
         </div>
 
-        {/* Hold to speak button */}
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10 }}>
-          <div style={{ position: 'relative', width: 68, height: 68, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            {pressB && <PulseRing color={pressB ? 'rgba(255,255,255,0.6)' : T.teal} size={68} />}
+        {/* Hold to speak */}
+        <div style={{ height: 150, flex: 'none', display: 'grid', placeItems: 'center' }}>
+          <div style={{ position: 'relative', width: 104, height: 104, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            {pressB && <PulseRing color={T.teal} size={104} />}
             <button
+              data-ptt="true"
               onPointerDown={pressBStart}
               onPointerUp={pressBEnd}
-              onPointerLeave={pressBEnd}
-              disabled={phase !== 'connected'}
+              onPointerCancel={pressBEnd}
+              onContextMenu={e => e.preventDefault()}
+              disabled={phase !== 'connected' || turnStateB === 'translating' || pressA}
+              aria-label={turnStateB === 'translating' ? `${nameB} translation in progress` : `${nameB} hold to speak`}
               style={{
-                width: 68, height: 68,
+                width: 104, height: 104,
                 borderRadius: '50%',
-                background: pressB ? 'rgba(255,255,255,0.25)' : T.teal + '18',
-                border: `2px solid ${pressB ? 'rgba(255,255,255,0.6)' : T.teal}`,
+                background: pressB ? T.teal : T.inkB14,
+                border: `2px solid ${pressB ? '#CDEDE8' : 'rgba(127,211,201,.4)'}`,
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                transition: 'all 0.15s',
-                cursor: phase === 'connected' ? 'pointer' : 'default',
+                transition: 'transform .12s, background .2s, border-color .2s',
+                transform: pressB ? 'scale(1.12)' : 'scale(1)',
+                cursor: phase === 'connected' && turnStateB === 'ready' && !pressA ? 'pointer' : 'default',
+                opacity: turnStateB === 'translating' ? 0.58 : 1,
                 touchAction: 'none',
+                WebkitTouchCallout: 'none',
+                WebkitUserSelect: 'none',
+                userSelect: 'none',
                 position: 'relative',
                 zIndex: 1,
               }}
             >
-              <Icon name="mic" size={26} color={pressB ? '#fff' : T.teal} />
+              <Icon name="mic" size={30} color={pressB ? '#fff' : T.tealPale} />
             </button>
           </div>
-          <span style={{ fontSize: 11, color: pressB ? 'rgba(255,255,255,0.6)' : T.textFaint, fontWeight: 500 }}>
-            {phase === 'connected' ? 'Hold to speak' : connState}
-          </span>
         </div>
       </div>
 
       {/* Center divider — 44px, white bg */}
       <div style={{
-        height: 44,
-        background: '#fff',
+        height: 56, background: T.navy,
         display: 'flex',
         alignItems: 'center',
-        justifyContent: 'space-between',
-        padding: '0 20px',
+        padding: '0 16px',
+        gap: 12,
         flexShrink: 0,
-        borderTop: `1px solid ${T.border}`,
-        borderBottom: `1px solid ${T.border}`,
+        borderTop: '1px solid rgba(251,243,235,.1)', borderBottom: '1px solid rgba(251,243,235,.1)',
       }}>
-        {/* Flags + divider */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <span style={{ fontSize: 15 }}>{langAInfo.flag}</span>
-          <span style={{ fontSize: 12, color: T.textFaint }}>↕</span>
-          <span style={{ fontSize: 15 }}>{langBInfo.flag}</span>
+        {/* Language pair */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+          <span style={{ fontSize: 11, fontWeight: 700, color: T.tealSoft }}>{langBInfo.code.toUpperCase()}</span>
+          <Icon name="swap" size={15} color="rgba(251,243,235,.35)" />
+          <span style={{ fontSize: 11, fontWeight: 700, color: T.amberSoft }}>{langAInfo.code.toUpperCase()}</span>
         </div>
 
-        {/* Elapsed timer */}
-        {phase === 'connected' && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-            <div style={{ width: 6, height: 6, borderRadius: '50%', background: T.success, animation: 'dot-blink 2s infinite' }} />
-            <span style={{ fontSize: 12, color: T.textMuted }}>{elapsedStr}</span>
-          </div>
-        )}
-        {phase === 'connecting' && (
-          <span style={{ fontSize: 12, color: T.textFaint }}>Connecting…</span>
-        )}
-        {phase === 'error' && (
-          <span style={{ fontSize: 12, color: T.error }}>Disconnected</span>
-        )}
+        {/* Elapsed time — the only thing the centre carries */}
+        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+          <div style={{ width: 6, height: 6, borderRadius: '50%', background: T.gold, animation: 'dot-blink 1.6s ease-in-out infinite' }} />
+          <span style={{ fontSize: 12.5, color: 'rgba(251,243,235,.75)', fontVariantNumeric: 'tabular-nums', fontWeight: 500 }}>{elapsedStr}</span>
+        </div>
 
-        {/* Stop button — 28px red */}
         <button
-          onClick={() => { cleanup(); onStop(); }}
+          onClick={async () => { await persistSession('ended'); cleanup(); onStop(); }}
           style={{
-            width: 28, height: 28,
-            borderRadius: '50%',
-            background: T.error,
+            height: 34, padding: '0 14px', borderRadius: 12, background: 'rgba(88,191,180,.15)', color: T.tealSoft,
             border: 'none',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7,
           }}
         >
-          <Icon name="stop" size={14} color="#fff" />
+          <span style={{ width: 9, height: 9, background: 'currentColor', borderRadius: 2, display: 'block' }} />
+          <span style={{ fontSize: 12.5, fontWeight: 600 }}>End</span>
         </button>
       </div>
 
       {/* Person A panel — bottom half */}
       <div style={{
         flex: 1,
-        background: pressA ? T.amber : T.bg,
+        minHeight: 0,
+        background: pressA ? T.panelA : T.panelIdle,
         display: 'flex',
         flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        padding: '20px 24px 32px',
-        transition: 'background 0.2s',
+        transition: 'background 0.3s',
         position: 'relative',
       }}>
         {/* Person info */}
-        <div style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 10 }}>
-          <PersonNameTag langInfo={langAInfo} name={nameA} color={T.amber} pressing={pressA} />
-          {pressA && (
-            <div style={{ marginLeft: 'auto' }}>
-              <Waveform color={pressA ? '#fff' : T.amber} active={true} height={24} />
-            </div>
-          )}
+        <div style={{ padding: '14px 18px 6px', display: 'flex', alignItems: 'center', gap: 10 }}>
+          <PersonNameTag langInfo={langAInfo} name={nameA} tint={T.tileA} ink={T.amberSoft} pressing={pressA} />
+          <div style={{ marginLeft: 'auto', fontSize: 10.5, letterSpacing: '.1em', textTransform: 'uppercase', fontWeight: 700, color: pressA ? T.amberSoft : T.creamFaint }}>{pressA ? 'Recording' : turnStateA === 'translating' ? 'Translating...' : pressB ? `Listening to ${nameB}` : phase === 'connected' ? hasSpokenA ? 'Ready - speak again' : 'Ready' : connState}</div>
         </div>
 
-        {/* Last phrase */}
-        <div style={{ width: '100%' }}>
-          {lastTurnA && (
-            <ConvTurn turn={lastTurnA} colorHex={T.amber} />
-          )}
+        {/* Transcript — newest nearest the mic */}
+        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column-reverse', gap: 10, padding: '6px 18px 4px' }}>
+          {allTurns.slice().reverse().map((t, i) => (
+            <LiveTurn key={allTurns.length - 1 - i} turn={t} side="A" mine={spokenByA(t)} />
+          ))}
           {phase === 'connecting' && !lastTurnA && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <TypingDots color={pressA ? 'rgba(255,255,255,0.5)' : T.textFaint} />
-              <span style={{ fontSize: 13, color: pressA ? 'rgba(255,255,255,0.5)' : T.textFaint }}>{connState}</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, alignSelf: 'flex-start' }}>
+              <TypingDots color={T.creamFaint} />
+              <span style={{ fontSize: 13, color: T.creamMute }}>{connState}</span>
             </div>
           )}
         </div>
 
-        {/* Hold to speak button */}
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10 }}>
-          <div style={{ position: 'relative', width: 68, height: 68, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            {pressA && <PulseRing color={pressA ? 'rgba(255,255,255,0.6)' : T.amber} size={68} />}
+        {/* Hold to speak */}
+        <div style={{ height: 150, flex: 'none', display: 'grid', placeItems: 'center', paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}>
+          <div style={{ position: 'relative', width: 104, height: 104, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            {pressA && <PulseRing color={T.amber} size={104} />}
             <button
+              data-ptt="true"
               onPointerDown={pressAStart}
               onPointerUp={pressAEnd}
-              onPointerLeave={pressAEnd}
-              disabled={phase !== 'connected'}
+              onPointerCancel={pressAEnd}
+              onContextMenu={e => e.preventDefault()}
+              disabled={phase !== 'connected' || turnStateA === 'translating' || pressB}
+              aria-label={turnStateA === 'translating' ? `${nameA} translation in progress` : `${nameA} hold to speak`}
               style={{
-                width: 68, height: 68,
+                width: 104, height: 104,
                 borderRadius: '50%',
-                background: pressA ? 'rgba(255,255,255,0.25)' : T.amber + '18',
-                border: `2px solid ${pressA ? 'rgba(255,255,255,0.6)' : T.amber}`,
+                background: pressA ? T.amber : T.inkA14,
+                border: `2px solid ${pressA ? T.amberSoft : 'rgba(251,176,122,.4)'}`,
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                transition: 'all 0.15s',
-                cursor: phase === 'connected' ? 'pointer' : 'default',
+                transition: 'transform .12s, background .2s, border-color .2s',
+                transform: pressA ? 'scale(1.12)' : 'scale(1)',
+                cursor: phase === 'connected' && turnStateA === 'ready' && !pressB ? 'pointer' : 'default',
+                opacity: turnStateA === 'translating' ? 0.58 : 1,
                 touchAction: 'none',
+                WebkitTouchCallout: 'none',
+                WebkitUserSelect: 'none',
+                userSelect: 'none',
                 position: 'relative',
                 zIndex: 1,
               }}
             >
-              <Icon name="mic" size={26} color={pressA ? '#fff' : T.amber} />
+              <Icon name="mic" size={30} color={pressA ? '#fff' : T.amberSoft} />
             </button>
           </div>
-          <span style={{ fontSize: 11, color: pressA ? 'rgba(255,255,255,0.6)' : T.textFaint, fontWeight: 500 }}>
-            {phase === 'connected' ? 'Hold to speak' : connState}
-          </span>
         </div>
       </div>
     </div>
@@ -1427,10 +1836,10 @@ function AutoLiveScreen({ config, onStop, onError }) {
 
       const iceServers = await fetchIceServers();
 
-      const sessionRes = await fetch('/api/translation/session', {
+      const sessionRes = await api('/api/translation/session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ caller_name: nameA, caller_language: langA, topic: 'Auto Translation' }),
+        body: JSON.stringify({ caller_name: nameA, caller_language: langA, topic: 'Auto Translation', client_id: clientId() }),
       });
       if (!sessionRes.ok) throw new Error('Session create failed');
       const { session_id } = await sessionRes.json();
@@ -1461,7 +1870,7 @@ function AutoLiveScreen({ config, onStop, onError }) {
       const offer = await createOffer(pc, stream);
       if (!mountedRef.current) return;
 
-      const ans = await fetch('/api/translation/auto-offer', {
+      const ans = await api('/api/translation/auto-offer', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session_id, lang_a: langA, lang_b: langB, sdp: offer.sdp, type: offer.type }),
@@ -1477,8 +1886,12 @@ function AutoLiveScreen({ config, onStop, onError }) {
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
         onError('mic');
       } else {
+        // Previously this only set local state, leaving a dead panel with no way
+        // out but "End" — the failure a reviewer on a flaky connection hits.
+        // ErrorScreen already handles this case and offers a retry.
         setPhase('error');
         setConnState('Connection failed');
+        onError('network');
       }
     }
   }
@@ -1495,7 +1908,7 @@ function AutoLiveScreen({ config, onStop, onError }) {
     pollRef.current = setInterval(async () => {
       if (!mountedRef.current || !sessionIdRef.current) return;
       try {
-        const r = await fetch(`/api/translation/poll?session_id=${sessionIdRef.current}`);
+        const r = await api(`/api/translation/poll?session_id=${sessionIdRef.current}`);
         if (!r.ok || !mountedRef.current) return;
         const d = await r.json();
         if (d.events && d.events.length > 0) {
@@ -1803,11 +2216,67 @@ function AutoStatusTag({ status, color }) {
 }
 
 // ─────────────────────────────────────────────
-// LangScreen — language pair picker
+// LanguagePairScreen — edit both sides from the home language control
 // ─────────────────────────────────────────────
 
-function LangScreen({ onBack, onSelect }) {
+function LanguagePairScreen({ langA, langB, onBack, onSave }) {
+  const [sideA, setSideA] = useState(langA);
+  const [sideB, setSideB] = useState(langB);
+  const [picking, setPicking] = useState(null);
+
+  if (picking) {
+    return (
+      <LangScreen
+        onBack={() => setPicking(null)}
+        onSelect={code => {
+          if (picking === 'a') setSideA(code);
+          else setSideB(code);
+          setPicking(null);
+        }}
+      />
+    );
+  }
+
+  const a = getLang(sideA);
+  const b = getLang(sideB);
+  return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.bg }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '52px 16px 16px', background: T.surface, borderBottom: `1px solid ${T.border}` }}>
+        <button onClick={onBack} style={{ padding: 4, color: T.textMuted }}><Icon name="chevron-left" size={24} /></button>
+        <h1 style={{ fontSize: 18, fontWeight: 700 }}>Conversation Languages</h1>
+      </div>
+      <div style={{ padding: '28px 16px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+        {[
+          { side: 'a', caption: 'PERSON A SPEAKS', info: a, color: T.amber },
+          { side: 'b', caption: 'PERSON B SPEAKS', info: b, color: T.teal },
+        ].map(item => (
+          <button key={item.side} onClick={() => setPicking(item.side)} style={{ width: '100%', padding: '20px', borderRadius: 20, background: T.surface, border: `1px solid ${T.border}`, display: 'flex', alignItems: 'center', gap: 16, textAlign: 'left' }}>
+            <div style={{ width: 50, height: 50, borderRadius: 16, background: item.color + '22', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 25 }}>{item.info.flag}</div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1.1, color: T.textFaint }}>{item.caption}</div>
+              <div style={{ fontSize: 18, fontWeight: 650, color: T.textPrimary, marginTop: 4 }}>{item.info.label}</div>
+            </div>
+            <Icon name="chevron" size={18} color={T.textFaint} />
+          </button>
+        ))}
+        <button onClick={() => { setSideA(sideB); setSideB(sideA); }} style={{ alignSelf: 'center', width: 48, height: 48, borderRadius: '50%', background: T.slate, display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '-7px 0', zIndex: 1 }} aria-label="Swap languages">
+          <Icon name="swap" size={21} color={T.cream} />
+        </button>
+        <button onClick={() => onSave(sideA, sideB)} style={{ width: '100%', padding: 17, marginTop: 10, borderRadius: 17, background: T.amber, color: T.cream, fontSize: 16, fontWeight: 700 }}>
+          Use These Languages
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// LangScreen — single language picker
+// ─────────────────────────────────────────────
+
+function LangScreen({ onBack, onSelect, targetName = 'Person', variant = 'amber', selected }) {
   const [query, setQuery] = useState('');
+  const accent = variant === 'teal' ? '#2E8E86' : T.amber;
+  const tint = variant === 'teal' ? 'rgba(88,191,180,.1)' : 'rgba(244,124,54,.08)';
 
   const filtered = query.trim()
     ? LANGUAGES.filter(l =>
@@ -1817,34 +2286,30 @@ function LangScreen({ onBack, onSelect }) {
     : LANGUAGES;
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.surface, overflow: 'hidden' }}>
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.cream, overflow: 'hidden' }}>
       {/* Header */}
       <div style={{
         display: 'flex', alignItems: 'center', gap: 12,
-        padding: '52px 16px 16px',
-        borderBottom: `1px solid ${T.border}`,
+        padding: '60px 20px 14px', background: '#fff', borderBottom: '1px solid rgba(62,76,94,.08)',
         flexShrink: 0,
       }}>
-        <button onClick={onBack} style={{ padding: 4, color: T.textMuted }}>
-          <Icon name="chevron-left" size={24} />
+        <button onClick={onBack} style={{ width: 34, height: 34, borderRadius: 11, display: 'grid', placeItems: 'center', background: 'rgba(62,76,94,.05)', color: T.slate }}>
+          <Icon name="chevron-left" size={17} />
         </button>
-        <h1 style={{ fontSize: 18, fontWeight: 700 }}>Select Language</h1>
+        <div><div style={{ fontSize: 9.5, letterSpacing: '.14em', textTransform: 'uppercase', fontWeight: 700, color: accent }}>{targetName}</div><h1 style={{ fontFamily: "'Instrument Serif', serif", fontSize: 24, fontWeight: 400, color: T.slate, lineHeight: 1.1 }}>Choose language</h1></div>
       </div>
 
       {/* Search */}
-      <div style={{ padding: '12px 16px', borderBottom: `1px solid ${T.border}`, flexShrink: 0 }}>
+      <div style={{ padding: '0 20px 14px', background: '#fff', flexShrink: 0 }}>
         <div style={{
           display: 'flex', alignItems: 'center', gap: 10,
-          padding: '10px 14px',
-          background: T.surface2,
-          borderRadius: 12,
-          border: `1px solid ${T.border}`,
+          padding: '11px 13px', background: 'rgba(62,76,94,.05)', borderRadius: 14,
         }}>
-          <Icon name="search" size={18} color={T.textFaint} />
+          <Icon name="search" size={16} color="rgba(62,76,94,.4)" />
           <input
             value={query}
             onChange={e => setQuery(e.target.value)}
-            placeholder="Search languages…"
+            placeholder="Search languages"
             style={{
               flex: 1,
               background: 'none',
@@ -1857,52 +2322,21 @@ function LangScreen({ onBack, onSelect }) {
         </div>
       </div>
 
-      {/* Auto-detect option */}
-      <button
-        onClick={() => onSelect('auto')}
-        style={{
-          display: 'flex', alignItems: 'center', gap: 14,
-          padding: '14px 20px',
-          borderBottom: `1px solid ${T.border}`,
-          width: '100%',
-          textAlign: 'left',
-          flexShrink: 0,
-        }}
-      >
-        <div style={{
-          width: 40, height: 40,
-          background: T.tealLight,
-          borderRadius: 12,
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }}>
-          <Icon name="globe" size={20} color={T.teal} />
-        </div>
-        <div>
-          <p style={{ fontSize: 15, fontWeight: 600, color: T.textPrimary }}>Auto-detect</p>
-          <p style={{ fontSize: 13, color: T.textMuted }}>Detect language automatically</p>
-        </div>
-      </button>
-
       {/* Language list */}
-      <div style={{ flex: 1, overflowY: 'auto' }}>
+      <div style={{ flex: 1, overflowY: 'auto', padding: '8px 14px 24px' }}>
         {filtered.map(lang => (
           <button
             key={lang.code}
             onClick={() => onSelect(lang.code)}
             style={{
-              display: 'flex', alignItems: 'center', gap: 14,
-              padding: '14px 20px',
+              display: 'flex', alignItems: 'center', gap: 13, padding: '14px 12px', borderRadius: 16,
               width: '100%',
-              borderBottom: `1px solid ${T.border}`,
               textAlign: 'left',
             }}
           >
-            <span style={{ fontSize: 28, lineHeight: 1 }}>{lang.flag}</span>
-            <div style={{ flex: 1 }}>
-              <p style={{ fontSize: 15, fontWeight: 500, color: T.textPrimary }}>{lang.label}</p>
-              <p style={{ fontSize: 12, color: T.textMuted, textTransform: 'uppercase' }}>{lang.code}</p>
-            </div>
-            <Icon name="chevron" size={16} color={T.textFaint} />
+            <span style={{ width: 40, height: 40, borderRadius: 13, background: tint, color: accent, display: 'grid', placeItems: 'center', fontSize: 12, fontWeight: 700 }}>{lang.code.toUpperCase()}</span>
+            <p style={{ flex: 1, fontSize: 15.5, fontWeight: 600, color: T.slate }}>{lang.label}</p>
+            {selected === lang.code && <Icon name="check" size={18} color={T.amber} />}
           </button>
         ))}
         {filtered.length === 0 && (
@@ -1920,6 +2354,331 @@ function LangScreen({ onBack, onSelect }) {
 // HistoryScreen
 // ─────────────────────────────────────────────
 
+// ─────────────────────────────────────────────
+// OfflineLiveScreen — fully on-device, no network
+// ─────────────────────────────────────────────
+//
+// Deliberately separate from FaceToFaceLiveScreen. That screen is a WebRTC
+// session against the server; this one never touches the network at all:
+//   hold  -> on-device speech recognition
+//   release -> on-device translation
+//   then  -> on-device speech synthesis
+// Keeping them apart means nothing here can affect a live server session.
+
+// Speech and synthesis want full locales, not bare language codes.
+const SPEECH_LOCALE = {
+  en: 'en-US', zh: 'zh-CN', yue: 'zh-HK', ja: 'ja-JP', ko: 'ko-KR',
+  es: 'es-ES', fr: 'fr-FR', de: 'de-DE', ar: 'ar-SA', hi: 'hi-IN', fil: 'fil-PH',
+};
+const speechLocale = code => SPEECH_LOCALE[code] || code;
+
+
+function OfflineHalf({ side, code, variant, active, disabled, onPress, onRelease }) {
+  return (
+    <button
+      onPointerDown={() => onPress(side)}
+      onPointerUp={() => onRelease(side)}
+      onPointerLeave={() => active && onRelease(side)}
+      disabled={disabled}
+      style={{
+        flex: 1, borderRadius: 22, border: 'none', padding: 18,
+        background: active ? (variant === 'amber' ? T.amber : '#2E8E86') : '#fff',
+        color: active ? '#fff' : T.slate,
+        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8,
+        boxShadow: active ? '0 12px 24px -8px rgba(62,76,94,.35)' : 'none',
+        opacity: disabled ? 0.5 : 1,
+      }}
+    >
+      <Icon name="mic" size={26} color={active ? '#fff' : T.slate} />
+      <div style={{ fontSize: 15, fontWeight: 600 }}>{getLang(code).label}</div>
+      <div style={{ fontSize: 11.5, opacity: 0.7 }}>{active ? 'Release to translate' : 'Hold to speak'}</div>
+    </button>
+  );
+}
+
+function OfflineLiveScreen({ langA, langB, onBack }) {
+  const [turns, setTurns] = useState([]);
+  const [holding, setHolding] = useState(null);   // 'a' | 'b' | null
+  const [phase, setPhase] = useState('idle');     // idle | listening | translating | speaking
+  const [error, setError] = useState(null);
+  const [partial, setPartial] = useState('');
+  const [picking, setPicking] = useState(null);       // 'a' | 'b' | null
+  const [a, setA] = useState(langA);
+  const [b, setB] = useState(langB);
+  const [sttLocales, setSttLocales] = useState(null); // locales the recognizer knows
+  const listenerRef = useRef(null);
+  const startRef = useRef(null);
+
+  const SR = window.Capacitor?.Plugins?.SpeechRecognition;
+  const TTS = window.Capacitor?.Plugins?.TextToSpeech;
+
+  useEffect(() => {
+    let handle;
+    (async () => {
+      try {
+        handle = await SR?.addListener?.('partialResults', ev => {
+          setPartial((ev?.matches && ev.matches[0]) || '');
+        });
+        listenerRef.current = handle;
+      } catch (_) {}
+      try {
+        const { languages = [] } = await SR?.getSupportedLanguages?.() || {};
+        setSttLocales(languages.map(l => String(l).toLowerCase()));
+      } catch (_) {
+        setSttLocales([]);   // unknown: do not block, just cannot pre-warn
+      }
+    })();
+    return () => {
+      try { listenerRef.current?.remove?.(); } catch (_) {}
+      try { SR?.stop?.(); } catch (_) {}
+      try { TTS?.stop?.(); } catch (_) {}
+    };
+  }, []);
+
+  async function press(side) {
+    if (phase !== 'idle' || !SR) return;
+    setError(null);
+    setPartial('');
+    setHolding(side);
+    setPhase('listening');
+    const from = side === 'a' ? a : b;
+    try {
+      // Check availability before asking for anything. On iOS, touching speech
+      // recognition without NSSpeechRecognitionUsageDescription terminates the
+      // app outright rather than throwing, so the usage string is mandatory —
+      // this guard only covers the softer cases (no engine, unsupported device).
+      const avail = await SR.available?.();
+      if (avail && avail.available === false) {
+        throw new Error('On-device speech recognition is not available on this device.');
+      }
+      const perm = await SR.requestPermissions();
+      const state = perm?.speechRecognition;
+      if (state && state !== 'granted') {
+        throw new Error(
+          'Speech recognition permission was declined. Enable it for Vocare in iPhone Settings.'
+        );
+      }
+      // start() resolves with the FINAL matches when recognition ends — stop()
+      // returns void and never carries a result. Hold the promise and read it
+      // after stop(); relying on partial results alone silently loses the whole
+      // utterance for any language whose partials do not arrive.
+      startRef.current = SR.start({
+        language: speechLocale(from),
+        useOnDeviceRecognition: true,   // the whole point — no audio leaves the device
+        partialResults: true,
+        maxResults: 1,
+        popup: false,
+      });
+      startRef.current.catch(() => {});   // handled in release()
+    } catch (err) {
+      setHolding(null);
+      setPhase('idle');
+      setError(err?.message || 'Could not start on-device speech recognition.');
+    }
+  }
+
+  async function release(side) {
+    if (holding !== side) return;
+    const from = side === 'a' ? a : b;
+    const to = side === 'a' ? b : a;
+    setHolding(null);
+    let heard = '';
+    try {
+      await SR.stop();
+      // Give the recognizer a moment to finalise, but never hang on it.
+      const res = await Promise.race([
+        startRef.current,
+        new Promise(resolve => setTimeout(() => resolve(null), 4000)),
+      ]);
+      heard = (res && res.matches && res.matches[0]) || partial || '';
+    } catch (_) {
+      heard = partial || '';
+    } finally {
+      startRef.current = null;
+    }
+    heard = heard.trim();
+    if (!heard) {
+      // Previously this returned silently, which looked exactly like the button
+      // doing nothing. The usual cause is the language having no on-device
+      // recognition assets installed.
+      setPhase('idle');
+      setPartial('');
+      setError(
+        `Nothing was recognised in ${getLang(from).label}. `
+        + `On-device recognition for ${getLang(from).label} may not be installed — `
+        + 'add it under iPhone Settings \u203a General \u203a Keyboard \u203a Dictation Languages.'
+      );
+      return;
+    }
+
+    setPhase('translating');
+    let translated = null;
+    try {
+      translated = await translateOffline(heard, from, to);
+    } catch (_) {}
+
+    if (!translated) {
+      setPhase('idle');
+      setPartial('');
+      setError(
+        `Could not translate ${getLang(from).label} to ${getLang(to).label} on this device. `
+        + 'The language may not be downloaded — check Settings.'
+      );
+      return;
+    }
+
+    setTurns(t => [...t, { side, from, to, original: heard, translated }]);
+    setPartial('');
+    setPhase('speaking');
+    try {
+      await TTS?.speak({ text: translated, lang: speechLocale(to), rate: 1.0 });
+    } catch (_) {
+      // A missing voice should not lose the transcript — the text still shows.
+    }
+    setPhase('idle');
+  }
+
+  const busy = phase !== 'idle';
+  const statusText = {
+    idle: 'Hold a button to speak',
+    listening: 'Listening…',
+    translating: 'Translating on device…',
+    speaking: 'Speaking…',
+  }[phase];
+
+  // NOTE: Half, Panel and Note live at module scope on purpose. A component
+  // declared inside a render is a NEW component type each time, so React
+  // unmounts and recreates its DOM. Mid-press that destroys the very node
+  // holding the pointer, and the pointerup never reaches the handler — a
+  // hold-to-speak button that sometimes never releases.
+
+
+  // Only languages with an on-device translation model are offered — picking one
+  // without a model would produce a button that silently cannot work.
+  if (picking) {
+    const options = offlineTranslationLanguages();
+    const current = picking === 'a' ? a : b;
+    const other = picking === 'a' ? b : a;
+    return (
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.cream }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '60px 22px 14px' }}>
+          <button onClick={() => setPicking(null)} style={{ width: 34, height: 34, borderRadius: 11, display: 'grid', placeItems: 'center', background: 'rgba(62,76,94,.05)', color: T.slate }}>
+            <Icon name="chevron-left" size={17} />
+          </button>
+          <h1 style={{ fontFamily: "'Instrument Serif', serif", fontSize: 24, fontWeight: 400, color: T.slate }}>
+            {picking === 'a' ? 'This side speaks' : 'Far side speaks'}
+          </h1>
+        </div>
+        <div style={{ padding: '0 20px 10px', fontSize: 12.5, color: 'rgba(62,76,94,.55)' }}>
+          Only languages that can translate on this device are shown. Cantonese has no offline model
+          on any phone.
+        </div>
+        <div style={{ flex: 1, overflowY: 'auto', padding: '0 20px 28px' }}>
+          <div style={{ background: '#fff', border: '1px solid rgba(62,76,94,.08)', borderRadius: 18, overflow: 'hidden' }}>
+            {options.map((code, i) => {
+              const taken = code === other;
+              const locale = speechLocale(code).toLowerCase();
+              const sttKnown = sttLocales === null
+                ? null
+                : sttLocales.some(l => l === locale || l.startsWith(code + '-') || l === code);
+              return (
+                <button
+                  key={code}
+                  disabled={taken}
+                  onClick={() => { picking === 'a' ? setA(code) : setB(code); setPicking(null); setError(null); }}
+                  style={{ width: '100%', padding: '13px 15px', display: 'flex', alignItems: 'center', gap: 12, borderTop: i ? '1px solid rgba(62,76,94,.06)' : 'none', textAlign: 'left', opacity: taken ? 0.4 : 1, background: code === current ? 'rgba(244,124,54,.06)' : '#fff' }}
+                >
+                  <span style={{ fontSize: 17 }}>{getLang(code).flag}</span>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 14.5, fontWeight: 600, color: T.slate }}>{getLang(code).label}</div>
+                    {sttKnown === false && (
+                      <div style={{ fontSize: 11, color: 'rgba(62,76,94,.45)', marginTop: 2 }}>
+                        Dictation for this language may need installing
+                      </div>
+                    )}
+                  </div>
+                  {code === current && <Icon name="check" size={16} color={T.amber} />}
+                  {taken && <span style={{ fontSize: 11.5, color: 'rgba(62,76,94,.45)' }}>Other side</span>}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.cream }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '60px 22px 10px' }}>
+        <button onClick={onBack} style={{ width: 34, height: 34, borderRadius: 11, display: 'grid', placeItems: 'center', background: 'rgba(62,76,94,.05)', color: T.slate }}>
+          <Icon name="chevron-left" size={17} />
+        </button>
+        <div style={{ flex: 1 }}>
+          <h1 style={{ fontFamily: "'Instrument Serif', serif", fontSize: 24, fontWeight: 400, color: T.slate }}>Offline session</h1>
+        </div>
+        <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '.1em', textTransform: 'uppercase', color: '#2E8E86', background: '#DDF4F1', borderRadius: 99, padding: '5px 9px' }}>On device</span>
+      </div>
+
+      <div style={{ padding: '0 20px 6px', fontSize: 12.5, color: 'rgba(62,76,94,.55)' }}>
+        Nothing is sent to a server. Speech, translation and the spoken reply all happen on this phone.
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 20px 4px' }}>
+        <button onClick={() => setPicking('a')} style={{ flex: 1, padding: '10px 12px', borderRadius: 14, background: '#fff', border: '1px solid rgba(62,76,94,.12)', textAlign: 'left' }}>
+          <div style={{ fontSize: 9.5, letterSpacing: '.14em', textTransform: 'uppercase', color: T.amber, fontWeight: 700 }}>This side</div>
+          <div style={{ fontSize: 14.5, fontWeight: 600, color: T.slate, marginTop: 2 }}>{getLang(a).label}</div>
+        </button>
+        <button
+          onClick={() => { setA(b); setB(a); }}
+          style={{ width: 38, height: 38, borderRadius: 12, background: 'rgba(62,76,94,.05)', border: 'none', color: T.slate, fontSize: 15 }}
+          aria-label="Swap languages"
+        >⇄</button>
+        <button onClick={() => setPicking('b')} style={{ flex: 1, padding: '10px 12px', borderRadius: 14, background: '#fff', border: '1px solid rgba(62,76,94,.12)', textAlign: 'right' }}>
+          <div style={{ fontSize: 9.5, letterSpacing: '.14em', textTransform: 'uppercase', color: '#2E8E86', fontWeight: 700 }}>Far side</div>
+          <div style={{ fontSize: 14.5, fontWeight: 600, color: T.slate, marginTop: 2 }}>{getLang(b).label}</div>
+        </button>
+      </div>
+
+      <div style={{ flex: 1, overflowY: 'auto', padding: '12px 20px' }}>
+        {turns.length === 0 && !partial && (
+          <div style={{ fontSize: 13.5, color: 'rgba(62,76,94,.45)', textAlign: 'center', marginTop: 28 }}>
+            Hold either side and speak. The other side hears it translated.
+          </div>
+        )}
+        {turns.map((t, i) => (
+          <div key={i} style={{ marginBottom: 14, alignSelf: 'flex-start' }}>
+            <div style={{ fontSize: 9.5, letterSpacing: '.12em', textTransform: 'uppercase', fontWeight: 700, color: t.side === 'a' ? T.amber : '#2E8E86', marginBottom: 4 }}>
+              {getLang(t.from).label} → {getLang(t.to).label}
+            </div>
+            <div style={{ background: '#fff', border: '1px solid rgba(62,76,94,.1)', borderRadius: 16, padding: '11px 13px' }}>
+              <div style={{ fontSize: 14.5, lineHeight: 1.45, color: T.slate }}>{t.translated}</div>
+              <div style={{ fontSize: 11.5, color: 'rgba(62,76,94,.45)', marginTop: 5, fontStyle: 'italic' }}>{t.original}</div>
+            </div>
+          </div>
+        ))}
+        {partial && (
+          <div style={{ fontSize: 13.5, color: 'rgba(62,76,94,.5)', fontStyle: 'italic', marginTop: 6 }}>{partial}</div>
+        )}
+      </div>
+
+      {error && (
+        <div style={{ margin: '0 20px 8px', padding: '10px 12px', background: '#FCE4D5', borderLeft: `3px solid ${T.amber}`, borderRadius: '0 8px 8px 0', fontSize: 12.5, lineHeight: 1.45, color: T.slate }}>
+          {error}
+        </div>
+      )}
+
+      <div style={{ padding: '4px 20px 8px', textAlign: 'center', fontSize: 12, fontWeight: 600, color: 'rgba(62,76,94,.5)' }}>{statusText}</div>
+      <div style={{ display: 'flex', gap: 12, padding: '0 20px 28px' }}>
+        <OfflineHalf side="a" code={a} variant="amber" active={holding === 'a'}
+          disabled={busy && holding !== 'a'} onPress={press} onRelease={release} />
+        <OfflineHalf side="b" code={b} variant="teal" active={holding === 'b'}
+          disabled={busy && holding !== 'b'} onPress={press} onRelease={release} />
+      </div>
+    </div>
+  );
+}
+
 function HistoryScreen({ onBack, onSession }) {
   const [sessions, setSessions] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -1928,10 +2687,9 @@ function HistoryScreen({ onBack, onSession }) {
     let active = true;
     const poll = async () => {
       try {
-        const r = await fetch('/api/translation/sessions');
-        const d = await r.json();
+        const history = await loadSessionHistory();
         if (active) {
-          setSessions(d.sessions || []);
+          setSessions(history);
           setLoading(false);
         }
       } catch {
@@ -1947,19 +2705,9 @@ function HistoryScreen({ onBack, onSession }) {
   const ended = sessions.filter(s => s.status !== 'live' && s.status !== 'active');
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-      {/* Header */}
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 12,
-        padding: '52px 16px 16px',
-        background: T.surface,
-        borderBottom: `1px solid ${T.border}`,
-        flexShrink: 0,
-      }}>
-        <button onClick={onBack} style={{ padding: 4, color: T.textMuted }}>
-          <Icon name="chevron-left" size={24} />
-        </button>
-        <h1 style={{ fontSize: 18, fontWeight: 700 }}>Session History</h1>
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: T.cream }}>
+      <div style={{ padding: '62px 22px 14px', flexShrink: 0 }}>
+        <h1 style={{ fontFamily: "'Instrument Serif', serif", fontSize: 34, fontWeight: 400, color: T.slate, lineHeight: 1.05 }}>History</h1>
       </div>
 
       <div style={{ flex: 1, overflowY: 'auto' }}>
@@ -1973,17 +2721,17 @@ function HistoryScreen({ onBack, onSession }) {
             <p style={{ fontSize: 15 }}>No sessions yet</p>
           </div>
         ) : (
-          <div style={{ padding: '16px' }}>
+          <div style={{ padding: '6px 20px 96px' }}>
             {live.length > 0 && (
               <>
-                <p style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 10 }}>Live</p>
-                {live.map(s => <SessionCard key={s.session_id} session={s} onClick={() => onSession(s.session_id)} />)}
+                <p style={{ fontSize: 10.5, fontWeight: 700, color: '#2E8E86', textTransform: 'uppercase', letterSpacing: '.16em', margin: '6px 0 9px' }}>In progress</p>
+                {live.map(s => <div key={s.session_id} style={{ background: T.slate, borderRadius: 20, padding: 16, marginBottom: 8 }}><button onClick={() => onSession(s.session_id)} style={{ width: '100%', color: T.cream, textAlign: 'left' }}><div style={{ display: 'flex', alignItems: 'center', gap: 8 }}><span style={{ width: 7, height: 7, borderRadius: '50%', background: T.teal, animation: 'dot-blink 1.6s ease-in-out infinite' }} /><span style={{ fontSize: 10, letterSpacing: '.14em', textTransform: 'uppercase', fontWeight: 700, color: T.tealSoft }}>Live · {formatDuration(s.duration)}</span></div><div style={{ fontSize: 17, fontWeight: 600, marginTop: 8 }}>{s.topic || 'Translation Session'}</div><div style={{ fontSize: 12, color: 'rgba(251,243,235,.55)', marginTop: 3 }}>{s.caller_name}</div></button></div>)}
               </>
             )}
             {ended.length > 0 && (
               <>
                 {live.length > 0 && <div style={{ height: 8 }} />}
-                <p style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 10 }}>Past</p>
+                <p style={{ fontSize: 10.5, fontWeight: 700, color: 'rgba(62,76,94,.45)', textTransform: 'uppercase', letterSpacing: '.16em', margin: '18px 0 9px' }}>Past</p>
                 {ended.map(s => <SessionCard key={s.session_id} session={s} onClick={() => onSession(s.session_id)} />)}
               </>
             )}
@@ -1993,6 +2741,156 @@ function HistoryScreen({ onBack, onSession }) {
       </div>
     </div>
   );
+}
+
+function SessionDetailScreen({ sessionId, onBack }) {
+  const [detail, setDetail] = useState(null);
+  useEffect(() => {
+    let active = true;
+    loadSessionDetail(sessionId).then(d => { if (active) setDetail(d); }).catch(() => {});
+    return () => { active = false; };
+  }, [sessionId]);
+  const transcript = detail?.transcript || [];
+  return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: T.cream }}>
+      <div style={{ padding: '58px 20px 16px', background: T.slate, borderRadius: '0 0 28px 28px' }}>
+        <button onClick={onBack} style={{ width: 34, height: 34, borderRadius: 11, display: 'grid', placeItems: 'center', background: 'rgba(251,243,235,.1)', color: T.cream }}><Icon name="chevron-left" size={17} /></button>
+        <h1 style={{ fontFamily: "'Instrument Serif', serif", fontSize: 27, fontWeight: 400, color: T.cream, marginTop: 14, lineHeight: 1.15 }}>{detail?.topic || 'Translation session'}</h1>
+        <div style={{ fontSize: 12, color: 'rgba(251,243,235,.55)', marginTop: 6 }}>{detail?.caller_name || sessionId}</div>
+      </div>
+      <div style={{ flex: 1, overflowY: 'auto', padding: '18px 20px 40px' }}>
+        <div style={{ background: '#fff', border: '1px solid rgba(244,124,54,.18)', borderRadius: 20, padding: 16 }}>
+          <div style={{ fontSize: 10.5, letterSpacing: '.16em', textTransform: 'uppercase', color: T.amber, fontWeight: 700 }}>Automated notes</div>
+          <div style={{ fontSize: 13.5, lineHeight: 1.5, color: T.slate, marginTop: 11 }}>{transcript.length ? `${transcript.length} translated conversation turn${transcript.length === 1 ? '' : 's'} recorded.` : 'Notes will appear after translated conversation turns are recorded.'}</div>
+        </div>
+        <div style={{ fontSize: 10.5, letterSpacing: '.16em', textTransform: 'uppercase', color: 'rgba(62,76,94,.45)', fontWeight: 700, margin: '20px 0 10px' }}>Full transcript</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {transcript.map((t, i) => <div key={i} style={{ alignSelf: i % 2 ? 'flex-end' : 'flex-start', maxWidth: '86%' }}><div style={{ fontSize: 9.5, letterSpacing: '.12em', textTransform: 'uppercase', fontWeight: 700, color: i % 2 ? '#2E8E86' : T.amber, marginBottom: 4 }}>{t.speaker_name || 'Speaker'}</div><div style={{ background: i % 2 ? '#fff' : 'rgba(244,124,54,.06)', border: `1px solid ${i % 2 ? 'rgba(88,191,180,.2)' : 'rgba(244,124,54,.16)'}`, borderRadius: 16, padding: '11px 13px', fontSize: 14.5, lineHeight: 1.45, color: T.slate }}>{t.original}</div><div style={{ fontSize: 11.5, color: 'rgba(62,76,94,.42)', marginTop: 4, fontStyle: 'italic' }}>{t.translated}</div></div>)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Which languages work with no connection, and how to get the ones that don't.
+// Status is shown against English, the pivot both engines are built around.
+function OfflinePanel({ children }) {
+  return (
+    <div style={{ marginBottom: 20 }}>
+      <div style={{ fontSize: 10.5, letterSpacing: '.16em', textTransform: 'uppercase', color: 'rgba(62,76,94,.45)', fontWeight: 700, marginBottom: 9 }}>Offline translation</div>
+      <div style={{ background: '#fff', border: '1px solid rgba(62,76,94,.08)', borderRadius: 18, overflow: 'hidden' }}>{children}</div>
+    </div>
+  );
+}
+
+function OfflineNote({ children }) {
+  return <div style={{ padding: '14px 15px', fontSize: 13, lineHeight: 1.5, color: 'rgba(62,76,94,.6)' }}>{children}</div>;
+}
+
+function OfflineTranslationSection({ onStart }) {
+  const engine = offlineEngine();
+  const supported = offlineTranslationLanguages().filter(c => c !== 'en');
+  const canDownload = offlineCanSelfDownload();
+  const [statuses, setStatuses] = useState(null); // code -> installed|supported|unsupported
+  const [busy, setBusy] = useState(null);
+  const [error, setError] = useState(null);
+
+  async function refresh() {
+    if (!engine) { setStatuses({}); return; }
+    const entries = await Promise.all(
+      supported.map(async code => [code, await offlinePairStatus('en', code)])
+    );
+    setStatuses(Object.fromEntries(entries));
+  }
+
+  useEffect(() => { void refresh(); }, []);
+
+  async function handleDownload(code) {
+    setBusy(code); setError(null);
+    try {
+      // English is the pivot both engines translate through, so it is needed too.
+      await downloadOfflineModels(['en', code]);
+      await refresh();
+    } catch (err) {
+      setError(`Could not download ${getLang(code).label}. Check your connection and try again.`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+
+
+  if (!offlineTranslationLanguages().length) {
+    return <OfflinePanel><OfflineNote>Offline translation is available in the Vocare app on iOS and Android. In a browser, every session needs a connection.</OfflineNote></OfflinePanel>;
+  }
+  if (!engine) {
+    return <OfflinePanel><OfflineNote>Offline translation is not available in this version. Sessions need a connection.</OfflineNote></OfflinePanel>;
+  }
+
+  return (
+    <div>
+      <OfflinePanel>
+        <div style={{ padding: '13px 15px', borderBottom: '1px solid rgba(62,76,94,.06)', fontSize: 12.5, lineHeight: 1.5, color: 'rgba(62,76,94,.62)' }}>
+          {canDownload
+            ? 'Download a language to translate it to and from English with no connection. Each is about 30MB, so use Wi-Fi.'
+            : 'Languages you have downloaded on this device can be translated to and from English with no connection. Add more in Settings \u203a Apps \u203a Translate \u203a Downloaded Languages.'}
+          {' '}Cantonese has no offline model on any phone and always needs a connection.
+        </div>
+        {supported.map((code, i) => {
+          const status = statuses ? statuses[code] : undefined;
+          return (
+            <div key={code} style={{ padding: '12px 15px', display: 'flex', alignItems: 'center', gap: 12, borderTop: i ? '1px solid rgba(62,76,94,.06)' : 'none' }}>
+              <span style={{ fontSize: 17 }}>{getLang(code).flag}</span>
+              <div style={{ flex: 1, fontSize: 14.5, fontWeight: 600, color: T.slate }}>{getLang(code).label}</div>
+              {statuses === null && <span style={{ fontSize: 12, color: 'rgba(62,76,94,.4)' }}>Checking\u2026</span>}
+              {status === 'installed' && <span style={{ fontSize: 12, fontWeight: 600, color: '#2E8E86' }}>On device</span>}
+              {status === 'unsupported' && <span style={{ fontSize: 12, color: 'rgba(62,76,94,.35)' }}>Not available</span>}
+              {status === 'supported' && (canDownload ? (
+                <button
+                  onClick={() => handleDownload(code)}
+                  disabled={busy === code}
+                  style={{ fontSize: 12.5, fontWeight: 600, color: busy === code ? 'rgba(62,76,94,.4)' : T.amber, background: 'transparent', border: 'none', padding: '4px 2px' }}
+                >
+                  {busy === code ? 'Downloading\u2026' : 'Download'}
+                </button>
+              ) : (
+                <span style={{ fontSize: 12, color: 'rgba(62,76,94,.45)' }}>In iPhone Settings</span>
+              ))}
+            </div>
+          );
+        })}
+      </OfflinePanel>
+      {onStart && (
+        <button
+          onClick={onStart}
+          style={{
+            width: '100%', height: 52, marginTop: -8, marginBottom: 18, background: '#fff',
+            color: T.slate, border: '1px solid rgba(62,76,94,.14)', borderRadius: 18,
+            fontSize: 15, fontWeight: 600, display: 'flex', alignItems: 'center',
+            justifyContent: 'center', gap: 8,
+          }}
+        >
+          <Icon name="mic" size={17} color={T.slate} />
+          Start an offline session
+        </button>
+      )}
+      {error && <div style={{ fontSize: 12, color: '#C0453B', marginTop: -12, marginBottom: 16, paddingLeft: 2 }}>{error}</div>}
+    </div>
+  );
+}
+
+function SettingsScreen({ onStartOffline }) {
+  const [values, setValues] = useState({ notes: true, save: true, autoplay: true, haptics: true, large: false });
+  const groups = [
+    ['Session', [['notes','Automated notes','Summarise each session when it ends'],['save','Save transcripts','Keep full text on this device'],['autoplay','Speak translations aloud','Play synthesised voice on the other half']]],
+    ['Accessibility', [['haptics','Haptic confirmation','Buzz on press and release'],['large','Larger transcript text','Increase live text size by 20%']]],
+  ];
+  // Both stores require the privacy policy to be reachable from inside the app,
+  // not only from the store listing.
+  const links = [
+    ['Privacy policy', 'How microphone audio and transcripts are handled', `${apiBase()}/privacy`],
+  ];
+  return <div style={{ flex: 1, overflowY: 'auto', background: T.cream }}><div style={{ padding: '62px 22px 14px' }}><h1 style={{ fontFamily: "'Instrument Serif', serif", fontSize: 34, fontWeight: 400, color: T.slate }}>Settings</h1></div><div style={{ padding: '6px 20px 96px' }}>{groups.map(([title, rows]) => <div key={title} style={{ marginBottom: 20 }}><div style={{ fontSize: 10.5, letterSpacing: '.16em', textTransform: 'uppercase', color: 'rgba(62,76,94,.45)', fontWeight: 700, marginBottom: 9 }}>{title}</div><div style={{ background: '#fff', border: '1px solid rgba(62,76,94,.08)', borderRadius: 18, overflow: 'hidden' }}>{rows.map(([key,label,hint], i) => <button key={key} onClick={() => setValues(v => ({...v, [key]: !v[key]}))} style={{ width: '100%', padding: '14px 15px', display: 'flex', alignItems: 'center', gap: 12, borderTop: i ? '1px solid rgba(62,76,94,.06)' : 'none', textAlign: 'left' }}><div style={{ flex: 1 }}><div style={{ fontSize: 14.5, fontWeight: 600, color: T.slate }}>{label}</div><div style={{ fontSize: 11.5, color: 'rgba(62,76,94,.48)', marginTop: 2 }}>{hint}</div></div><div style={{ width: 44, height: 26, borderRadius: 99, background: values[key] ? T.amber : 'rgba(62,76,94,.16)', padding: 3, display: 'flex', justifyContent: values[key] ? 'flex-end' : 'flex-start' }}><div style={{ width: 20, height: 20, borderRadius: '50%', background: '#fff', boxShadow: '0 1px 3px rgba(0,0,0,.25)' }} /></div></button>)}</div></div>)}<OfflineTranslationSection onStart={onStartOffline} /><div style={{ marginBottom: 20 }}><div style={{ fontSize: 10.5, letterSpacing: '.16em', textTransform: 'uppercase', color: 'rgba(62,76,94,.45)', fontWeight: 700, marginBottom: 9 }}>Legal</div><div style={{ background: '#fff', border: '1px solid rgba(62,76,94,.08)', borderRadius: 18, overflow: 'hidden' }}>{links.map(([label, hint, href], i) => <a key={label} href={href} rel="noopener noreferrer" style={{ width: '100%', padding: '14px 15px', display: 'flex', alignItems: 'center', gap: 12, borderTop: i ? '1px solid rgba(62,76,94,.06)' : 'none', textAlign: 'left', textDecoration: 'none' }}><div style={{ flex: 1 }}><div style={{ fontSize: 14.5, fontWeight: 600, color: T.slate }}>{label}</div><div style={{ fontSize: 11.5, color: 'rgba(62,76,94,.48)', marginTop: 2 }}>{hint}</div></div><Icon name="chevron-left" size={16} color="rgba(62,76,94,.3)" /></a>)}</div></div></div></div>;
 }
 
 // ─────────────────────────────────────────────
@@ -2010,7 +2908,7 @@ function ErrorScreen({ type, onRetry, onBack }) {
       alignItems: 'center',
       justifyContent: 'center',
       padding: '32px 24px',
-      background: T.bg,
+      background: T.cream,
       animation: 'fade-in 0.3s ease-out',
     }}>
       <div style={{
@@ -2023,12 +2921,12 @@ function ErrorScreen({ type, onRetry, onBack }) {
         <Icon name={isMic ? 'mic-off' : 'wifi-off'} size={36} color={T.error} />
       </div>
 
-      <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 8, textAlign: 'center', color: T.textPrimary }}>
-        {isMic ? 'Microphone Access Required' : 'Connection Failed'}
+      <h2 style={{ fontFamily: "'Instrument Serif', serif", fontSize: 28, fontWeight: 400, marginBottom: 8, textAlign: 'center', color: T.navy, lineHeight: 1.1 }}>
+        {isMic ? 'Microphone access required' : 'Connection failed'}
       </h2>
-      <p style={{ fontSize: 14, color: T.textMuted, textAlign: 'center', lineHeight: 1.6, maxWidth: 280, marginBottom: 32 }}>
+      <p style={{ fontSize: 13.5, color: T.inkMute, textAlign: 'center', lineHeight: 1.55, maxWidth: 280, marginBottom: 32 }}>
         {isMic
-          ? 'Vocare needs microphone access to translate speech. Please allow microphone access in your browser settings.'
+          ? 'Voca needs microphone access to translate speech. Allow it for Voca in your device settings, then try again.'
           : 'Unable to connect to the translation server. Please check your connection and try again.'}
       </p>
 
@@ -2036,29 +2934,30 @@ function ErrorScreen({ type, onRetry, onBack }) {
         <button
           onClick={onRetry}
           style={{
-            padding: '14px',
-            background: T.teal,
+            height: 56,
+            background: T.amber,
             color: '#fff',
-            borderRadius: 14,
-            fontSize: 15,
+            borderRadius: 18,
+            fontSize: 16,
             fontWeight: 600,
+            boxShadow: '0 12px 24px -8px rgba(244,124,54,.6)',
           }}
         >
-          {isMic ? 'Open Settings' : 'Try Again'}
+          {'Try again'}
         </button>
         <button
           onClick={onBack}
           style={{
-            padding: '14px',
-            background: T.surface,
-            color: T.textPrimary,
-            borderRadius: 14,
-            fontSize: 15,
+            height: 56,
+            background: '#fff',
+            color: T.navy,
+            borderRadius: 18,
+            fontSize: 16,
             fontWeight: 600,
-            border: `1px solid ${T.border}`,
+            border: `1px solid ${T.hairline}`,
           }}
         >
-          Go Back
+          Go back
         </button>
       </div>
     </div>
@@ -2076,30 +2975,38 @@ function App() {
   const [errorType, setErrorType] = useState('mic');
   const [langA, setLangA] = useState('en');
   const [langB, setLangB] = useState('zh');
-  const [langPickCallback, setLangPickCallback] = useState(null);
+  const [langPickSide, setLangPickSide] = useState('a');
+  const [detailSessionId, setDetailSessionId] = useState(null);
+  const [pendingMicConfig, setPendingMicConfig] = useState(null);
 
   function goTab(t) {
     setTab(t);
     if (t === 'home') setScreen('home');
     else if (t === 'live') setScreen('live-setup');
     else if (t === 'history') setScreen('history');
+    else if (t === 'settings') setScreen('settings');
   }
 
-  function handleStart(cfg) {
+  function enterSession(cfg) {
     setSessionConfig(cfg);
     setLangA(cfg.langA);
     setLangB(cfg.langB);
-    if (cfg.mode === 'face-to-face' && cfg.micMode === 'hold') {
-      setScreen('live-face');
-    } else {
-      setScreen('live-auto');
-    }
+    setScreen('live-face');
+  }
+
+  // Every route into a live screen funnels through here — the home card and the
+  // setup screen both call it — and the live screens request the microphone from
+  // a mount effect. So this is the one place the disclosure has to sit if it is
+  // to reliably precede the OS permission prompt.
+  function handleStart(cfg) {
+    if (hasMicConsent()) return enterSession(cfg);
+    setPendingMicConfig(cfg);
   }
 
   function handleStop() {
     setSessionConfig(null);
-    setScreen('home');
-    setTab('home');
+    setScreen('history');
+    setTab('history');
   }
 
   function handleError(type) {
@@ -2117,7 +3024,7 @@ function App() {
     }
   }
 
-  const showTabBar = screen === 'home' || screen === 'history';
+  const showTabBar = screen === 'home' || screen === 'history' || screen === 'settings';
 
   let content;
   switch (screen) {
@@ -2126,23 +3033,36 @@ function App() {
         <WelcomeScreen
           langA={langA}
           langB={langB}
-          onStart={() => { setTab('live'); setScreen('live-setup'); }}
-          onLangPair={() => setScreen('lang-home')}
+          onStart={() => {
+            // Straight into the session with the home card's language pair;
+            // the Translate tab still opens the full setup screen.
+            setTab('live');
+            handleStart({
+              mode: 'face-to-face',
+              micMode: 'hold',
+              nameA: 'Person A',
+              nameB: 'Person B',
+              langA,
+              langB,
+            });
+          }}
+          onPickA={() => { setLangPickSide('a'); setScreen('lang-pick'); }}
+          onPickB={() => { setLangPickSide('b'); setScreen('lang-pick'); }}
+          onSwap={() => { setLangA(langB); setLangB(langA); }}
           onHistory={() => { setTab('history'); setScreen('history'); }}
-          onSession={() => {}}
+          onSession={id => { setDetailSessionId(id); setScreen('detail'); }}
         />
       );
       break;
 
-    case 'lang-home':
+    case 'lang-pick':
       content = (
         <LangScreen
+          targetName={langPickSide === 'a' ? 'Person A' : 'Person B'}
+          variant={langPickSide === 'a' ? 'amber' : 'teal'}
+          selected={langPickSide === 'a' ? langA : langB}
           onBack={() => setScreen('home')}
-          onSelect={code => {
-            // cycle: set A first, then B
-            setLangA(code);
-            setScreen('home');
-          }}
+          onSelect={code => { if (langPickSide === 'a') setLangA(code); else setLangB(code); setScreen('home'); }}
         />
       );
       break;
@@ -2169,21 +3089,31 @@ function App() {
       );
       break;
 
-    case 'live-auto':
-      content = (
-        <AutoLiveScreen
-          config={sessionConfig}
-          onStop={handleStop}
-          onError={handleError}
-        />
-      );
-      break;
-
     case 'history':
       content = (
         <HistoryScreen
           onBack={() => { setTab('home'); setScreen('home'); }}
-          onSession={() => {}}
+          onSession={id => { setDetailSessionId(id); setScreen('detail'); }}
+        />
+      );
+      break;
+
+    case 'detail':
+      content = <SessionDetailScreen sessionId={detailSessionId} onBack={() => setScreen('history')} />;
+      break;
+
+    case 'settings':
+      content = <SettingsScreen onStartOffline={() => setScreen('live-offline')} />;
+      break;
+
+    case 'live-offline':
+      // Entered deliberately from Settings. Never routed to automatically, so it
+      // can never pre-empt a live server session.
+      content = (
+        <OfflineLiveScreen
+          langA={langA}
+          langB={langB}
+          onBack={() => { setTab('settings'); setScreen('settings'); }}
         />
       );
       break;
@@ -2204,6 +3134,7 @@ function App() {
 
   return (
     <div style={{
+      position: 'relative',
       height: '100dvh',
       display: 'flex',
       flexDirection: 'column',
@@ -2215,6 +3146,16 @@ function App() {
       </div>
       {showTabBar && (
         <TabBar active={tab} onChange={goTab} />
+      )}
+      {pendingMicConfig && (
+        <MicDisclosure
+          onAccept={() => {
+            const cfg = pendingMicConfig;
+            setPendingMicConfig(null);
+            enterSession(cfg);
+          }}
+          onCancel={() => setPendingMicConfig(null)}
+        />
       )}
     </div>
   );

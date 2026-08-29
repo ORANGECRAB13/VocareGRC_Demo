@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  android:fullBackupContent — used on Android 11 and below (API < 31).
+
+  Ordinary app data (preferences, WebView cache) still backs up. The Room
+  database behind the native TranslationHistory plugin holds conversation
+  transcripts, so it and its SQLite sidecar files are excluded: translated
+  conversation content never leaves the device via Auto Backup.
+
+  Filenames must stay in sync with
+  TranslationHistoryDatabase.DATABASE_NAME.
+-->
+<full-backup-content>
+    <exclude domain="database" path="vocare_translation_history.db" />
+    <exclude domain="database" path="vocare_translation_history.db-wal" />
+    <exclude domain="database" path="vocare_translation_history.db-shm" />
+    <exclude domain="database" path="vocare_translation_history.db-journal" />
+</full-backup-content>

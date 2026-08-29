@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Vocare Translate — Privacy Policy</title>
+  <style>
+    :root {
+      color-scheme: light;
+
+      /* Voca palette (mirrors static/vocare.html) */
+      --navy:        #3E4C5E;
+      --cream:       #FBF3EB;
+      --amber:       #F47C36;
+      --amber-deep:  #D9631F;
+      --teal:        #58BFB4;
+      --teal-deep:   #2E8E86;
+      --teal-light:  #DDF4F1;
+      --amber-light: #FCE4D5;
+
+      --bg:          #FBF3EB;
+      --panel:       #FFFFFF;
+      --ink:         #3E4C5E;
+      --muted:       #71808F;
+      --faint:       #A6B1BA;
+      --line:        #D3DEE4;
+      --hairline:    rgba(62, 76, 94, .08);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    main {
+      width: min(760px, calc(100vw - 32px));
+      margin: 40px auto 72px;
+    }
+
+    header.masthead {
+      border-bottom: 2px solid var(--amber);
+      padding-bottom: 18px;
+      margin-bottom: 28px;
+    }
+
+    .eyebrow {
+      text-transform: uppercase;
+      letter-spacing: .12em;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--amber-deep);
+      margin: 0 0 8px;
+    }
+
+    h1 {
+      margin: 0 0 10px;
+      font-size: 32px;
+      line-height: 1.15;
+      letter-spacing: -0.01em;
+    }
+
+    .updated {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    h2 {
+      margin: 36px 0 10px;
+      font-size: 20px;
+      line-height: 1.3;
+      letter-spacing: -0.005em;
+    }
+
+    h3 {
+      margin: 22px 0 8px;
+      font-size: 15px;
+      line-height: 1.35;
+      color: var(--teal-deep);
+    }
+
+    p, li {
+      line-height: 1.62;
+      font-size: 15.5px;
+      color: var(--ink);
+    }
+
+    p { margin: 0 0 12px; }
+
+    ul { margin: 0 0 14px; padding-left: 22px; }
+    li { margin-bottom: 7px; }
+
+    a { color: var(--teal-deep); }
+
+    section.card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 18px 20px;
+      margin: 18px 0;
+    }
+
+    .lede {
+      background: var(--teal-light);
+      border: 1px solid #A9DED7;
+      border-radius: 10px;
+      padding: 16px 18px;
+      margin: 0 0 8px;
+    }
+
+    .lede p:last-child { margin-bottom: 0; }
+
+    .callout {
+      background: var(--amber-light);
+      border-left: 4px solid var(--amber);
+      border-radius: 0 8px 8px 0;
+      padding: 14px 16px;
+      margin: 18px 0;
+    }
+
+    .callout p:last-child { margin-bottom: 0; }
+
+    .placeholder {
+      display: inline;
+      background: #FFE9B8;
+      border: 1px dashed var(--amber-deep);
+      border-radius: 4px;
+      padding: 1px 6px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+      color: #7A3C05;
+      overflow-wrap: anywhere;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 12px 0 18px;
+      font-size: 14.5px;
+    }
+
+    caption {
+      text-align: left;
+      color: var(--muted);
+      font-size: 13px;
+      padding-bottom: 8px;
+    }
+
+    th, td {
+      text-align: left;
+      vertical-align: top;
+      padding: 9px 10px;
+      border-bottom: 1px solid var(--line);
+      line-height: 1.5;
+    }
+
+    thead th {
+      background: #F1F6F8;
+      border-bottom: 2px solid var(--line);
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      color: var(--muted);
+    }
+
+    .table-scroll { overflow-x: auto; }
+
+    dl.contact {
+      display: grid;
+      grid-template-columns: 160px 1fr;
+      gap: 8px 14px;
+      margin: 0;
+    }
+
+    dl.contact dt { color: var(--muted); font-size: 14px; }
+    dl.contact dd { margin: 0; overflow-wrap: anywhere; font-size: 15px; }
+
+    footer {
+      margin-top: 44px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+      color: var(--faint);
+      font-size: 13px;
+    }
+
+    @media (max-width: 560px) {
+      h1 { font-size: 26px; }
+      dl.contact { grid-template-columns: 1fr; gap: 2px 0; }
+      dl.contact dd { margin-bottom: 10px; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header class="masthead">
+    <p class="eyebrow">Vocare Translate</p>
+    <h1>Privacy Policy</h1>
+    <p class="updated">Last updated: 29 August 2026</p>
+  </header>
+
+  <div class="lede">
+    <p><strong>The short version.</strong> Vocare Translate turns speech into translated speech.
+      To do that, the audio you record while holding the speak button is sent to our server and to
+      our speech and translation providers, converted to text, translated, and spoken back. There
+      are no accounts, no sign-in, no advertising, and no analytics or tracking SDKs of any kind.
+      Conversation transcripts are kept on your own device. A copy of the transcript text also
+      exists on the server for the life of the running session process. Read on for exactly what
+      that means.</p>
+  </div>
+
+  <h2>1. Who we are</h2>
+  <p>This app is published by <span class="placeholder">[PLACEHOLDER: legal entity name and
+    registered address of the publisher — e.g. "Vocare Pty Ltd (ACN 000 000 000), Sydney NSW,
+    Australia"]</span>, referred to below as "we" or "us". We are the data controller for the
+    personal information described in this policy.</p>
+
+  <h2>2. What we collect and why</h2>
+
+  <h3>Microphone audio</h3>
+  <p>When you hold the speak button, the app captures audio from your device microphone and streams
+    it to our server over an encrypted WebRTC connection. This is the core function of the app: we
+    cannot translate speech we cannot hear. The microphone is not opened when you are not in a
+    translation session, and the app does not record in the background. On the Apple Watch
+    companion, audio is recorded only for the duration of a single press and is uploaded as one
+    complete recording when you release.</p>
+
+  <h3>Transcripts of what is said</h3>
+  <p>Your speech is converted to text (the "original") and that text is translated into the other
+    language (the "translation"). Both texts are shown on screen, spoken aloud, and stored as the
+    session transcript.</p>
+
+  <h3>Language and session settings</h3>
+  <p>The two languages you have selected, an optional display name for each speaker, an optional
+    conversation topic, a randomly generated session code, and the session start time and duration.
+    The display name and topic are free-text fields you fill in yourself — please do not enter
+    information you would not want in a transcript.</p>
+
+  <h3>Technical connection data</h3>
+  <p>Establishing a real-time audio connection requires your device's network (IP) addresses to be
+    exchanged with our server and with the relay service described in section 3. Our server writes
+    operational logs — timestamps, session codes, connection events, recording sizes and audio
+    levels, and error messages. These logs are for keeping the service working and are not used to
+    profile you.</p>
+
+  <h3>What we deliberately do not collect</h3>
+  <ul>
+    <li>No account, email address, phone number, or password — the app has no sign-in at all.</li>
+    <li>No advertising identifiers, no ad networks, no advertising of any kind.</li>
+    <li>No analytics, crash-reporting, attribution, or tracking SDKs are bundled in the app.</li>
+    <li>No contacts, photos, calendar, location, or health data.</li>
+    <li>No payment information — the app does not take payments.</li>
+  </ul>
+
+  <h2>3. Who processes your data</h2>
+  <p>We use a small number of third-party processors to deliver the translation itself. They act on
+    our instructions and are bound by their own contractual and privacy obligations. We do not sell
+    or rent your data to anyone, and we do not share it with data brokers, advertisers, or for any
+    purpose other than delivering the translation you asked for.</p>
+
+  <div class="table-scroll">
+  <table>
+    <caption>Third parties involved in a translation session</caption>
+    <thead>
+      <tr><th>Processor</th><th>What it receives</th><th>Why</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Microsoft Azure</strong> (Azure Container Apps, Australia East region)</td>
+        <td>Hosts our server. Receives your audio stream, transcripts, and connection metadata.</td>
+        <td>Runs the application that coordinates the whole session.</td>
+      </tr>
+      <tr>
+        <td><strong>ElevenLabs</strong></td>
+        <td>Your microphone audio, the transcribed text, and the translated text.</td>
+        <td>Speech-to-text, and text-to-speech for the translated voice. In our ElevenLabs Agents
+          configuration, ElevenLabs also performs the translation itself.</td>
+      </tr>
+      <tr>
+        <td><strong>Our language-model provider:</strong>
+          <span class="placeholder">[PLACEHOLDER: name the single LLM provider actually configured
+          in the deployed build and its processing region — the code supports OpenAI, Azure OpenAI /
+          Azure AI Foundry, AWS Bedrock, Cerebras, Groq, Mistral and DeepSeek, and the deployed value
+          determines which company and which country this is. Naming the wrong one is a compliance
+          problem.]</span></td>
+        <td>The transcribed text of what was said, plus the source and target language.</td>
+        <td>Produces the translation. Not used when the ElevenLabs Agents engine is enabled.</td>
+      </tr>
+      <tr>
+        <td><strong>Twilio</strong> (Network Traversal Service)</td>
+        <td>Your device's network address, and — when a direct connection is not possible — the
+          encrypted audio packets, which pass through as relayed traffic.</td>
+        <td>Supplies the STUN/TURN relay that lets the audio connection form across mobile networks
+          and firewalls.</td>
+      </tr>
+      <tr>
+        <td><strong>Google</strong> (public STUN server, fallback only)</td>
+        <td>Your device's network address, if the Twilio relay is unavailable.</td>
+        <td>Fallback network-address discovery. No audio or transcript is sent to it.</td>
+      </tr>
+      <tr>
+        <td><strong>Content delivery networks</strong> (unpkg, Google Fonts)</td>
+        <td>Your device's network address and browser user-agent when the app interface loads.</td>
+        <td>Serve the interface's fonts and JavaScript libraries. No audio or transcript is sent to
+          them.</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>These providers operate in multiple countries. If you are outside the country where a provider
+    processes data, your information will be transferred internationally.
+    <span class="placeholder">[PLACEHOLDER: list the specific processing countries for the deployed
+    configuration and the transfer mechanism relied on — e.g. Standard Contractual Clauses for
+    transfers out of the EEA/UK.]</span></p>
+
+  <h2>4. What is kept, where, and for how long</h2>
+
+  <div class="table-scroll">
+  <table>
+    <caption>Retention by location</caption>
+    <thead>
+      <tr><th>Where</th><th>What is held</th><th>How long</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Your device (iOS)</td>
+        <td>Session transcripts, speaker names, topic, languages, duration, timestamps — stored in
+          the app's private SwiftData database.</td>
+        <td>Until you delete the app. See section 5.</td>
+      </tr>
+      <tr>
+        <td>Your device (Android)</td>
+        <td>The same session history, stored in the app's private database.</td>
+        <td>Until you delete the app or clear the app's storage. See section 5.</td>
+      </tr>
+      <tr>
+        <td>Our server</td>
+        <td>Transcript text and session metadata, held <em>in the memory of the running process</em>.
+          Audio is streamed through and is not written to disk or to any database.</td>
+        <td>For as long as that server process is running. It is discarded whenever the service
+          restarts, is redeployed, or scales down.
+          <span class="placeholder">[PLACEHOLDER: state a concrete maximum retention period and
+          implement it — the current code holds sessions in memory with no expiry, so the honest
+          period is "until the container restarts", which is not a period a user or a regulator can
+          rely on. Add a scheduled purge and state its interval here.]</span></td>
+      </tr>
+      <tr>
+        <td>Server logs</td>
+        <td>Timestamps, session codes, connection and error events. Not transcript text.</td>
+        <td><span class="placeholder">[PLACEHOLDER: log retention period configured in Azure —
+          e.g. 30 days.]</span></td>
+      </tr>
+      <tr>
+        <td>Our processors</td>
+        <td>Whatever each receives per section 3, under that provider's own retention policy.</td>
+        <td><span class="placeholder">[PLACEHOLDER: confirm the retention/zero-retention setting on
+          each provider account — in particular whether ElevenLabs history logging and the language
+          model provider's abuse-monitoring retention are switched off — and state the outcome
+          here.]</span></td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="callout">
+    <p><strong>Please be aware:</strong> the app has no sign-in. A session's server-side copy is
+      protected by its session code, which is long and randomly generated, and the app only ever
+      lists sessions created on your own device. But the code is the only thing protecting that
+      copy: anyone you share a session code with can view that session's transcript for as long as
+      the server process is running. Share session codes only with people you intend to include in
+      the conversation.</p>
+  </div>
+
+  <h2>5. Your on-device history and how to clear it</h2>
+  <p>Your conversation history lives in the app's own private storage on your device. It is not
+    backed up to any account of ours, and we cannot read it.</p>
+  <ul>
+    <li><strong>iOS and watchOS:</strong> deleting the app removes its database and everything in
+      it. <span class="placeholder">[PLACEHOLDER: if an in-app "clear history" control is shipped,
+      describe it here — no delete function exists in the current build, so deleting the app is
+      genuinely the only way.]</span></li>
+    <li><strong>Android:</strong> Settings → Apps → Vocare Translate → Storage → Clear storage, or
+      uninstall the app.</li>
+    <li>If your device backs up app data (iCloud Backup, Google Backup), a copy of that history may
+      be included in the backup, under Apple's or Google's own privacy terms.</li>
+  </ul>
+  <p>To have the server-side copy of a session removed sooner than section 4 describes, contact us
+    at the address in section 9 with the session code.</p>
+
+  <h2>6. Children</h2>
+  <p>Vocare Translate is not directed at children and we do not knowingly collect personal
+    information from children under 13 (or the equivalent age of digital consent where you live).
+    The app has no accounts, no user-generated content shared with others, no social features, and
+    no advertising. If you believe a child has used the app and you would like their data removed,
+    contact us and we will help.</p>
+
+  <h2>7. Legal basis for processing</h2>
+  <p>Where the GDPR, UK GDPR, or a similar law applies:</p>
+  <ul>
+    <li><strong>Performance of a contract</strong> (Art. 6(1)(b)) — processing your audio and
+      transcripts is what delivers the translation service you have asked for.</li>
+    <li><strong>Consent</strong> (Art. 6(1)(a)) — you grant microphone access explicitly through
+      your operating system, and you may withdraw it at any time in your device settings, which
+      stops all audio processing.</li>
+    <li><strong>Legitimate interests</strong> (Art. 6(1)(f)) — keeping the service secure, available
+      and free of abuse, using the operational logs described in section 2.</li>
+  </ul>
+  <p>Spoken conversation can contain special-category information (Art. 9) if you choose to discuss,
+    for example, health matters. We do not seek it out and we do not analyse transcripts for any
+    purpose beyond producing the translation, but you should keep it in mind when deciding what to
+    say.</p>
+  <p>Australian users: we handle personal information in accordance with the Privacy Act 1988 (Cth)
+    and the Australian Privacy Principles.</p>
+
+  <h2>8. Your rights</h2>
+  <p>Depending on where you live, you may have the right to access, correct, delete, or export your
+    personal information, to object to or restrict its processing, and to complain to your data
+    protection authority. Because the app holds no account, we cannot look you up by name — a
+    request about a specific session needs its session code. We do not sell personal information and
+    do not "share" it for cross-context behavioural advertising as those terms are used in
+    California law.</p>
+
+  <h2>9. Contact</h2>
+  <section class="card">
+    <dl class="contact">
+      <dt>Privacy enquiries</dt>
+      <dd><span class="placeholder">[PLACEHOLDER: monitored privacy contact email address — this
+        must be a real, working address; App Store and Play both check it.]</span></dd>
+      <dt>Postal address</dt>
+      <dd><span class="placeholder">[PLACEHOLDER: registered postal address of the publishing
+        entity.]</span></dd>
+      <dt>Data protection contact</dt>
+      <dd><span class="placeholder">[PLACEHOLDER: DPO or EU/UK representative if one is required for
+        your entity; delete this row if not.]</span></dd>
+    </dl>
+  </section>
+
+  <h2>10. Changes to this policy</h2>
+  <p>If we change how the app handles your data we will update this page and change the date at the
+    top. Material changes will also be noted in the app's release notes.</p>
+
+  <footer>
+    Vocare Translate — <span class="placeholder">[PLACEHOLDER: publisher name]</span>. This policy
+    is served at the same address as the app.
+  </footer>
+</main>
+</body>
+</html>
