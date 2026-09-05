@@ -1,10 +1,11 @@
 """HTTP smoke test for a disposable, credential-free backend container only."""
 import json
+import os
 import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-BASE = 'http://127.0.0.1:8080'
+BASE = os.environ.get('SMOKE_BASE_URL', 'http://127.0.0.1:8080').rstrip('/')
 
 
 def request(path, payload=None):
@@ -22,7 +23,7 @@ for attempt in range(30):
         status, _ = request('/healthz')
         assert status == 200
         break
-    except (URLError, TimeoutError):
+    except (URLError, TimeoutError, ConnectionError):
         time.sleep(1)
 else:
     raise RuntimeError('Local backend did not become healthy')
