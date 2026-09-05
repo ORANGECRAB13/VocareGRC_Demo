@@ -109,17 +109,20 @@ function buildInto(outDir) {
   // esbuild acts as a pure JSX transpiler here: output stays ~1:1 with the
   // source and is trivially reviewable.
   const esbuild = path.join(ROOT, 'node_modules', 'esbuild', 'bin', 'esbuild');
+  const esbuildArgs = [
+    path.join(STATIC, 'vocare-app.jsx'),
+    '--loader:.jsx=jsx',
+    '--target=es2019',
+    '--format=iife',
+    `--outfile=${path.join(outDir, 'app.js')}`,
+    `--banner:js=// ${GENERATED}vocare-app.jsx`,
+  ];
+  // On Windows this package entrypoint is a JavaScript shim; on Linux the
+  // install step replaces it with an ELF executable. Passing the latter to
+  // `node` produces `SyntaxError: Invalid or unexpected token` in CI.
   execFileSync(
-    process.execPath,
-    [
-      esbuild,
-      path.join(STATIC, 'vocare-app.jsx'),
-      '--loader:.jsx=jsx',
-      '--target=es2019',
-      '--format=iife',
-      `--outfile=${path.join(outDir, 'app.js')}`,
-      `--banner:js=// ${GENERATED}vocare-app.jsx`,
-    ],
+    process.platform === 'win32' ? process.execPath : esbuild,
+    process.platform === 'win32' ? [esbuild, ...esbuildArgs] : esbuildArgs,
     { stdio: 'inherit' },
   );
 
