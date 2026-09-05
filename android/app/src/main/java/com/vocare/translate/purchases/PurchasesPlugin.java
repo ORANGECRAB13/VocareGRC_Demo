@@ -21,6 +21,7 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.ArrayList;
 
 /**
  * Auto-renewing subscription purchases via Google Play Billing.
@@ -43,7 +44,9 @@ public class PurchasesPlugin extends Plugin {
     private static final String PRODUCT_ID = "vocare_pro_monthly";
 
     private BillingClient billingClient;
-    private ProductDetails cachedProduct;
+    private boolean connecting;
+    private final List<Runnable> readyCalls = new ArrayList<>();
+    private final List<PluginCall> connectionCalls = new ArrayList<>();
 
     /** Set for the duration of a purchase flow; Play answers on a listener, not a callback. */
     private PluginCall pendingPurchase;
@@ -62,6 +65,7 @@ public class PurchasesPlugin extends Plugin {
         }
 
         for (Purchase purchase : purchases) {
+            if (!purchase.getProducts().contains(PRODUCT_ID)) continue;
             if (purchase.getPurchaseState() == Purchase.PurchaseState.PENDING) {
                 // Slow payment methods (e.g. cash at a kiosk). Not an error: the
                 // purchase lands on this listener again once it clears.
@@ -84,13 +88,28 @@ public class PurchasesPlugin extends Plugin {
     // ── Connection ────────────────────────────────────────────────
 
     private void withBilling(PluginCall call, Runnable ready) {
+        getActivity().runOnUiThread(() -> connectBilling(call, ready));
+    }
+
+    private void reject(PluginCall call, String message) {
+        if (pendingPurchase == call) pendingPurchase = null;
+        call.reject(message);
+    }
+
+    private void connectBilling(PluginCall call, Runnable ready) {
         if (billingClient != null && billingClient.isReady()) {
             ready.run();
             return;
         }
+        readyCalls.add(ready);
+        connectionCalls.add(call);
+        if (connecting) return;
+        connecting = true;
+        if (billingClient != null) billingClient.endConnection();
         billingClient = BillingClient
             .newBuilder(getContext())
             .setListener(purchasesUpdatedListener)
+            .enableAutoServiceReconnection()
             .enablePendingPurchases(
                 PendingPurchasesParams.newBuilder().enableOneTimeProducts().build()
             )
@@ -99,17 +118,24 @@ public class PurchasesPlugin extends Plugin {
         billingClient.startConnection(new BillingClientStateListener() {
             @Override
             public void onBillingSetupFinished(@NonNull BillingResult result) {
+                connecting = false;
+                List<Runnable> callbacks = new ArrayList<>(readyCalls);
+                List<PluginCall> calls = new ArrayList<>(connectionCalls);
+                readyCalls.clear();
+                connectionCalls.clear();
                 if (result.getResponseCode() == BillingClient.BillingResponseCode.OK) {
-                    ready.run();
+                    for (Runnable callback : callbacks) callback.run();
                 } else {
-                    call.reject("billing_unavailable: " + result.getDebugMessage());
+                    for (PluginCall waiting : calls) reject(waiting, "billing_unavailable: " + result.getDebugMessage());
                 }
             }
 
             @Override
             public void onBillingServiceDisconnected() {
-                // Left to the next withBilling() call to reconnect. Retrying here
-                // risks a tight loop on a device where Play is genuinely absent.
+                connecting = false;
+                for (PluginCall waiting : connectionCalls) reject(waiting, "billing_disconnected");
+                readyCalls.clear();
+                connectionCalls.clear();
             }
         });
     }
@@ -129,15 +155,12 @@ public class PurchasesPlugin extends Plugin {
     @PluginMethod
     public void getProduct(PluginCall call) {
         withBilling(call, () -> queryProduct(call, details -> {
-            ProductDetails.SubscriptionOfferDetails offer =
-                details.getSubscriptionOfferDetails() == null || details.getSubscriptionOfferDetails().isEmpty()
-                    ? null
-                    : details.getSubscriptionOfferDetails().get(0);
-
-            String price = "";
-            if (offer != null && !offer.getPricingPhases().getPricingPhaseList().isEmpty()) {
-                price = offer.getPricingPhases().getPricingPhaseList().get(0).getFormattedPrice();
+            ProductDetails.SubscriptionOfferDetails offer = monthlyOffer(details);
+            if (offer == null) {
+                reject(call, "monthly_subscription_unavailable");
+                return;
             }
+            String price = offer.getPricingPhases().getPricingPhaseList().get(0).getFormattedPrice();
 
             JSObject ret = new JSObject();
             ret.put("productId", details.getProductId());
@@ -150,10 +173,16 @@ public class PurchasesPlugin extends Plugin {
 
     @PluginMethod
     public void purchase(PluginCall call) {
-        withBilling(call, () -> queryProduct(call, details -> {
-            List<ProductDetails.SubscriptionOfferDetails> offers = details.getSubscriptionOfferDetails();
-            if (offers == null || offers.isEmpty()) {
-                call.reject("no_subscription_offer");
+        getActivity().runOnUiThread(() -> {
+          if (pendingPurchase != null) {
+              call.reject("purchase_in_progress");
+              return;
+          }
+          pendingPurchase = call;
+          withBilling(call, () -> queryProduct(call, details -> {
+            ProductDetails.SubscriptionOfferDetails offer = monthlyOffer(details);
+            if (offer == null) {
+                reject(call, "monthly_subscription_unavailable");
                 return;
             }
 
@@ -161,19 +190,18 @@ public class PurchasesPlugin extends Plugin {
                 .setProductDetailsParamsList(Collections.singletonList(
                     BillingFlowParams.ProductDetailsParams.newBuilder()
                         .setProductDetails(details)
-                        .setOfferToken(offers.get(0).getOfferToken())
+                        .setOfferToken(offer.getOfferToken())
                         .build()
                 ))
                 .build();
 
-            pendingPurchase = call;
-            call.setKeepAlive(true);
             BillingResult result = billingClient.launchBillingFlow(getActivity(), params);
             if (result.getResponseCode() != BillingClient.BillingResponseCode.OK) {
                 pendingPurchase = null;
-                call.reject("could_not_launch_billing: " + result.getDebugMessage());
+                reject(call, "could_not_launch_billing: " + result.getDebugMessage());
             }
-        }));
+          }));
+        });
     }
 
     /** Play's restore: whatever this account already owns on this device. */
@@ -241,10 +269,6 @@ public class PurchasesPlugin extends Plugin {
     }
 
     private void queryProduct(PluginCall call, ProductHandler handler) {
-        if (cachedProduct != null) {
-            handler.handle(cachedProduct);
-            return;
-        }
         QueryProductDetailsParams params = QueryProductDetailsParams.newBuilder()
             .setProductList(Collections.singletonList(
                 QueryProductDetailsParams.Product.newBuilder()
@@ -254,16 +278,37 @@ public class PurchasesPlugin extends Plugin {
             ))
             .build();
 
-        billingClient.queryProductDetailsAsync(params, (result, productDetailsList) -> {
+        billingClient.queryProductDetailsAsync(params, (result, queryResult) -> {
+            List<ProductDetails> productDetailsList = queryResult.getProductDetailsList();
             if (result.getResponseCode() != BillingClient.BillingResponseCode.OK
                 || productDetailsList == null
                 || productDetailsList.isEmpty()) {
-                call.reject("product_not_found: " + result.getDebugMessage());
+                reject(call, "product_not_found: " + result.getDebugMessage());
                 return;
             }
-            cachedProduct = productDetailsList.get(0);
-            handler.handle(cachedProduct);
+            handler.handle(productDetailsList.get(0));
         });
+    }
+
+    // The paywall promises a monthly price, without a trial. Select the matching
+    // base plan, not an arbitrary introductory offer or yearly plan.
+    private ProductDetails.SubscriptionOfferDetails monthlyOffer(ProductDetails details) {
+        if (details.getSubscriptionOfferDetails() == null) return null;
+        for (ProductDetails.SubscriptionOfferDetails offer : details.getSubscriptionOfferDetails()) {
+            List<ProductDetails.PricingPhase> phases = offer.getPricingPhases().getPricingPhaseList();
+            if (offer.getOfferId() == null && phases.size() == 1
+                    && "P1M".equals(phases.get(0).getBillingPeriod())
+                    && phases.get(0).getRecurrenceMode() == ProductDetails.RecurrenceMode.INFINITE_RECURRING) {
+                return offer;
+            }
+        }
+        return null;
+    }
+
+    @Override
+    protected void handleOnResume() {
+        super.handleOnResume();
+        notifyListeners("entitlementChanged", new JSObject());
     }
 
     private static JSObject status(String value) {

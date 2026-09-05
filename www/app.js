@@ -237,7 +237,7 @@
     if (!plugin) return { reachable: false, receipt: "" };
     try {
       const held = await plugin.currentEntitlement();
-      return { reachable: true, receipt: (held == null ? void 0 : held.active) ? receiptOf(held) : "" };
+      return { reachable: true, receipt: (held == null ? void 0 : held.active) ? receiptOf(held) : "", raw: held };
     } catch (error) {
       console.warn("Could not read entitlement:", error);
       return { reachable: false, receipt: "" };
@@ -250,6 +250,7 @@
     if ((result == null ? void 0 : result.status) === "cancelled") return { status: "cancelled" };
     if ((result == null ? void 0 : result.status) === "pending") return { status: "pending" };
     if ((result == null ? void 0 : result.status) !== "purchased") throw new Error("purchase_failed");
+    if (!receiptOf(result)) throw new Error("purchase_receipt_missing");
     return { status: "purchased", receipt: receiptOf(result), raw: result };
   }
   async function restorePurchases() {
@@ -260,12 +261,17 @@
   }
   async function acknowledgeIfNeeded(raw) {
     const plugin = purchasesPlugin();
-    if (!(plugin == null ? void 0 : plugin.acknowledge) || !(raw == null ? void 0 : raw.purchaseToken) || raw.acknowledged) return;
-    try {
-      await plugin.acknowledge({ purchaseToken: raw.purchaseToken });
-    } catch (error) {
-      console.warn("Could not acknowledge purchase:", error);
+    if (!(raw == null ? void 0 : raw.purchaseToken) || raw.acknowledged) return;
+    if (!(plugin == null ? void 0 : plugin.acknowledge)) throw new Error("purchase_acknowledgement_unavailable");
+    await plugin.acknowledge({ purchaseToken: raw.purchaseToken });
+  }
+  async function syncStoreEntitlement() {
+    const held = await currentReceipt();
+    const fresh = !held.reachable && !held.receipt ? await fetchBalance() : await activateEntitlement(held);
+    if (fresh.verified === true && fresh.tier === "pro") {
+      await acknowledgeIfNeeded(held.raw);
     }
+    return fresh;
   }
   async function showFreeTierBanner() {
     const plugin = admobPlugin();
@@ -1133,7 +1139,7 @@
       /* @__PURE__ */ React.createElement(Icon, { name: "mic", size: 30, color: data.pressing ? "#fff" : isA ? accent : accentDeep })
     ))));
   }
-  function LiveSplitView({ sideA, sideB, elapsedStr, onEnd, badge, notice, children }) {
+  function LiveSplitView({ sideA, sideB, elapsedStr, onEnd, onSwap, swapDisabled = false, badge, notice, children }) {
     return /* @__PURE__ */ React.createElement("div", { style: {
       flex: 1,
       display: "flex",
@@ -1153,7 +1159,29 @@
       flexShrink: 0,
       borderTop: `1px solid ${T.hairline}`,
       borderBottom: `1px solid ${T.hairline}`
-    } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 7 } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 11, fontWeight: 700, color: T.tealSoft } }, sideB.langInfo.code.toUpperCase()), /* @__PURE__ */ React.createElement(Icon, { name: "swap", size: 15, color: "rgba(28,32,51,.35)" }), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 11, fontWeight: 700, color: T.amberSoft } }, sideA.langInfo.code.toUpperCase())), /* @__PURE__ */ React.createElement("div", { style: { flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 } }, badge ? /* @__PURE__ */ React.createElement("span", { style: {
+    } }, /* @__PURE__ */ React.createElement(
+      "button",
+      {
+        type: "button",
+        onClick: onSwap,
+        disabled: !onSwap || swapDisabled,
+        "aria-label": onSwap ? "Swap languages during session" : "Language direction",
+        style: {
+          display: "flex",
+          alignItems: "center",
+          gap: 7,
+          border: 0,
+          padding: "8px 4px",
+          background: "transparent",
+          borderRadius: 10,
+          cursor: onSwap && !swapDisabled ? "pointer" : "default",
+          opacity: swapDisabled ? 0.45 : 1
+        }
+      },
+      /* @__PURE__ */ React.createElement("span", { style: { fontSize: 11, fontWeight: 700, color: T.tealSoft } }, sideB.langInfo.code.toUpperCase()),
+      /* @__PURE__ */ React.createElement(Icon, { name: "swap", size: 15, color: "rgba(28,32,51,.35)" }),
+      /* @__PURE__ */ React.createElement("span", { style: { fontSize: 11, fontWeight: 700, color: T.amberSoft } }, sideA.langInfo.code.toUpperCase())
+    ), /* @__PURE__ */ React.createElement("div", { style: { flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 } }, badge ? /* @__PURE__ */ React.createElement("span", { style: {
       fontFamily: T.mono,
       fontSize: 9,
       letterSpacing: ".12em",
@@ -1695,6 +1723,113 @@
     fil: "fil-PH"
   };
   const speechLocale = (code) => SPEECH_LOCALE[code] || code;
+  const ANDROID_RECOGNITION_LOCALE = { zh: "cmn-Hans-CN" };
+  const recognitionLocale = (code, platform = nativePlatform()) => platform === "android" ? ANDROID_RECOGNITION_LOCALE[code] || speechLocale(code) : speechLocale(code);
+  function createOfflineSpeechCapture(sr, onPartial, timeoutMs = 4e3) {
+    let text = "", ready = false, cancelled = false, failure = null;
+    const listeners = [];
+    let signalReady;
+    const finished = new Promise((resolve) => {
+      signalReady = resolve;
+    });
+    const clean = async () => {
+      for (const listener of listeners.splice(0)) await listener.remove();
+    };
+    const check = () => {
+      if (cancelled) throw new Error("Speech capture cancelled.");
+    };
+    return {
+      async start(language) {
+        try {
+          listeners.push(await sr.addListener("partialResults", (ev) => {
+            var _a;
+            if (cancelled) return;
+            text = ((_a = ev == null ? void 0 : ev.matches) == null ? void 0 : _a[0]) || "";
+            onPartial(text);
+          }));
+          check();
+          listeners.push(await sr.addListener("readyForNextSession", () => {
+            ready = true;
+            signalReady();
+          }));
+          check();
+          listeners.push(await sr.addListener("error", (ev) => {
+            failure = new Error((ev == null ? void 0 : ev.message) || "On-device speech recognition failed.");
+          }));
+          check();
+          await sr.start({
+            language,
+            useOnDeviceRecognition: true,
+            preferLegacyRecognizer: true,
+            partialResults: true,
+            maxResults: 1,
+            popup: false
+          });
+          check();
+        } catch (error) {
+          await clean();
+          throw error;
+        }
+      },
+      async stop() {
+        var _a, _b;
+        let timer;
+        try {
+          check();
+          if (!ready) await sr.stop();
+          await Promise.race([finished, new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error("Speech recognition timed out. Please try again.")), timeoutMs);
+          })]);
+          check();
+          if (failure) throw failure;
+          const cached = await sr.getLastPartialResult();
+          return ((cached == null ? void 0 : cached.available) ? cached.text || ((_a = cached.matches) == null ? void 0 : _a[0]) || text : text).trim();
+        } catch (error) {
+          await ((_b = sr.forceStop) == null ? void 0 : _b.call(sr).catch(() => {
+          }));
+          throw error;
+        } finally {
+          clearTimeout(timer);
+          await clean();
+        }
+      },
+      async cancel() {
+        var _a;
+        cancelled = true;
+        signalReady();
+        await ((_a = sr.forceStop) == null ? void 0 : _a.call(sr).catch(() => {
+        }));
+        await clean();
+      }
+    };
+  }
+  async function localTtsVoice(tts, locale) {
+    const { voices = [] } = await tts.getSupportedVoices();
+    const normalize = (value) => String(value).toLowerCase().replaceAll("_", "-");
+    const target = normalize(locale);
+    const matches = (voice) => voice.localService === true;
+    let index = voices.findIndex((voice) => matches(voice) && normalize(voice.lang) === target);
+    if (index < 0) index = voices.findIndex((voice) => matches(voice) && normalize(voice.lang).split("-")[0] === target.split("-")[0]);
+    if (index < 0) throw new Error("No offline voice is installed for this language. Download a voice in your device text-to-speech settings.");
+    return index;
+  }
+  async function ensureOfflineSpeechAvailable(sr, language, platform = nativePlatform()) {
+    var _a;
+    if (platform === "android") {
+      const availability2 = await ((_a = sr.available) == null ? void 0 : _a.call(sr));
+      if ((availability2 == null ? void 0 : availability2.available) === false) {
+        throw new Error("Speech recognition is not available on this device.");
+      }
+      return;
+    }
+    const availability = await sr.isOnDeviceRecognitionAvailable({
+      language,
+      preferLegacyRecognizer: true
+    });
+    if (!(availability == null ? void 0 : availability.available)) {
+      throw new Error("On-device speech recognition is not available on this device.");
+    }
+  }
   function OfflineLiveScreen({ langA, langB, onBack }) {
     var _a, _b, _c, _d;
     const [turns, setTurns] = useState([]);
@@ -1702,12 +1837,12 @@
     const [phase, setPhase] = useState("idle");
     const [error, setError] = useState(null);
     const [partial, setPartial] = useState("");
-    const a = langA;
-    const b = langB;
+    const [languages, setLanguages] = useState({ a: langA, b: langB });
+    const a = languages.a;
+    const b = languages.b;
     const [sttLocales, setSttLocales] = useState(null);
     const [elapsed, setElapsed] = useState(0);
-    const listenerRef = useRef(null);
-    const startRef = useRef(null);
+    const operationRef = useRef(null);
     const SR = (_b = (_a = window.Capacitor) == null ? void 0 : _a.Plugins) == null ? void 0 : _b.SpeechRecognition;
     const TTS = (_d = (_c = window.Capacitor) == null ? void 0 : _c.Plugins) == null ? void 0 : _d.TextToSpeech;
     useEffect(() => {
@@ -1715,99 +1850,92 @@
       return () => clearInterval(tick);
     }, []);
     useEffect(() => {
-      let handle;
+      let mounted = true;
       (async () => {
-        var _a2, _b2;
+        var _a2;
         try {
-          handle = await ((_a2 = SR == null ? void 0 : SR.addListener) == null ? void 0 : _a2.call(SR, "partialResults", (ev) => {
-            setPartial((ev == null ? void 0 : ev.matches) && ev.matches[0] || "");
-          }));
-          listenerRef.current = handle;
+          const { languages: languages2 = [] } = await ((_a2 = SR == null ? void 0 : SR.getSupportedLanguages) == null ? void 0 : _a2.call(SR)) || {};
+          if (mounted) setSttLocales(languages2.map((l) => String(l).toLowerCase()));
         } catch (_) {
-        }
-        try {
-          const { languages = [] } = await ((_b2 = SR == null ? void 0 : SR.getSupportedLanguages) == null ? void 0 : _b2.call(SR)) || {};
-          setSttLocales(languages.map((l) => String(l).toLowerCase()));
-        } catch (_) {
-          setSttLocales([]);
+          if (mounted) setSttLocales([]);
         }
       })();
       return () => {
-        var _a2, _b2, _c2, _d2;
+        var _a2, _b2;
+        mounted = false;
+        const op = operationRef.current;
+        operationRef.current = null;
+        (_a2 = op == null ? void 0 : op.capture) == null ? void 0 : _a2.cancel().catch(() => {
+        });
         try {
-          (_b2 = (_a2 = listenerRef.current) == null ? void 0 : _a2.remove) == null ? void 0 : _b2.call(_a2);
-        } catch (_) {
-        }
-        try {
-          (_c2 = SR == null ? void 0 : SR.stop) == null ? void 0 : _c2.call(SR);
-        } catch (_) {
-        }
-        try {
-          (_d2 = TTS == null ? void 0 : TTS.stop) == null ? void 0 : _d2.call(TTS);
+          (_b2 = TTS == null ? void 0 : TTS.stop) == null ? void 0 : _b2.call(TTS);
         } catch (_) {
         }
       };
     }, []);
     async function press(side) {
-      var _a2;
-      if (phase !== "idle" || !SR) return;
+      if (operationRef.current || phase !== "idle" || !SR) return;
+      const op = { side, capture: null, released: false, start: null };
+      operationRef.current = op;
       setError(null);
       setPartial("");
       setHolding(side);
       setPhase("listening");
       const from = side === "a" ? a : b;
-      try {
-        const avail = await ((_a2 = SR.available) == null ? void 0 : _a2.call(SR));
-        if (avail && avail.available === false) {
-          throw new Error("On-device speech recognition is not available on this device.");
+      op.start = (async () => {
+        if (await offlinePairStatus(a, b) !== "installed") {
+          throw new Error("Download both translation languages before starting an offline session.");
         }
+        await ensureOfflineSpeechAvailable(SR, recognitionLocale(from));
         const perm = await SR.requestPermissions();
         const state = perm == null ? void 0 : perm.speechRecognition;
         if (state && state !== "granted") {
           throw new Error(
-            "Speech recognition permission was declined. Enable it for Vocare in iPhone Settings."
+            "Speech recognition permission was declined. Enable microphone access for Voca in your device settings."
           );
         }
-        startRef.current = SR.start({
-          language: speechLocale(from),
-          useOnDeviceRecognition: true,
-          // the whole point — no audio leaves the device
-          partialResults: true,
-          maxResults: 1,
-          popup: false
-        });
-        startRef.current.catch(() => {
-        });
+        if (operationRef.current !== op) throw new Error("Speech capture cancelled.");
+        op.capture = createOfflineSpeechCapture(SR, setPartial);
+        await op.capture.start(recognitionLocale(from));
+      })();
+      try {
+        await op.start;
       } catch (err) {
+        if (operationRef.current !== op) return;
+        operationRef.current = null;
         setHolding(null);
         setPhase("idle");
         setError((err == null ? void 0 : err.message) || "Could not start on-device speech recognition.");
       }
     }
     async function release(side) {
-      if (holding !== side) return;
+      const op = operationRef.current;
+      if (!op || op.side !== side || op.released) return;
+      op.released = true;
       const from = side === "a" ? a : b;
       const to = side === "a" ? b : a;
       setHolding(null);
+      setPhase("translating");
       let heard = "";
       try {
-        await SR.stop();
-        const res = await Promise.race([
-          startRef.current,
-          new Promise((resolve) => setTimeout(() => resolve(null), 4e3))
-        ]);
-        heard = res && res.matches && res.matches[0] || partial || "";
-      } catch (_) {
-        heard = partial || "";
-      } finally {
-        startRef.current = null;
+        await op.start;
+        if (operationRef.current !== op) return;
+        heard = await op.capture.stop();
+        if (operationRef.current !== op) return;
+      } catch (error2) {
+        if (operationRef.current !== op) return;
+        operationRef.current = null;
+        setPhase("idle");
+        setError((error2 == null ? void 0 : error2.message) || "Could not finish speech recognition.");
+        return;
       }
       heard = heard.trim();
       if (!heard) {
         setPhase("idle");
+        operationRef.current = null;
         setPartial("");
         setError(
-          `Nothing was recognised in ${getLang(from).label}. On-device recognition for ${getLang(from).label} may not be installed \u2014 add it under iPhone Settings \u203A General \u203A Keyboard \u203A Dictation Languages.`
+          `Nothing was recognised in ${getLang(from).label}. On-device recognition for ${getLang(from).label} may not be installed \u2014 download the recognition language in your device speech settings.`
         );
         return;
       }
@@ -1817,7 +1945,9 @@
         translated = await translateOffline(heard, from, to);
       } catch (_) {
       }
+      if (operationRef.current !== op) return;
       if (!translated) {
+        operationRef.current = null;
         setPhase("idle");
         setPartial("");
         setError(
@@ -1829,12 +1959,25 @@
       setPartial("");
       setPhase("speaking");
       try {
-        await (TTS == null ? void 0 : TTS.speak({ text: translated, lang: speechLocale(to), rate: 1 }));
-      } catch (_) {
+        if (!TTS) throw new Error("On-device speech synthesis is unavailable.");
+        const voice = await localTtsVoice(TTS, speechLocale(to));
+        if (operationRef.current !== op) return;
+        await TTS.speak({ text: translated, lang: speechLocale(to), voice, rate: 1 });
+      } catch (error2) {
+        if (operationRef.current === op) setError((error2 == null ? void 0 : error2.message) || "Could not speak the translation offline.");
       }
+      if (operationRef.current !== op) return;
+      operationRef.current = null;
       setPhase("idle");
     }
     const busy = phase !== "idle";
+    function swapLanguages() {
+      if (busy) return;
+      setLanguages((current) => ({ a: current.b, b: current.a }));
+      setTurns([]);
+      setPartial("");
+      setError(null);
+    }
     const langAInfo = getLang(a);
     const langBInfo = getLang(b);
     const sideStatus = (side) => {
@@ -1855,6 +1998,8 @@
       {
         elapsedStr: formatClock(elapsed),
         onEnd: onBack,
+        onSwap: swapLanguages,
+        swapDisabled: busy,
         badge: "On device",
         notice: error,
         sideA: {
@@ -2101,15 +2246,15 @@
           return;
         }
         const fresh = await activateEntitlement({ receipt: result.receipt, reachable: true });
-        if (fresh.tier !== "pro") {
-          setError("The store confirmed a purchase but it could not be verified. No charge has been kept \u2014 please contact support.");
+        if (fresh.verified !== true || fresh.tier !== "pro") {
+          setError("Your purchase could not be verified yet. Please try Restore purchases when connected, or contact support. Check your store account for its payment status.");
           return;
         }
         await acknowledgeIfNeeded(result.raw);
         onPurchased(fresh);
       } catch (err) {
         setError(
-          String(err == null ? void 0 : err.message) === "in_app_purchase_unavailable" ? "Purchases are only available in the App Store and Google Play builds." : "Something went wrong reaching the store. Please try again."
+          String(err == null ? void 0 : err.message) === "in_app_purchase_unavailable" ? "Purchases are only available in the App Store and Google Play builds." : "The purchase could not be completed or confirmed. Please try Restore purchases before buying again."
         );
       } finally {
         setBusy(null);
@@ -2189,8 +2334,7 @@
     }
     const syncEntitlement = useCallback(async () => {
       try {
-        const { receipt, reachable } = await currentReceipt();
-        const fresh = !reachable && !receipt ? await fetchBalance() : await activateEntitlement({ receipt, reachable });
+        const fresh = await syncStoreEntitlement();
         setBalance(fresh);
         return fresh;
       } catch (error) {
@@ -2206,9 +2350,16 @@
       const off = onEntitlementChanged(() => {
         syncEntitlement();
       });
+      const onResume = () => {
+        if (document.visibilityState === "visible") syncEntitlement();
+      };
+      document.addEventListener("visibilitychange", onResume);
+      const refresh = setInterval(onResume, 24e4);
       return () => {
         active = false;
         off();
+        clearInterval(refresh);
+        document.removeEventListener("visibilitychange", onResume);
       };
     }, [syncEntitlement]);
     useEffect(() => {

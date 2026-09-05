@@ -14,5 +14,5 @@ ext {
     androidxEspressoCoreVersion = '3.7.0'
     cordovaAndroidVersion = '14.0.1'
     roomVersion = '2.6.1'
-    billingVersion = '7.1.1'
+    billingVersion = '8.3.0'
 }

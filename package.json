@@ -4,6 +4,7 @@
   "private": true,
   "description": "Native iOS and Android shell for Vocare Translate",
   "scripts": {
+    "test:mobile": "node --test tests/mobile-regressions.test.mjs",
     "build:www": "node scripts/build-www.mjs",
     "verify:www": "node scripts/build-www.mjs --check",
     "ios:add": "cap add ios",

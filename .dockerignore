@@ -18,6 +18,12 @@ docker-compose.yml
 Dockerfile.base
 preview_server.py
 **/node_modules/
+android/
+ios/
+tests/
+*.jks
+*.keystore
+**/keystore.properties
 wheelhouse-linux/
 .venv-voice-tests/
 voice_tests/audio_cache/

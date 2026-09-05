@@ -9,6 +9,9 @@ android {
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1
         versionName "1.0"
+        // Ad-free builds still need a valid SDK application ID for its startup provider.
+        // Google's sample ID cannot serve production ads. Set the real app ID when enabling ads.
+        manifestPlaceholders = [admobAppId: System.getenv('VOCARE_ADMOB_ANDROID_APP_ID') ?: 'ca-app-pub-3940256099942544~3347511713']
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.

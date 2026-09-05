@@ -17,6 +17,8 @@ import re
 import sys
 import random
 import secrets
+import hashlib
+from store_entitlements import google_entitlement
 import time
 import wave
 from datetime import datetime, timezone
@@ -5754,10 +5756,9 @@ ENTITLEMENT_ENFORCED = os.getenv("ENTITLEMENT_ENFORCED", "false").strip().lower(
 # testers are the only ways to exercise a purchase before release, and they all
 # produce test receipts. It must NOT in production — a sandbox Apple Account is
 # free to create, so accepting sandbox receipts on a live build hands anyone a
-# subscription for nothing. Default true because today this app is pre-launch;
-# set STORE_ALLOW_SANDBOX=false in the same change that sets
-# ENTITLEMENT_ENFORCED=true.
-STORE_ALLOW_SANDBOX = os.getenv("STORE_ALLOW_SANDBOX", "true").strip().lower() == "true"
+# subscription for nothing. Test environments must explicitly set
+# STORE_ALLOW_SANDBOX=true; production defaults to rejecting sandbox receipts.
+STORE_ALLOW_SANDBOX = os.getenv("STORE_ALLOW_SANDBOX", "false").strip().lower() == "true"
 
 _ENTITLEMENT_PREFIX = os.getenv("LIVE_CALL_REDIS_PREFIX", "vocare:livecalls").rsplit(":", 1)[0] + ":entitlement"
 _entitlement_memory: dict[str, dict] = {}
@@ -5822,22 +5823,45 @@ async def _read_entitlement(subject: str) -> tuple[dict, bool]:
         try:
             raw = await client.hgetall(_entitlement_key(subject))
             if raw:
-                record = {"tier": raw.get("tier", "free"), "period": raw.get("period", ""), "used": int(raw.get("used", 0) or 0)}
+                record = {"tier": raw.get("tier", "free"), "period": raw.get("period", ""), "used": int(raw.get("used", 0) or 0),
+                          "expires_at": float(raw.get("expires_at", 0) or 0),
+                          "next_check": float(raw.get("next_check", 0) or 0),
+                          "billing_subject": raw.get("billing_subject", ""),
+                          "receipt": raw.get("receipt", ""), "platform": raw.get("platform", "")}
         except Exception:
             logger.exception("[entitlement] Redis read failed for %s; serving from memory", subject)
             durable = False
     if record is None:
-        record = _entitlement_memory.get(subject)
+        cached = _entitlement_memory.get(subject)
+        record = dict(cached) if cached else None
     if record is None:
         record = _blank_record()
+    billing_subject = record.get("billing_subject", "")
+    if not subject.startswith("store:") and billing_subject.startswith("store:"):
+        return await _read_entitlement(billing_subject)
     if record["period"] != _billing_period():
-        # New month: the allowance refills, the tier carries over.
-        record = _blank_record(record["tier"])
+        record.update(period=_billing_period(), used=0)
         await _write_entitlement(subject, record)
+    # Refresh server-side as well as on app resume, including refunds and renewals.
+    now = time.time()
+    changed = False
+    if record.get("receipt") and now >= record.get("next_check", 0):
+        proof = await _verify_purchase(record.get("platform", ""), record["receipt"])
+        if proof is not None:
+            record.update(proof)
+        record["next_check"] = now + 300
+        changed = True
+    if record["tier"] == "pro" and record.get("expires_at", 0) <= now:
+        record["tier"] = "free"
+        changed = True
+    if changed:
+        await _write_entitlement(subject, record)
+    record["_storage_subject"] = subject
     return record, durable
 
 
 async def _write_entitlement(subject: str, record: dict) -> None:
+    subject = record.get("_storage_subject", subject)
     _entitlement_memory[subject] = dict(record)
     client = _entitlement_client()
     if client is None:
@@ -5845,6 +5869,10 @@ async def _write_entitlement(subject: str, record: dict) -> None:
     try:
         await client.hset(_entitlement_key(subject), mapping={
             "tier": record["tier"], "period": record["period"], "used": str(record["used"]),
+            "expires_at": str(record.get("expires_at", 0)),
+            "next_check": str(record.get("next_check", 0)),
+            "billing_subject": record.get("billing_subject", ""),
+            "receipt": record.get("receipt", ""), "platform": record.get("platform", ""),
         })
         # Two full billing periods is enough history to survive a late renewal
         # without keeping a row for every install that ever opened the app.
@@ -5879,7 +5907,7 @@ def _entitlement_subject(value: str | None) -> str:
     # The subject is an opaque per-install id, not a credential. It scopes a
     # balance; it does not prove a purchase. Only /api/entitlement/activate,
     # which checks the store receipt, can move an install onto the paid tier.
-    if not subject or len(subject) > 128:
+    if not subject or len(subject) > 128 or subject.startswith("store:"):
         return ""
     return subject
 
@@ -5925,7 +5953,7 @@ async def _apple_root_ca() -> bytes | None:
     return _apple_root_cert
 
 
-async def _verify_apple_jws(jws: str) -> str | None:
+async def _verify_apple_jws(jws: str) -> dict | str | None:
     """Verify a StoreKit 2 signed transaction.
 
     The JWS header carries an x5c chain: leaf -> intermediate -> Apple root. We
@@ -6004,18 +6032,29 @@ async def _verify_apple_jws(jws: str) -> str | None:
 
     # StoreKit timestamps are milliseconds since the epoch.
     expires_ms = payload.get("expiresDate")
-    if expires_ms and datetime.fromtimestamp(expires_ms / 1000, timezone.utc) <= datetime.now(timezone.utc):
+    if not isinstance(expires_ms, (int, float)) or expires_ms / 1000 <= time.time():
         return "free"
-    return "pro"
+    transaction_id = payload.get("originalTransactionId")
+    if not isinstance(transaction_id, (str, int)) or not transaction_id:
+        return "free"
+    purchase_key = "store:" + hashlib.sha256(f"ios:{transaction_id}".encode()).hexdigest()
+    return {"tier": "pro", "expires_at": expires_ms / 1000, "purchase_key": purchase_key}
 
 
-async def _verify_google_token(purchase_token: str) -> str | None:
+async def _verify_google_token(purchase_token: str) -> dict | str | None:
     """Verify a Play purchase token against the Play Developer API.
 
     Needs a service account with the "View financial data" permission, linked to
     the Play Console. GOOGLE_PLAY_SERVICE_ACCOUNT_JSON holds its key material.
     """
     raw = os.getenv("GOOGLE_PLAY_SERVICE_ACCOUNT_JSON", "").strip()
+    key_file = os.getenv("GOOGLE_PLAY_SERVICE_ACCOUNT_FILE", "").strip()
+    if not raw and key_file:
+        try:
+            raw = Path(key_file).read_text(encoding="utf-8")
+        except OSError:
+            logger.error("[entitlement] configured Play credential file cannot be read")
+            return None
     if not raw:
         return None
     package = os.getenv("ANDROID_PACKAGE_NAME", "com.vocare.translate").strip()
@@ -6033,7 +6072,7 @@ async def _verify_google_token(purchase_token: str) -> str | None:
         )
         # Blocking refresh; short and cached inside the credentials object, so it
         # is kept off the event loop rather than made async.
-        await asyncio.to_thread(creds.refresh, GoogleRequest())
+        await asyncio.wait_for(asyncio.to_thread(creds.refresh, GoogleRequest()), timeout=10)
 
         url = (
             f"https://androidpublisher.googleapis.com/androidpublisher/v3/applications/"
@@ -6056,44 +6095,36 @@ async def _verify_google_token(purchase_token: str) -> str | None:
         logger.exception("[entitlement] Play verification failed")
         return None
 
-    # Play marks a licence-tester purchase with a testPurchase object rather than
-    # an environment string. Same rule as Apple's Sandbox.
-    if body.get("testPurchase") is not None:
-        if not STORE_ALLOW_SANDBOX:
-            logger.warning("[entitlement] refusing Play test purchase; STORE_ALLOW_SANDBOX is false")
-            return "free"
-        logger.info("[entitlement] accepting Play test purchase (STORE_ALLOW_SANDBOX=true)")
-
-    state = body.get("subscriptionState")
-    if state in ("SUBSCRIPTION_STATE_ACTIVE", "SUBSCRIPTION_STATE_IN_GRACE_PERIOD"):
-        return "pro"
-    return "free"
+    proof = google_entitlement(body, os.getenv("STORE_PRODUCT_ID", "vocare_pro_monthly").strip(), STORE_ALLOW_SANDBOX)
+    if proof["tier"] == "pro":
+        proof["purchase_key"] = "store:" + hashlib.sha256(f"android:{purchase_token}".encode()).hexdigest()
+    return proof
 
 
-async def _verify_purchase(platform: str, receipt: str) -> str | None:
+async def _verify_purchase(platform: str, receipt: str) -> dict | None:
     """Dispatch to the right store verifier. Unknown platform verifies nothing."""
     if not receipt:
         return None
     if platform == "ios":
-        return await _verify_apple_jws(receipt)
-    if platform == "android":
-        return await _verify_google_token(receipt)
-    logger.warning("[entitlement] unknown purchase platform %r", platform)
-    return None
+        result = await _verify_apple_jws(receipt)
+    elif platform == "android":
+        result = await _verify_google_token(receipt)
+    else:
+        logger.warning("[entitlement] unknown purchase platform %r", platform)
+        return None
+    return {"tier": "free", "expires_at": 0} if result == "free" else result
 
 
 async def _entitlement_gate(subject: str | None):
     """None when this install may open a cloud leg, else a 402 JSONResponse.
 
-    Left deliberately permissive when no subject is supplied: the browser build
-    at /vocare has no store identity, and locking it out would break the demo
-    and the load tests. Native builds always send one.
+    Demo mode remains permissive only while enforcement is explicitly disabled.
     """
     if not ENTITLEMENT_ENFORCED:
         return None
     subject = _entitlement_subject(subject)
     if not subject:
-        return None
+        return JSONResponse({"error": "entitlement_subject_required"}, status_code=402)
     record, durable = await _read_entitlement(subject)
     payload = _balance_payload(record, durable)
     if payload["seconds_remaining"] > 0:
@@ -6125,29 +6156,46 @@ async def activate_entitlement(request: Request):
     state for a build with no store credentials configured.
     """
     data = await request.json()
+    if not isinstance(data, dict) or not isinstance(data.get("subject"), str):
+        return JSONResponse({"error": "subject required"}, status_code=400)
     subject = _entitlement_subject(data.get("subject"))
     if not subject:
         return JSONResponse({"error": "subject required"}, status_code=400)
 
-    platform = (data.get("platform") or "").strip().lower()
-    receipt = (data.get("receipt") or "").strip()
+    if not isinstance(data.get("platform", ""), str) or not isinstance(data.get("receipt", ""), str):
+        return JSONResponse({"error": "platform and receipt must be strings"}, status_code=400)
+    platform = data.get("platform", "").strip().lower()
+    receipt = data.get("receipt", "").strip()
 
     record, durable = await _read_entitlement(subject)
-    verified_tier = await _verify_purchase(platform, receipt) if receipt else None
+    proof = await _verify_purchase(platform, receipt) if receipt else None
 
-    if verified_tier is not None:
-        record["tier"] = verified_tier
+    if proof is not None:
+        if proof["tier"] == "pro":
+            # Reinstall/restore and a second device share the same store allowance.
+            # An installation ID must never mint another month of paid minutes.
+            purchase_key = proof["purchase_key"]
+            shared, durable = await _read_entitlement(purchase_key)
+            shared["used"] = max(shared["used"], record["used"])
+            record = shared
+            alias = dict(_blank_record(), billing_subject=purchase_key)
+            await _write_entitlement(subject, alias)
+        elif receipt != record.get("receipt"):
+            # A different invalid token cannot revoke another device's verified purchase.
+            record = _blank_record()
+        record.update(proof, receipt=receipt, platform=platform, next_check=time.time() + 300)
         await _write_entitlement(subject, record)
     elif not receipt:
         # No receipt at all means the app found no purchase on this device.
         # That is a verified "free" only when the store was actually reachable,
         # which the client signals explicitly.
         if data.get("store_reachable") is True:
-            record["tier"] = "free"
+            # Signing out on one installation only unlinks that installation.
+            record = _blank_record()
             await _write_entitlement(subject, record)
 
     payload = _balance_payload(record, durable)
-    payload["verified"] = verified_tier is not None
+    payload["verified"] = proof is not None
     return payload
 
 
