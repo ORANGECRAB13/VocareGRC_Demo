@@ -11,3 +11,10 @@ openai
 cerebras-cloud-sdk
 neo4j
 redis
+
+# Store receipt verification (StoreKit 2 JWS + Google Play Developer API).
+# cryptography validates Apple's x5c certificate chain; PyJWT checks the ES256
+# signature; google-auth mints the Play API access token from a service account.
+pyjwt[crypto]>=2.8.0
+cryptography>=42.0.0
+google-auth>=2.30.0

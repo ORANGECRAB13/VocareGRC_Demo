@@ -66,6 +66,7 @@ dependencies {
     implementation project(':capacitor-android')
     // Room backs the native TranslationHistory plugin (com.vocare.translate.history).
     implementation "androidx.room:room-runtime:$roomVersion"
+    implementation "com.android.billingclient:billing:$billingVersion"
     annotationProcessor "androidx.room:room-compiler:$roomVersion"
     testImplementation "junit:junit:$junitVersion"
     androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"

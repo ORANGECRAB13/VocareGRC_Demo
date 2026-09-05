@@ -1,4 +1,10 @@
-# Fully pinned, installed with --no-index --no-deps from wheelhouse-linux/
+# Fully pinned. THIS FILE, not requirements.txt, is what the container image
+# installs (Dockerfile.base). They have drifted before: `elevenlabs` was only in
+# requirements.txt, so a base-image rebuild on 2026-09-05 produced an image
+# without it and every translation leg died on
+#   ModuleNotFoundError: No module named 'elevenlabs'
+# raised from elevenlabs_agent_translation.py, which bot.py imports on BOTH the
+# agent and cascaded paths. Anything imported at runtime must be listed here.
 aiofiles==25.1.0
 aiohappyeyeballs==2.6.1
 aiohttp==3.13.5
@@ -23,11 +29,13 @@ distro==1.9.0
 dnspython==2.8.0
 docstring-parser==0.18.0
 eval-type-backport==0.3.1
+elevenlabs==2.36.0
 fastapi==0.136.1
 filelock==3.29.0
 flatbuffers==25.12.19
 frozenlist==1.8.0
 fsspec==2026.4.0
+google-auth==2.38.0
 google-crc32c==1.8.0
 groq==1.2.0
 h11==0.16.0
@@ -78,6 +86,7 @@ pyopenssl==26.2.0
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.2
 pyyaml==6.0.3
+redis==5.2.1
 regex==2026.4.4
 requests==2.33.1
 resampy==0.4.3

@@ -19,7 +19,7 @@ import random
 import secrets
 import time
 import wave
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -34,6 +34,7 @@ from bin_faq import BIN_FAQ  # noqa: E402
 import uvicorn
 from dotenv import load_dotenv
 import aiohttp
+from urllib.parse import quote
 from fastapi import BackgroundTasks, FastAPI, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
@@ -4236,11 +4237,13 @@ async def telnyx_voice(request: Request):
             logger.error(f"[Telnyx] answer exception: {e}")
         return {"ok": True}
 
-    if (
-        event_type == "call.answered"
-        and payload.get("direction") == "incoming"
-        and call_control_id
-    ):
+    if event_type == "call.answered" and call_control_id:
+        # No direction check: every outbound leg (approval, task report, feedback,
+        # feedback report) has already returned above via its client_state branch,
+        # so any call.answered reaching here is the inbound leg. Telnyx does not
+        # reliably report direction="incoming" on call.answered, and gating on it
+        # silently skipped streaming_start — the caller heard dead air.
+        logger.info(f"[Inbound] call.answered direction={payload.get('direction')!r}")
         await _start_streaming("Inbound")
         return {"ok": True}
 
@@ -5714,6 +5717,476 @@ async def auto_translation_offer(request: Request, background_tasks: BackgroundT
     return answer
 
 
+# ─────────────────────────────────────────────
+# Subscription entitlement and translation-minute credits
+# ─────────────────────────────────────────────
+#
+# Two tiers ship in the mobile apps:
+#
+#   free  — on-device translation only (ML Kit / Apple Translation) plus ads.
+#           It never reaches this server, so it consumes no credits and costs
+#           nothing per minute. FREE_TIER_SECONDS is 0 by design, not an
+#           oversight: a free user who somehow calls the cloud path is refused.
+#   pro   — AUD 29.99/month for PAID_TIER_SECONDS of cloud translation.
+#
+# Balances live in Redis when LIVE_CALL_REDIS_URL is configured. That matters:
+# an in-process dict hands every subscriber a fresh 60 minutes on each container
+# restart, which on a rolling deploy is unbounded free usage. The in-memory
+# fallback exists so local development works without Redis, and it says so in
+# the balance payload rather than pretending to be durable.
+
+FREE_TIER_SECONDS = 0
+PAID_TIER_SECONDS = int(os.getenv("PAID_TIER_SECONDS", str(60 * 60)))
+
+# Metering is OFF until the store products actually exist. There is no honest way
+# to charge someone minutes before they have any way to buy them: with
+# enforcement on and no configured store, every install is "free" with zero
+# seconds, so the browser build at /vocare and any TestFlight build would be
+# refused a session outright. While this is false the server still tracks usage
+# — so the numbers are real when you switch it on — it simply does not refuse
+# anyone. Set ENTITLEMENT_ENFORCED=true once App Store Connect and Play Console
+# are live.
+ENTITLEMENT_ENFORCED = os.getenv("ENTITLEMENT_ENFORCED", "false").strip().lower() == "true"
+
+# Whether a sandbox / test purchase counts as a real subscription.
+#
+# It must, while testing: StoreKit sandbox, TestFlight and Play's licence
+# testers are the only ways to exercise a purchase before release, and they all
+# produce test receipts. It must NOT in production — a sandbox Apple Account is
+# free to create, so accepting sandbox receipts on a live build hands anyone a
+# subscription for nothing. Default true because today this app is pre-launch;
+# set STORE_ALLOW_SANDBOX=false in the same change that sets
+# ENTITLEMENT_ENFORCED=true.
+STORE_ALLOW_SANDBOX = os.getenv("STORE_ALLOW_SANDBOX", "true").strip().lower() == "true"
+
+_ENTITLEMENT_PREFIX = os.getenv("LIVE_CALL_REDIS_PREFIX", "vocare:livecalls").rsplit(":", 1)[0] + ":entitlement"
+_entitlement_memory: dict[str, dict] = {}
+# session_id -> seconds already deducted, so a re-reported total is idempotent.
+_session_charges: dict[str, int] = {}
+_entitlement_redis = None
+_entitlement_redis_tried = False
+
+
+def _billing_period(now: datetime | None = None) -> str:
+    """Credits reset on the calendar month, in UTC so the boundary is unambiguous."""
+    return (now or datetime.now(timezone.utc)).strftime("%Y-%m")
+
+
+def _entitlement_client():
+    """Redis client, or None when unconfigured or unreachable. Connects once."""
+    global _entitlement_redis, _entitlement_redis_tried
+    if _entitlement_redis_tried:
+        return _entitlement_redis
+    _entitlement_redis_tried = True
+    url = os.getenv("LIVE_CALL_REDIS_URL", "").strip()
+    if not url:
+        logger.info("[entitlement] LIVE_CALL_REDIS_URL unset - balances are in-process only")
+        return None
+    if url.startswith("redis://") and os.getenv("LIVE_CALL_REDIS_ALLOW_INSECURE", "false").lower() != "true":
+        logger.error("[entitlement] refusing plaintext redis:// URL; use rediss:// or set LIVE_CALL_REDIS_ALLOW_INSECURE=true")
+        return None
+    try:
+        import redis.asyncio as aioredis
+
+        _entitlement_redis = aioredis.from_url(
+            url,
+            decode_responses=True,
+            socket_connect_timeout=float(os.getenv("LIVE_CALL_REDIS_CONNECT_TIMEOUT_SECS", "2")),
+            socket_timeout=float(os.getenv("LIVE_CALL_REDIS_TIMEOUT_SECS", "2")),
+        )
+        logger.info("[entitlement] using Redis for credit balances")
+    except Exception:
+        logger.exception("[entitlement] could not build a Redis client; falling back to memory")
+        _entitlement_redis = None
+    return _entitlement_redis
+
+
+def _entitlement_key(subject: str) -> str:
+    return f"{_ENTITLEMENT_PREFIX}:{subject}"
+
+
+def _tier_seconds(tier: str) -> int:
+    return PAID_TIER_SECONDS if tier == "pro" else FREE_TIER_SECONDS
+
+
+def _blank_record(tier: str = "free") -> dict:
+    return {"tier": tier, "period": _billing_period(), "used": 0}
+
+
+async def _read_entitlement(subject: str) -> tuple[dict, bool]:
+    """Return (record, durable). Rolls the record over when the month changes."""
+    client = _entitlement_client()
+    record = None
+    durable = client is not None
+    if client is not None:
+        try:
+            raw = await client.hgetall(_entitlement_key(subject))
+            if raw:
+                record = {"tier": raw.get("tier", "free"), "period": raw.get("period", ""), "used": int(raw.get("used", 0) or 0)}
+        except Exception:
+            logger.exception("[entitlement] Redis read failed for %s; serving from memory", subject)
+            durable = False
+    if record is None:
+        record = _entitlement_memory.get(subject)
+    if record is None:
+        record = _blank_record()
+    if record["period"] != _billing_period():
+        # New month: the allowance refills, the tier carries over.
+        record = _blank_record(record["tier"])
+        await _write_entitlement(subject, record)
+    return record, durable
+
+
+async def _write_entitlement(subject: str, record: dict) -> None:
+    _entitlement_memory[subject] = dict(record)
+    client = _entitlement_client()
+    if client is None:
+        return
+    try:
+        await client.hset(_entitlement_key(subject), mapping={
+            "tier": record["tier"], "period": record["period"], "used": str(record["used"]),
+        })
+        # Two full billing periods is enough history to survive a late renewal
+        # without keeping a row for every install that ever opened the app.
+        await client.expire(_entitlement_key(subject), 70 * 24 * 3600)
+    except Exception:
+        logger.exception("[entitlement] Redis write failed for %s", subject)
+
+
+def _balance_payload(record: dict, durable: bool) -> dict:
+    total = _tier_seconds(record["tier"])
+    # Usage is recorded against the tier's allowance even when unenforced, but it
+    # is not clamped to it — the raw figure is what tells you, before launch,
+    # what real usage per install looks like.
+    used = record["used"]
+    return {
+        "tier": record["tier"],
+        "period": record["period"],
+        "seconds_total": total,
+        # Reported unclamped on purpose. With enforcement off the free tier's
+        # total is 0, so clamping would report every install as having used
+        # nothing — hiding exactly the pre-launch usage this is here to collect.
+        "seconds_used": used,
+        "seconds_remaining": max(0, total - used),
+        "durable": durable,
+        "enforced": ENTITLEMENT_ENFORCED,
+        "sandbox_ok": STORE_ALLOW_SANDBOX,
+    }
+
+
+def _entitlement_subject(value: str | None) -> str:
+    subject = (value or "").strip()
+    # The subject is an opaque per-install id, not a credential. It scopes a
+    # balance; it does not prove a purchase. Only /api/entitlement/activate,
+    # which checks the store receipt, can move an install onto the paid tier.
+    if not subject or len(subject) > 128:
+        return ""
+    return subject
+
+
+# ── Store receipt verification ──
+#
+# Both stores are verified server-side because the client cannot be trusted with
+# entitlement: a rooted or jailbroken device can make the app claim anything.
+# Each verifier returns:
+#
+#   "pro"  — a valid, unexpired, unrevoked subscription
+#   "free" — verified, and the user does not hold one
+#   None   — we could not tell (unconfigured, or the store/network failed)
+#
+# None is deliberately distinct from "free". Failing closed on a network blip
+# would strip paying subscribers of minutes they already bought, so callers keep
+# the last known tier when verification is merely unavailable.
+
+APPLE_ROOT_CA_G3_URL = "https://www.apple.com/certificateauthority/AppleRootCA-G3.cer"
+_apple_root_cert: bytes | None = None
+
+
+async def _apple_root_ca() -> bytes | None:
+    """Apple's root certificate, fetched once and cached in the process.
+
+    Bundling it in the image would be sturdier, but it rotates on Apple's
+    schedule rather than ours; fetching once per container start keeps it
+    current without a request per verification.
+    """
+    global _apple_root_cert
+    if _apple_root_cert is not None:
+        return _apple_root_cert
+    try:
+        async with aiohttp.ClientSession() as http:
+            async with http.get(APPLE_ROOT_CA_G3_URL, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                if resp.status != 200:
+                    logger.error("[entitlement] Apple root CA fetch returned %s", resp.status)
+                    return None
+                _apple_root_cert = await resp.read()
+    except Exception:
+        logger.exception("[entitlement] could not fetch Apple root CA")
+        return None
+    return _apple_root_cert
+
+
+async def _verify_apple_jws(jws: str) -> str | None:
+    """Verify a StoreKit 2 signed transaction.
+
+    The JWS header carries an x5c chain: leaf -> intermediate -> Apple root. We
+    check the chain terminates at Apple's real root, verify the ES256 signature
+    with the leaf's public key, then check the payload actually describes an
+    active subscription to OUR product in OUR app. Skipping the chain check and
+    trusting the embedded certificate is the classic mistake here: anyone can
+    sign a payload and attach their own certificate.
+    """
+    try:
+        import jwt
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import ec
+    except ImportError:
+        logger.error("[entitlement] pyjwt/cryptography missing; cannot verify Apple receipts")
+        return None
+
+    try:
+        header = jwt.get_unverified_header(jws)
+        chain = header.get("x5c") or []
+        if len(chain) < 2:
+            logger.warning("[entitlement] Apple JWS has no certificate chain")
+            return "free"
+
+        certs = [x509.load_der_x509_certificate(base64.b64decode(c)) for c in chain]
+
+        root_der = await _apple_root_ca()
+        if root_der is None:
+            return None
+        apple_root = x509.load_der_x509_certificate(root_der)
+        if certs[-1].fingerprint(hashes.SHA256()) != apple_root.fingerprint(hashes.SHA256()):
+            logger.warning("[entitlement] Apple JWS chain does not terminate at Apple's root")
+            return "free"
+
+        # Each certificate must actually be signed by the next one up.
+        now = datetime.now(timezone.utc)
+        for child, parent in zip(certs, certs[1:]):
+            parent.public_key().verify(
+                child.signature,
+                child.tbs_certificate_bytes,
+                ec.ECDSA(child.signature_hash_algorithm),
+            )
+            if not (child.not_valid_before_utc <= now <= child.not_valid_after_utc):
+                logger.warning("[entitlement] Apple JWS certificate outside validity window")
+                return "free"
+
+        payload = jwt.decode(
+            jws,
+            certs[0].public_key(),
+            algorithms=["ES256"],
+            options={"verify_aud": False, "verify_exp": False},
+        )
+    except Exception:
+        logger.exception("[entitlement] Apple JWS verification failed")
+        return "free"
+
+    bundle_id = os.getenv("APPLE_BUNDLE_ID", "com.vocare.translate").strip()
+    if payload.get("bundleId") != bundle_id:
+        logger.warning("[entitlement] Apple JWS is for bundle %r, not %r", payload.get("bundleId"), bundle_id)
+        return "free"
+    if payload.get("productId") != os.getenv("STORE_PRODUCT_ID", "vocare_pro_monthly"):
+        return "free"
+    if payload.get("revocationDate"):
+        return "free"
+
+    # StoreKit stamps every transaction with the environment that produced it.
+    # A Sandbox receipt is cryptographically valid — it is signed by Apple — so
+    # the signature check above passes and only this rejects it.
+    environment = (payload.get("environment") or "Production").strip()
+    if environment != "Production" and not STORE_ALLOW_SANDBOX:
+        logger.warning("[entitlement] refusing %s receipt; STORE_ALLOW_SANDBOX is false", environment)
+        return "free"
+    if environment != "Production":
+        logger.info("[entitlement] accepting %s receipt (STORE_ALLOW_SANDBOX=true)", environment)
+
+    # StoreKit timestamps are milliseconds since the epoch.
+    expires_ms = payload.get("expiresDate")
+    if expires_ms and datetime.fromtimestamp(expires_ms / 1000, timezone.utc) <= datetime.now(timezone.utc):
+        return "free"
+    return "pro"
+
+
+async def _verify_google_token(purchase_token: str) -> str | None:
+    """Verify a Play purchase token against the Play Developer API.
+
+    Needs a service account with the "View financial data" permission, linked to
+    the Play Console. GOOGLE_PLAY_SERVICE_ACCOUNT_JSON holds its key material.
+    """
+    raw = os.getenv("GOOGLE_PLAY_SERVICE_ACCOUNT_JSON", "").strip()
+    if not raw:
+        return None
+    package = os.getenv("ANDROID_PACKAGE_NAME", "com.vocare.translate").strip()
+
+    try:
+        from google.auth.transport.requests import Request as GoogleRequest
+        from google.oauth2 import service_account
+    except ImportError:
+        logger.error("[entitlement] google-auth missing; cannot verify Play receipts")
+        return None
+
+    try:
+        creds = service_account.Credentials.from_service_account_info(
+            json.loads(raw), scopes=["https://www.googleapis.com/auth/androidpublisher"]
+        )
+        # Blocking refresh; short and cached inside the credentials object, so it
+        # is kept off the event loop rather than made async.
+        await asyncio.to_thread(creds.refresh, GoogleRequest())
+
+        url = (
+            f"https://androidpublisher.googleapis.com/androidpublisher/v3/applications/"
+            f"{quote(package, safe='')}/purchases/subscriptionsv2/tokens/{quote(purchase_token, safe='')}"
+        )
+        async with aiohttp.ClientSession() as http:
+            async with http.get(
+                url,
+                headers={"Authorization": f"Bearer {creds.token}"},
+                timeout=aiohttp.ClientTimeout(total=8),
+            ) as resp:
+                if resp.status == 404:
+                    # Play does not know this token: not a transient failure.
+                    return "free"
+                if resp.status != 200:
+                    logger.warning("[entitlement] Play API returned %s", resp.status)
+                    return None
+                body = await resp.json()
+    except Exception:
+        logger.exception("[entitlement] Play verification failed")
+        return None
+
+    # Play marks a licence-tester purchase with a testPurchase object rather than
+    # an environment string. Same rule as Apple's Sandbox.
+    if body.get("testPurchase") is not None:
+        if not STORE_ALLOW_SANDBOX:
+            logger.warning("[entitlement] refusing Play test purchase; STORE_ALLOW_SANDBOX is false")
+            return "free"
+        logger.info("[entitlement] accepting Play test purchase (STORE_ALLOW_SANDBOX=true)")
+
+    state = body.get("subscriptionState")
+    if state in ("SUBSCRIPTION_STATE_ACTIVE", "SUBSCRIPTION_STATE_IN_GRACE_PERIOD"):
+        return "pro"
+    return "free"
+
+
+async def _verify_purchase(platform: str, receipt: str) -> str | None:
+    """Dispatch to the right store verifier. Unknown platform verifies nothing."""
+    if not receipt:
+        return None
+    if platform == "ios":
+        return await _verify_apple_jws(receipt)
+    if platform == "android":
+        return await _verify_google_token(receipt)
+    logger.warning("[entitlement] unknown purchase platform %r", platform)
+    return None
+
+
+async def _entitlement_gate(subject: str | None):
+    """None when this install may open a cloud leg, else a 402 JSONResponse.
+
+    Left deliberately permissive when no subject is supplied: the browser build
+    at /vocare has no store identity, and locking it out would break the demo
+    and the load tests. Native builds always send one.
+    """
+    if not ENTITLEMENT_ENFORCED:
+        return None
+    subject = _entitlement_subject(subject)
+    if not subject:
+        return None
+    record, durable = await _read_entitlement(subject)
+    payload = _balance_payload(record, durable)
+    if payload["seconds_remaining"] > 0:
+        return None
+    return JSONResponse(
+        {"error": "no_translation_credit", "balance": payload},
+        status_code=402,
+    )
+
+
+@app.get("/api/entitlement")
+async def get_entitlement(request: Request):
+    """Current tier and remaining translation seconds for one install."""
+    subject = _entitlement_subject(request.query_params.get("subject"))
+    if not subject:
+        return JSONResponse({"error": "subject required"}, status_code=400)
+    record, durable = await _read_entitlement(subject)
+    return _balance_payload(record, durable)
+
+
+@app.post("/api/entitlement/activate")
+async def activate_entitlement(request: Request):
+    """Move an install onto the tier its store receipt actually supports.
+
+    The client sends the receipt it got from StoreKit or Play; the server
+    verifies it with Apple or Google before believing it, so a patched client
+    cannot mint minutes. When verification is unavailable the existing tier is
+    left alone and the response says `verified: false`, which is the honest
+    state for a build with no store credentials configured.
+    """
+    data = await request.json()
+    subject = _entitlement_subject(data.get("subject"))
+    if not subject:
+        return JSONResponse({"error": "subject required"}, status_code=400)
+
+    platform = (data.get("platform") or "").strip().lower()
+    receipt = (data.get("receipt") or "").strip()
+
+    record, durable = await _read_entitlement(subject)
+    verified_tier = await _verify_purchase(platform, receipt) if receipt else None
+
+    if verified_tier is not None:
+        record["tier"] = verified_tier
+        await _write_entitlement(subject, record)
+    elif not receipt:
+        # No receipt at all means the app found no purchase on this device.
+        # That is a verified "free" only when the store was actually reachable,
+        # which the client signals explicitly.
+        if data.get("store_reachable") is True:
+            record["tier"] = "free"
+            await _write_entitlement(subject, record)
+
+    payload = _balance_payload(record, durable)
+    payload["verified"] = verified_tier is not None
+    return payload
+
+
+@app.post("/api/entitlement/consume")
+async def consume_entitlement(request: Request):
+    """Deduct elapsed cloud translation seconds from an install's balance.
+
+    Called when a session ends and periodically while one runs, so that a call
+    that dies without a clean teardown still bills for the part that happened.
+    Consumption is monotonic per session: the client reports total elapsed
+    seconds for that session, never a delta, so a retry cannot double-charge.
+    """
+    data = await request.json()
+    subject = _entitlement_subject(data.get("subject"))
+    if not subject:
+        return JSONResponse({"error": "subject required"}, status_code=400)
+    try:
+        elapsed = max(0, int(data.get("session_seconds", 0)))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "session_seconds must be an integer"}, status_code=400)
+
+    session_id = (data.get("session_id") or "").strip()
+    record, durable = await _read_entitlement(subject)
+
+    # Track what this session has already been charged so repeated reports
+    # settle to the highest watermark rather than accumulating.
+    charged = _session_charges.get(session_id, 0) if session_id else 0
+    delta = max(0, elapsed - charged)
+    if session_id:
+        _session_charges[session_id] = max(charged, elapsed)
+
+    if delta:
+        record["used"] = record["used"] + delta
+        await _write_entitlement(subject, record)
+
+    return _balance_payload(record, durable)
+
+
+
 @app.post("/api/translation/session")
 async def create_translation_session(request: Request):
     """Create a new translation session. Returns session_id + join link."""
@@ -5742,6 +6215,13 @@ async def translation_offer(request: Request, background_tasks: BackgroundTasks)
     session = translation_sessions.get(session_id)
     if not session:
         return Response(status_code=404, content="Session not found")
+
+    # Cloud translation is the metered path. Refusing here rather than at
+    # session creation means a session that runs out mid-call still ends
+    # cleanly; only a *new* leg is turned away.
+    gate = await _entitlement_gate(session.client_id)
+    if gate is not None:
+        return gate
 
     language = data.get("language", "en")
     name = data.get("name", "Participant")

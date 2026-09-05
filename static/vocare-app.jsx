@@ -8,47 +8,63 @@ const { useState, useEffect, useRef, useCallback, useMemo } = React;
 // ─────────────────────────────────────────────
 
 const T = {
-  teal:        '#58BFB4',
-  tealLight:   '#DDF4F1',
-  tealMid:     '#8FD5CE',
-  amber:       '#F47C36',
-  amberLight:  '#FCE4D5',
-  bg:          '#FBF3EB',
+  // ── Voca palette (Live speech translation redesign) ──
+  // Person B / green
+  teal:        '#34A46F',
+  tealLight:   '#E2F3E9',
+  tealMid:     '#5FBF8E',
+  // Person A / violet — also the brand primary
+  amber:       '#6C5CE7',
+  amberLight:  '#EBE7FD',
+  bg:          '#FBF9F7',
   surface:     '#FFFFFF',
-  surface2:    '#E5EEF2',
-  textPrimary: '#3E4C5E',
-  textMuted:   '#71808F',
-  textFaint:   '#A6B1BA',
-  border:      '#D3DEE4',
-  error:       '#C52E42',
-  errorLight:  '#F8E1E5',
-  success:     '#409B76',
-  slate:       '#3E4C5E',
-  cream:       '#FBF3EB',
+  surface2:    '#F1EEFC',
+  textPrimary: '#1C2033',
+  textMuted:   '#6E7285',
+  textFaint:   '#9EA1AF',
+  border:      '#E6E4EC',
+  error:       '#D93A5C',
+  errorLight:  '#FBE4E9',
+  success:     '#34A46F',
+  slate:       '#1C2033',
+  cream:       '#FBF9F7',
 
-  // ── Voca design canvas tokens ──
-  navy:        '#3E4C5E',  // brand navy / slate
-  gold:        '#FFD37E',  // hero italic + live indicator dot
-  tealDeep:    '#2E8E86',  // Person B ink on light surfaces
-  tealSoft:    '#7FD3C9',  // Person B ink on navy
-  tealPale:    '#9BDCD4',  // Person B ink, brightest (recording)
-  amberSoft:   '#FBB07A',  // Person A ink on navy
-  amberDeep:   '#D9631F',  // Person A pressed
-  panelIdle:   '#48586D',  // live panel resting background
-  panelA:      '#B05A24',  // live panel while A records
-  panelB:      '#2C7B73',  // live panel while B records
+  navy:        '#1C2033',  // brand ink
+  accent:      '#E0397F',  // pink highlight
+  gold:        '#34A46F',  // live indicator dot
+  tealDeep:    '#2A8B5D',  // Person B ink on light surfaces
+  tealSoft:    '#5FBF8E',
+  tealPale:    '#7ED3A6',
+  amberSoft:   '#8B7CF0',  // Person A ink, light
+  amberDeep:   '#5546C9',  // Person A pressed
 
-  // Alpha washes lifted verbatim from the canvas
-  inkA08:      'rgba(244,124,54,.08)',
-  inkA14:      'rgba(244,124,54,.14)',
-  inkB09:      'rgba(88,191,180,.09)',
-  inkB14:      'rgba(88,191,180,.14)',
-  tileA:       'rgba(251,176,122,.18)',
-  tileB:       'rgba(88,191,180,.16)',
-  hairline:    'rgba(62,76,94,.08)',
-  inkMute:     'rgba(62,76,94,.45)',
-  creamMute:   'rgba(251,243,235,.45)',
-  creamFaint:  'rgba(251,243,235,.4)',
+  // Live panels are light in this design, tinted toward each speaker.
+  panelIdle:   '#FBF9F7',
+  panelAIdle:  '#F7F5FF',
+  panelBIdle:  '#F4FAF6',
+  panelA:      '#EBE7FD',  // while A records
+  panelB:      '#E2F3E9',  // while B records
+
+  // Alpha washes lifted from the canvas
+  inkA07:      'rgba(108,92,231,.07)',
+  inkA08:      'rgba(108,92,231,.08)',
+  inkA14:      'rgba(108,92,231,.14)',
+  inkA35:      'rgba(108,92,231,.35)',
+  inkB09:      'rgba(52,164,111,.09)',
+  inkB14:      'rgba(52,164,111,.14)',
+  inkB35:      'rgba(52,164,111,.35)',
+  tileA:       'rgba(139,124,240,.18)',
+  tileB:       'rgba(52,164,111,.16)',
+  hairline:    'rgba(28,32,51,.08)',
+  inkMute:     'rgba(28,32,51,.45)',
+  // Panels are light now, so what used to be cream-on-navy is ink-on-tint.
+  creamMute:   'rgba(28,32,51,.45)',
+  creamFaint:  'rgba(28,32,51,.4)',
+
+  // Type
+  display:     "'Outfit', system-ui, sans-serif",
+  body:        "'Space Grotesk', system-ui, sans-serif",
+  mono:        "'JetBrains Mono', ui-monospace, monospace",
 };
 
 // ─────────────────────────────────────────────
@@ -139,9 +155,15 @@ function mlkitCode(code) {
   return MLKIT_LANGUAGE_CODE[code] || code;
 }
 
-// Can this engine fetch its own models, or must the user go to system settings?
+// Both engines can now install languages from inside the app:
+//   mlkit — downloads the per-language models itself.
+//   apple — cannot download from the headless API, but the plugin's prepare()
+//           hosts a SwiftUI view to reach prepareTranslation(), which presents
+//           Apple's own download sheet. We never draw that sheet or see its
+//           progress, so a prepare() call either comes back installed or comes
+//           back declined.
 function offlineCanSelfDownload() {
-  return offlineEngine()?.kind === 'mlkit';
+  return offlineEngine() !== null;
 }
 
 // Is this pair ready to translate with no network right now?
@@ -166,15 +188,30 @@ async function offlinePairStatus(a, b) {
 }
 
 // Models are ~30MB each and download over any connection, so this stays an
-// explicit user action. Only meaningful on ML Kit.
-async function downloadOfflineModels(codes) {
+// explicit user action behind a button, never something that happens on launch.
+//
+// The two engines disagree about what a "language" is — ML Kit installs one
+// model per language, Apple installs per direction — so this takes the pair and
+// lets each engine do the right thing with it. Resolves true when the pair is
+// ready, false when the user declined.
+async function downloadOfflinePair(a, b) {
   const engine = offlineEngine();
-  if (engine?.kind !== 'mlkit') {
-    throw new Error('This device installs translation languages through system settings.');
+  if (!engine) throw new Error('offline_unavailable');
+
+  if (engine.kind === 'mlkit') {
+    for (const code of [a, b]) {
+      await engine.plugin.downloadModel({ language: mlkitCode(code) });
+    }
+    return true;
   }
-  for (const code of codes) {
-    await engine.plugin.downloadModel({ language: mlkitCode(code) });
+
+  // Apple is directional: preparing en→zh does not prepare zh→en, and this app
+  // always translates both ways, so ask for both.
+  for (const [source, target] of [[a, b], [b, a]]) {
+    const { installed } = await engine.plugin.prepare({ source, target });
+    if (!installed) return false;
   }
+  return true;
 }
 
 async function translateOffline(text, sourceCode, targetCode) {
@@ -240,6 +277,199 @@ function clientId() {
     _clientId = _clientId || `c-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   }
   return _clientId;
+}
+
+// ─────────────────────────────────────────────
+// Tiers, purchases and translation-minute credits
+// ─────────────────────────────────────────────
+//
+//   free — everything runs on the device. Same screens, same gestures, but
+//          the offline engine does the work and a banner ad sits under it.
+//          No server call, so no per-minute cost to us and no credit meter.
+//   pro  — AUD 29.99/month for PLAN_MINUTES minutes of cloud translation,
+//          which is the two-agent face-to-face path.
+//
+// The store is the source of truth for *whether* someone is subscribed; the
+// server is the source of truth for *how many minutes they have left*. Keeping
+// those apart matters: a reinstall restores the purchase but must not restore
+// the minutes already spent this month.
+
+const PLAN_PRICE_FALLBACK = 'A$29.99';
+const PLAN_MINUTES = 60;
+const PRO_PRODUCT_ID = 'vocare_pro_monthly';
+
+// The native plugin is ours: StoreKit 2 on iOS (ios/App/App/PurchasesPlugin.swift),
+// Play Billing on Android (android/.../purchases/PurchasesPlugin.java). Both hand
+// back a store receipt and nothing else — the tier is whatever the server says
+// after it verifies that receipt with Apple or Google. A device that lies about
+// owning a subscription gets a verified "free" and no minutes.
+//
+// Absent in a browser, so every helper degrades to "no store, free tier" instead
+// of throwing.
+function purchasesPlugin() {
+  return window.Capacitor?.Plugins?.VocarePurchases || null;
+}
+
+function admobPlugin() {
+  return window.Capacitor?.Plugins?.AdMob || null;
+}
+
+function storePlatform() {
+  return nativePlatform() === 'ios' ? 'ios' : 'android';
+}
+
+// StoreKit calls it `jws`, Play calls it `purchaseToken`. One shape from here on.
+function receiptOf(result) {
+  return result?.jws || result?.purchaseToken || '';
+}
+
+// A subscription can renew, lapse or be refunded while the app is closed, so the
+// plugins emit `entitlementChanged` and we re-verify rather than trusting the
+// event's contents.
+function onEntitlementChanged(handler) {
+  const plugin = purchasesPlugin();
+  if (!plugin?.addListener) return () => {};
+  const registration = plugin.addListener('entitlementChanged', handler);
+  return () => { Promise.resolve(registration).then(r => r?.remove?.()).catch(() => {}); };
+}
+
+// The store's localized price, so the paywall shows what the user will actually
+// be charged in their storefront rather than an Australian price everywhere.
+async function storePrice() {
+  const plugin = purchasesPlugin();
+  if (!plugin) return null;
+  try {
+    const product = await plugin.getProduct();
+    return product?.displayPrice || null;
+  } catch (error) {
+    console.warn('Could not read product price:', error);
+    return null;
+  }
+}
+
+// What this device currently owns. Returns the receipt to verify, plus whether
+// the store was actually reachable — the server needs to tell "no subscription"
+// apart from "could not ask", and only the first should downgrade anyone.
+async function currentReceipt() {
+  const plugin = purchasesPlugin();
+  if (!plugin) return { reachable: false, receipt: '' };
+  try {
+    const held = await plugin.currentEntitlement();
+    return { reachable: true, receipt: held?.active ? receiptOf(held) : '' };
+  } catch (error) {
+    console.warn('Could not read entitlement:', error);
+    return { reachable: false, receipt: '' };
+  }
+}
+
+async function purchasePro() {
+  const plugin = purchasesPlugin();
+  if (!plugin) throw new Error('in_app_purchase_unavailable');
+  const result = await plugin.purchase();
+  if (result?.status === 'cancelled') return { status: 'cancelled' };
+  if (result?.status === 'pending') return { status: 'pending' };
+  if (result?.status !== 'purchased') throw new Error('purchase_failed');
+  return { status: 'purchased', receipt: receiptOf(result), raw: result };
+}
+
+async function restorePurchases() {
+  const plugin = purchasesPlugin();
+  if (!plugin) throw new Error('in_app_purchase_unavailable');
+  const held = await plugin.restore();
+  return held?.active ? { status: 'purchased', receipt: receiptOf(held), raw: held } : { status: 'none' };
+}
+
+// Play auto-refunds a purchase that is not acknowledged within three days. We
+// acknowledge only once the server has accepted the receipt, so a purchase we
+// could not verify costs the user nothing. StoreKit has no equivalent step.
+async function acknowledgeIfNeeded(raw) {
+  const plugin = purchasesPlugin();
+  if (!plugin?.acknowledge || !raw?.purchaseToken || raw.acknowledged) return;
+  try {
+    await plugin.acknowledge({ purchaseToken: raw.purchaseToken });
+  } catch (error) {
+    console.warn('Could not acknowledge purchase:', error);
+  }
+}
+
+// ── Ads (free tier only) ──
+// Ads are never shown to a subscriber, and never on a live translation screen:
+// an ad over a medical or legal conversation is the wrong call regardless of
+// what it earns.
+async function showFreeTierBanner() {
+  const plugin = admobPlugin();
+  if (!plugin) return;
+
+  // Starting the Google Mobile Ads SDK without GADApplicationIdentifier in
+  // Info.plist raises GADInvalidInitializationException, which is an uncaught
+  // ObjC exception — it kills the app, it does not fail the call. So refuse to
+  // initialize unless an ad unit is actually configured for this platform.
+  // A missing ad id must cost us a banner, never the session someone is in.
+  const adId = nativePlatform() === 'ios'
+    ? window.VOCARE_ADMOB_IOS_BANNER
+    : window.VOCARE_ADMOB_ANDROID_BANNER;
+  if (!adId) return;
+
+  try {
+    await plugin.initialize({ initializeForTesting: Boolean(window.VOCARE_ADS_TEST) });
+    await plugin.showBanner({
+      adId,
+      position: 'BOTTOM_CENTER',
+      margin: 82,  // clears the tab bar
+    });
+  } catch (error) {
+    console.warn('Could not show banner:', error);
+  }
+}
+
+async function hideFreeTierBanner() {
+  try { await admobPlugin()?.hideBanner(); } catch (_) {}
+}
+
+// ── Credit balance ──
+
+async function fetchBalance() {
+  const res = await api(`/api/entitlement?subject=${encodeURIComponent(clientId())}`);
+  if (!res.ok) throw new Error(`balance ${res.status}`);
+  return res.json();
+}
+
+async function activateEntitlement({ receipt = '', reachable = false } = {}) {
+  const res = await api('/api/entitlement/activate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      subject: clientId(),
+      platform: storePlatform(),
+      receipt,
+      store_reachable: reachable,
+    }),
+  });
+  if (!res.ok) throw new Error(`activate ${res.status}`);
+  return res.json();
+}
+
+// Reports the session's *total* elapsed seconds, never a delta, so a retry or a
+// duplicate teardown settles to the same balance instead of charging twice.
+async function reportUsage(sessionId, sessionSeconds) {
+  try {
+    const res = await api('/api/entitlement/consume', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ subject: clientId(), session_id: sessionId, session_seconds: Math.round(sessionSeconds) }),
+      keepalive: true,
+    });
+    return res.ok ? res.json() : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function formatMinutes(seconds) {
+  const mins = Math.floor(Math.max(0, seconds) / 60);
+  const secs = Math.max(0, Math.round(seconds)) % 60;
+  if (mins >= 10) return `${mins} min`;
+  return `${mins}:${String(secs).padStart(2, '0')}`;
 }
 
 // ─────────────────────────────────────────────
@@ -678,8 +908,8 @@ function TabBar({ active, onChange }) {
   return (
     <div style={{
       height: 'calc(82px + env(safe-area-inset-bottom, 0px))', display: 'flex', alignItems: 'flex-start',
-      paddingTop: 11, background: 'rgba(251,243,235,.92)', backdropFilter: 'blur(18px)',
-      borderTop: '1px solid rgba(62,76,94,.08)', paddingBottom: 'env(safe-area-inset-bottom, 0px)', flexShrink: 0,
+      paddingTop: 11, background: 'rgba(251,249,247,.92)', backdropFilter: 'blur(18px)',
+      borderTop: '1px solid rgba(28,32,51,.08)', paddingBottom: 'env(safe-area-inset-bottom, 0px)', flexShrink: 0,
     }}>
       {tabs.map(t => {
         const isActive = active === t.id;
@@ -693,7 +923,7 @@ function TabBar({ active, onChange }) {
               flexDirection: 'column',
               alignItems: 'center',
               justifyContent: 'center',
-              padding: 0, gap: 5, color: isActive ? T.amber : 'rgba(62,76,94,.38)',
+              padding: 0, gap: 5, color: isActive ? T.amber : 'rgba(28,32,51,.38)',
               transition: 'color 0.15s',
             }}
           >
@@ -707,102 +937,305 @@ function TabBar({ active, onChange }) {
 }
 
 // ─────────────────────────────────────────────
-// WelcomeScreen
+// Offline mode preference
+// ─────────────────────────────────────────────
+//
+// Stored as true/false once the user touches the switch, and null until then.
+// The tri-state matters: the default depends on tier (free users start
+// on-device, where translation costs nothing and works without a connection),
+// and a subscriber who deliberately turns it ON should not have it flipped back
+// the next time their tier is re-read.
+
+const OFFLINE_PREF_KEY = 'vocare.offlineMode';
+
+function readOfflinePref() {
+  try {
+    const raw = localStorage.getItem(OFFLINE_PREF_KEY);
+    return raw === null ? null : raw === 'true';
+  } catch (_) {
+    return null;
+  }
+}
+
+function writeOfflinePref(value) {
+  try { localStorage.setItem(OFFLINE_PREF_KEY, String(value)); } catch (_) {}
+}
+
+// ─────────────────────────────────────────────
+// OfflineSwitch — on the home screen, above the language pair
 // ─────────────────────────────────────────────
 
-function WelcomeScreen({ langA, langB, onStart, onPickA, onPickB, onSwap, onHistory, onSession }) {
-  const [sessions, setSessions] = useState([]);
-  const langAInfo = getLang(langA);
-  const langBInfo = getLang(langB);
+function OfflineSwitch({ on, onChange, langA, langB }) {
+  const [status, setStatus] = useState(undefined); // installed | supported | unsupported | null
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  const pairPossible = canTranslateOffline(langA, langB);
 
   useEffect(() => {
     let active = true;
-    const poll = async () => {
-      try {
-        const history = await loadSessionHistory();
-        if (active) setSessions(history);
-      } catch {}
-    };
-    poll();
-    const id = setInterval(poll, 3000);
-    return () => { active = false; clearInterval(id); };
-  }, []);
+    setError(null);
+    offlinePairStatus(langA, langB).then(s => { if (active) setStatus(s); });
+    return () => { active = false; };
+  }, [langA, langB]);
 
-  const topSessions = sessions.slice(0, 3);
+  // Hidden entirely in a browser, where there is no on-device engine to switch
+  // to. A dead toggle is worse than no toggle.
+  if (!offlineTranslationLanguages().length || !offlineEngine()) return null;
+
+  async function download() {
+    setBusy(true);
+    setError(null);
+    try {
+      const ok = await downloadOfflinePair(langA, langB);
+      if (!ok) setError('The download was declined. Offline translation needs both languages installed.');
+      setStatus(await offlinePairStatus(langA, langB));
+    } catch (_) {
+      setError('Could not install the languages. Check your connection and try again.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const needsDownload = on && pairPossible && status === 'supported';
+  const impossible = on && !pairPossible;
+
+  const subtitle = !pairPossible
+    ? `${getLang(langA).label} and ${getLang(langB).label} cannot be translated on-device — this pair needs a connection.`
+    : status === 'installed'
+      ? 'Translated on this device. No connection needed, and nothing leaves your phone.'
+      : status === 'supported'
+        ? 'Both languages need to be installed on this device first.'
+        : 'Runs on this device instead of the cloud.';
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflowY: 'auto', background: T.cream }}>
-      <div style={{
-        background: T.slate,
-        padding: '58px 26px 22px',
-        borderRadius: '0 0 34px 34px',
-        color: T.cream,
-        flexShrink: 0,
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <div style={{
-            width: 30, height: 30, background: T.cream, color: T.slate, borderRadius: 9,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            flexShrink: 0, fontFamily: "'Instrument Serif', serif", fontSize: 19,
-          }}>
-            A
+    <div style={{
+      background: T.surface, border: `1px solid ${needsDownload || impossible ? T.inkA35 : T.hairline}`,
+      borderRadius: 18, padding: '13px 15px', marginBottom: 8,
+      boxShadow: '0 10px 30px -20px rgba(28,32,51,.28)',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+            <div style={{ fontSize: 14.5, fontWeight: 600, color: T.slate }}>Offline mode</div>
+            {on && status === 'installed' && (
+              <span style={{ fontFamily: T.mono, fontSize: 9, letterSpacing: '.1em', textTransform: 'uppercase', fontWeight: 700, color: T.tealDeep }}>Ready</span>
+            )}
           </div>
-          <h1 style={{ color: T.cream, fontSize: 14, fontWeight: 600, letterSpacing: '.16em', textTransform: 'uppercase' }}>Voca</h1>
+          <div style={{ fontSize: 11.5, lineHeight: 1.45, color: T.inkMute, marginTop: 2, textWrap: 'pretty' }}>{subtitle}</div>
         </div>
-
-        <p style={{ fontFamily: "'Instrument Serif', serif", fontSize: 44, fontWeight: 400, letterSpacing: '-.015em', lineHeight: .98, margin: '26px 0 0' }}>
-          Speak freely.<br /><span style={{ fontStyle: 'italic', color: '#FFD37E' }}>Understand</span> instantly.
-        </p>
-        <p style={{ fontSize: 13.5, color: 'rgba(251,243,235,.6)', lineHeight: 1.5, marginTop: 12, maxWidth: 230 }}>
-          One phone between two people.
-        </p>
+        <button
+          onClick={() => onChange(!on)}
+          role="switch"
+          aria-checked={on}
+          aria-label="Offline mode"
+          style={{
+            width: 44, height: 26, flexShrink: 0, borderRadius: 99, border: 'none',
+            background: on ? T.amber : 'rgba(28,32,51,.16)', padding: 3,
+            display: 'flex', justifyContent: on ? 'flex-end' : 'flex-start',
+            transition: 'background .2s',
+          }}
+        >
+          <div style={{ width: 20, height: 20, borderRadius: '50%', background: '#fff', boxShadow: '0 1px 3px rgba(0,0,0,.25)' }} />
+        </button>
       </div>
 
-      <div style={{ padding: '16px 20px 0' }}>
-        <div style={{ display: 'flex', alignItems: 'stretch', gap: 8, background: '#fff', border: '1px solid rgba(62,76,94,.09)', borderRadius: 22, padding: 8 }}>
-          <button onClick={onPickA} style={{ flex: 1, minWidth: 0, padding: '12px 14px', borderRadius: 15, background: 'rgba(244,124,54,.07)', textAlign: 'left' }}>
-            <div style={{ fontSize: 9.5, letterSpacing: '.14em', textTransform: 'uppercase', color: T.amber, fontWeight: 700 }}>Person A</div>
+      {needsDownload && (
+        <button
+          onClick={download}
+          disabled={busy}
+          style={{
+            width: '100%', marginTop: 11, height: 42, borderRadius: 13, border: 'none',
+            background: T.inkA08, color: T.amber, fontSize: 13.5, fontWeight: 600, opacity: busy ? .6 : 1,
+          }}
+        >
+          {busy ? 'Installing…' : `Install ${getLang(langA).label} and ${getLang(langB).label}`}
+        </button>
+      )}
+
+      {error && (
+        <div style={{ marginTop: 9, fontSize: 11.5, lineHeight: 1.45, color: T.error }}>{error}</div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+// VocaMascot — the hopping translator from the design canvas.
+// Pure CSS: `voca-*` keyframes live in vocare.html. Decorative only,
+// so it is hidden from assistive tech.
+// ─────────────────────────────────────────────
+
+function VocaMascot() {
+  const arc = (side, size, delay) => ({
+    position: 'absolute', [side]: size === 30 ? 44 : size === 48 ? 26 : 8, top: 97,
+    width: size, height: size, marginTop: -size / 2,
+    border: '3.5px solid transparent',
+    [side === 'left' ? 'borderLeftColor' : 'borderRightColor']: T.amberSoft,
+    borderRadius: '50%', opacity: .45,
+    animation: 'voca-arc 1.9s ease-in-out infinite', animationDelay: `${delay}ms`,
+  });
+
+  return (
+    <div aria-hidden="true" style={{ width: 290, height: 180, position: 'relative', animation: 'voca-wander 7s ease-in-out infinite' }}>
+      {[[30, 0], [48, 200], [66, 400]].map(([size, delay]) => (
+        <React.Fragment key={size}>
+          <div style={arc('left', size, delay)} />
+          <div style={arc('right', size, delay)} />
+        </React.Fragment>
+      ))}
+
+      <div style={{
+        position: 'absolute', left: '50%', bottom: 8, width: 88, height: 14, marginLeft: -44, borderRadius: '50%',
+        background: 'radial-gradient(50% 50% at 50% 50%, rgba(76,60,180,.34) 0%, rgba(76,60,180,0) 72%)',
+        animation: 'voca-shadow 1.15s ease-in-out infinite',
+      }} />
+
+      <div style={{ position: 'absolute', left: '50%', bottom: 22, marginLeft: -62, width: 124, height: 122, animation: 'voca-hop 1.15s ease-in-out infinite' }}>
+        {/* waving arm + flag */}
+        <div style={{
+          position: 'absolute', right: -4, top: 34, width: 14, height: 26, borderRadius: 8,
+          background: 'linear-gradient(230deg,#FFFFFF,#DED8F5)', boxShadow: 'inset 2px -2px 5px rgba(76,60,180,.2)',
+          transformOrigin: '50% 100%', animation: 'voca-wave 7s ease-in-out infinite',
+        }} />
+        <div style={{ position: 'absolute', right: -40, top: -8, width: 70, height: 74, transformOrigin: '16% 92%', animation: 'voca-wave 7s ease-in-out infinite' }}>
+          <div style={{ position: 'absolute', left: 9, bottom: 0, width: 3.5, height: 70, borderRadius: 2, background: 'linear-gradient(180deg,#F3F0FD,#B9AEE8)' }} />
+          <div style={{
+            position: 'absolute', left: 10, top: 2, width: 46, height: 30, borderRadius: '3px 8px 8px 3px',
+            background: 'linear-gradient(135deg,#8B7CF0,#6C5CE7 60%,#5546C9)', boxShadow: '0 4px 10px -4px rgba(76,60,180,.65)',
+            display: 'grid', placeItems: 'center', transformOrigin: 'left center', animation: 'voca-flap 1.1s ease-in-out infinite',
+          }}>
+            <span style={{ fontFamily: T.mono, fontSize: 14, fontWeight: 700, color: T.cream, letterSpacing: '.06em' }}>文A</span>
+          </div>
+        </div>
+
+        {/* ears */}
+        <div style={{ position: 'absolute', left: -10, top: 52, width: 22, height: 34, borderRadius: 12, background: 'linear-gradient(120deg,#FFFFFF,#DED8F5)', boxShadow: 'inset -2px -3px 6px rgba(76,60,180,.2)' }} />
+        <div style={{ position: 'absolute', right: -10, top: 52, width: 22, height: 34, borderRadius: 12, background: 'linear-gradient(240deg,#FFFFFF,#DED8F5)', boxShadow: 'inset 2px -3px 6px rgba(76,60,180,.2)' }} />
+
+        {/* feet */}
+        <div style={{ position: 'absolute', left: 26, bottom: -7, width: 22, height: 14, borderRadius: '0 0 8px 8px', background: 'linear-gradient(180deg,#2A2358,#151233)' }} />
+        <div style={{ position: 'absolute', right: 26, bottom: -7, width: 22, height: 14, borderRadius: '0 0 8px 8px', background: 'linear-gradient(180deg,#2A2358,#151233)' }} />
+
+        {/* body */}
+        <div style={{
+          position: 'absolute', inset: 0, borderRadius: 40,
+          background: 'linear-gradient(158deg,#FFFFFF 4%,#F3F0FD 44%,#DAD2F4 78%,#C6BCEC 100%)',
+          boxShadow: 'inset 0 10px 16px rgba(255,255,255,.9), inset 0 -14px 22px rgba(108,92,231,.22), inset 0 0 0 1px rgba(255,255,255,.7), 0 22px 34px -14px rgba(76,60,180,.5)',
+        }} />
+        <div style={{ position: 'absolute', left: 14, top: 9, width: 44, height: 16, borderRadius: '50%', background: 'rgba(255,255,255,.9)', filter: 'blur(5px)' }} />
+
+        {/* face */}
+        <div style={{
+          position: 'absolute', left: 21, top: 19, right: 21, height: 74, borderRadius: 23,
+          background: 'radial-gradient(120% 110% at 26% 14%, #35286E 0%, #1A1442 46%, #0E0B29 100%)',
+          boxShadow: 'inset 0 0 0 1.5px rgba(140,110,255,.5), inset 0 2px 10px rgba(0,0,0,.6), 0 3px 8px rgba(20,14,60,.45)',
+          overflow: 'hidden',
+        }}>
+          <div style={{ position: 'absolute', left: '-10%', top: '-30%', width: '70%', height: '150%', background: 'linear-gradient(100deg,rgba(255,255,255,.16),rgba(255,255,255,0) 62%)', transform: 'skewX(-14deg)' }} />
+          <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 2, background: `linear-gradient(180deg,${T.accent},${T.amber} 60%,rgba(108,92,231,0))` }} />
+          <div style={{ position: 'absolute', right: 0, top: 8, bottom: 8, width: 2, background: `linear-gradient(180deg,rgba(108,92,231,0),${T.amberSoft})` }} />
+          <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 9 }}>
+            <div style={{ display: 'flex', gap: 22 }}>
+              {[0, 1].map(i => (
+                <span key={i} style={{ width: 11, height: 15, borderRadius: 5, background: '#FFFFFF', boxShadow: '0 0 10px rgba(255,255,255,.75)', display: 'block', animation: 'voca-blink 4.2s ease-in-out infinite' }} />
+              ))}
+            </div>
+            <div style={{ width: 30, height: 15, border: '3.5px solid transparent', borderBottomColor: '#FFFFFF', borderRadius: '0 0 34px 34px', filter: 'drop-shadow(0 0 6px rgba(255,255,255,.6))' }} />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+// WelcomeScreen
+// ─────────────────────────────────────────────
+
+function WelcomeScreen({ langA, langB, onStart, onPickA, onPickB, onSwap, tier = 'free', secondsLeft = 0, onUpgrade, offlineMode = false, onOfflineChange }) {
+  const langAInfo = getLang(langA);
+  const langBInfo = getLang(langB);
+
+  return (
+    <div style={{
+      flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden',
+      background: `radial-gradient(120% 70% at 50% 6%, ${T.surface2} 0%, rgba(251,249,247,0) 58%), radial-gradient(90% 50% at 88% 96%, #EBF6F0 0%, rgba(251,249,247,0) 60%), ${T.bg}`,
+    }}>
+      <div style={{ padding: '30px 26px 0', display: 'flex', alignItems: 'center', gap: 9, flexShrink: 0 }}>
+        <div style={{ width: 26, height: 26, borderRadius: 8, background: T.amber, display: 'grid', placeItems: 'center' }}>
+          <div style={{ display: 'flex', gap: 4 }}>
+            <span style={{ width: 4, height: 4, borderRadius: '50%', background: '#fff', display: 'block' }} />
+            <span style={{ width: 4, height: 4, borderRadius: '50%', background: '#fff', display: 'block' }} />
+          </div>
+        </div>
+        <div style={{ fontFamily: T.display, fontSize: 17, fontWeight: 700, letterSpacing: '-.01em', color: T.slate }}>Voca</div>
+
+        {/* Tier chip. A subscriber sees what is left before starting, not after
+            it runs out; a free user sees the one route to the cloud engine. */}
+        <button
+          onClick={onUpgrade}
+          style={{
+            marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6,
+            padding: '6px 11px', borderRadius: 99, border: `1px solid ${T.hairline}`,
+            background: tier === 'pro' ? T.inkA07 : T.surface,
+            fontFamily: T.mono, fontSize: 9.5, letterSpacing: '.1em', textTransform: 'uppercase',
+            fontWeight: 700, color: tier === 'pro' ? T.amberDeep : T.inkMute,
+          }}
+        >
+          {tier === 'pro' ? (
+            <>
+              <span style={{ width: 5, height: 5, borderRadius: '50%', background: secondsLeft > 0 ? T.teal : T.error, display: 'block' }} />
+              {formatMinutes(secondsLeft)} left
+            </>
+          ) : 'Free · Upgrade'}
+        </button>
+      </div>
+
+      <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', paddingBottom: 8 }}>
+        <VocaMascot />
+        <div style={{ fontFamily: T.display, fontSize: 15.5, fontWeight: 500, color: 'rgba(28,32,51,.5)', marginTop: 16, whiteSpace: 'nowrap' }}>
+          Ready when you are
+        </div>
+      </div>
+
+      <div style={{ padding: '0 20px 24px', flexShrink: 0 }}>
+        <OfflineSwitch on={offlineMode} onChange={onOfflineChange} langA={langA} langB={langB} />
+        <div style={{
+          display: 'flex', alignItems: 'stretch', gap: 8, background: T.surface,
+          border: `1px solid ${T.hairline}`, borderRadius: 22, padding: 8,
+          boxShadow: '0 10px 30px -18px rgba(28,32,51,.28)',
+        }}>
+          <button onClick={onPickA} style={{ flex: 1, minWidth: 0, padding: '12px 14px', borderRadius: 15, background: T.inkA07, textAlign: 'left' }}>
+            <div style={{ fontFamily: T.mono, fontSize: 9.5, letterSpacing: '.12em', textTransform: 'uppercase', color: T.amberDeep, fontWeight: 700 }}>Person A</div>
             <div style={{ fontSize: 16, fontWeight: 600, color: T.slate, marginTop: 5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{langAInfo.label}</div>
           </button>
-          <button onClick={onSwap} aria-label="Swap languages" style={{ width: 38, display: 'grid', placeItems: 'center', color: 'rgba(62,76,94,.4)', borderRadius: 12 }}><Icon name="swap" size={18} /></button>
+          <button onClick={onSwap} aria-label="Swap languages" style={{ width: 38, display: 'grid', placeItems: 'center', color: 'rgba(28,32,51,.4)', borderRadius: 12 }}>
+            <Icon name="swap" size={18} />
+          </button>
           <button onClick={onPickB} style={{ flex: 1, minWidth: 0, padding: '12px 14px', borderRadius: 15, background: T.inkB09, textAlign: 'right' }}>
-            <div style={{ fontSize: 9.5, letterSpacing: '.14em', textTransform: 'uppercase', color: T.tealDeep, fontWeight: 700 }}>Person B</div>
+            <div style={{ fontFamily: T.mono, fontSize: 9.5, letterSpacing: '.12em', textTransform: 'uppercase', color: T.tealDeep, fontWeight: 700 }}>Person B</div>
             <div style={{ fontSize: 16, fontWeight: 600, color: T.slate, marginTop: 5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{langBInfo.label}</div>
           </button>
         </div>
+
         <button
           onClick={onStart}
           style={{
             width: '100%', height: 62, marginTop: 12, background: T.amber, color: '#fff', border: 'none', borderRadius: 20,
             fontSize: 17, fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 11,
-            boxShadow: '0 12px 24px -8px rgba(244,124,54,.6)',
+            boxShadow: '0 12px 26px -8px rgba(108,92,231,.6)',
           }}
         >
           <Icon name="mic" size={19} color="#fff" /> Start a session
         </button>
-      </div>
 
-      <div style={{ padding: '18px 20px 0' }}>
-        {topSessions.length > 0 && (
-          <>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 9 }}>
-              <h2 style={{ fontSize: 10.5, fontWeight: 700, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '.16em' }}>
-                Recent sessions
-              </h2>
-              <button onClick={onHistory} style={{ fontSize: 12, color: T.amber, fontWeight: 600 }}>All</button>
-            </div>
-            {topSessions.map(s => (
-              <SessionCard key={s.session_id} session={s} onClick={() => onSession(s.session_id)} />
-            ))}
-          </>
-        )}
-      </div>
-
-      {/* Canvas footer hint — sits at the base of the scroll flow */}
-      <div style={{ flex: 1, display: 'flex', alignItems: 'flex-end', justifyContent: 'center', padding: '24px 34px 24px', minHeight: 96 }}>
-        <p style={{ fontSize: 12.5, lineHeight: 1.6, color: T.inkMute, textAlign: 'center' }}>
-          Lay the phone flat between you. Hold your half to talk; release and the other half hears it translated.
-        </p>
+        <div style={{
+          textAlign: 'center', fontFamily: T.mono, fontSize: 10, letterSpacing: '.14em',
+          textTransform: 'uppercase', color: 'rgba(28,32,51,.35)', marginTop: 14,
+        }}>
+          Hold your half to talk
+        </div>
       </div>
     </div>
   );
@@ -818,12 +1251,12 @@ function SessionCard({ session, onClick }) {
       onClick={onClick}
       style={{
         width: '100%', display: 'flex', alignItems: 'center', gap: 12, padding: '14px 15px', background: '#fff',
-        border: '1px solid rgba(62,76,94,.08)', borderRadius: 18, marginBottom: 8, cursor: 'pointer', textAlign: 'left',
+        border: '1px solid rgba(28,32,51,.08)', borderRadius: 18, marginBottom: 8, cursor: 'pointer', textAlign: 'left',
       }}
     >
       <div style={{
-        width: 38, height: 38, background: isLive ? 'rgba(88,191,180,.12)' : 'rgba(244,124,54,.08)',
-        color: isLive ? '#2E8E86' : T.amber, borderRadius: 12, display: 'grid', placeItems: 'center', flexShrink: 0,
+        width: 38, height: 38, background: isLive ? 'rgba(52,164,111,.12)' : 'rgba(108,92,231,.08)',
+        color: isLive ? '#2A8B5D' : T.amber, borderRadius: 12, display: 'grid', placeItems: 'center', flexShrink: 0,
         fontSize: 11, fontWeight: 700,
       }}>
         {String(session.lang || 'EN').toUpperCase()}
@@ -834,13 +1267,13 @@ function SessionCard({ session, onClick }) {
             {session.topic || session.caller_name || 'Translation Session'}
           </span>
           {isLive && (
-            <span style={{ fontSize: 10, fontWeight: 700, color: '#2E8E86', background: 'rgba(88,191,180,.12)', padding: '4px 8px', borderRadius: 99, letterSpacing: '.1em' }}>
+            <span style={{ fontSize: 10, fontWeight: 700, color: '#2A8B5D', background: 'rgba(52,164,111,.12)', padding: '4px 8px', borderRadius: 99, letterSpacing: '.1em' }}>
               Live
             </span>
           )}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 11.5, color: 'rgba(62,76,94,.5)' }}>{session.caller_name}</span>
+          <span style={{ fontSize: 11.5, color: 'rgba(28,32,51,.5)' }}>{session.caller_name}</span>
           {session.participant_count != null && (
             <span style={{ fontSize: 12, color: T.textFaint }}>· {session.participant_count} people</span>
           )}
@@ -900,19 +1333,19 @@ function MicDisclosure({ onAccept, onCancel }) {
   return (
     <div style={{
       position: 'absolute', inset: 0, zIndex: 40, display: 'flex', alignItems: 'flex-end',
-      background: 'rgba(62,76,94,.55)', animation: 'fade-in .2s ease-out',
+      background: 'rgba(28,32,51,.55)', animation: 'fade-in .2s ease-out',
     }}>
       <div style={{
         width: '100%', background: T.cream, borderRadius: '26px 26px 0 0', padding: '24px 22px 28px',
-        boxShadow: '0 -18px 40px -12px rgba(62,76,94,.4)',
+        boxShadow: '0 -18px 40px -12px rgba(28,32,51,.4)',
       }}>
         <div style={{ width: 46, height: 46, borderRadius: 15, display: 'grid', placeItems: 'center', background: T.slate }}>
           <Icon name="mic" size={21} color={T.cream} />
         </div>
-        <h2 style={{ fontFamily: "'Instrument Serif', serif", fontSize: 25, fontWeight: 400, color: T.slate, marginTop: 14 }}>
+        <h2 style={{ fontFamily: T.display, fontSize: 25, fontWeight: 700, letterSpacing: '-.02em', color: T.slate, marginTop: 14 }}>
           Before we turn on the microphone
         </h2>
-        <div style={{ fontSize: 14, lineHeight: 1.6, color: 'rgba(62,76,94,.78)', marginTop: 12 }}>
+        <div style={{ fontSize: 14, lineHeight: 1.6, color: 'rgba(28,32,51,.78)', marginTop: 12 }}>
           To translate your conversation, Vocare records audio while you hold the speak
           button and sends it to our servers, where it is transcribed and translated.
         </div>
@@ -922,7 +1355,7 @@ function MicDisclosure({ onAccept, onCancel }) {
             'Transcripts of the conversation are saved on this device so you can read them later.',
             'There are no accounts, and nothing is used for advertising or tracking.',
           ].map(line => (
-            <li key={line} style={{ display: 'flex', gap: 9, fontSize: 13, lineHeight: 1.5, color: 'rgba(62,76,94,.7)' }}>
+            <li key={line} style={{ display: 'flex', gap: 9, fontSize: 13, lineHeight: 1.5, color: 'rgba(28,32,51,.7)' }}>
               <span style={{ color: T.amber, fontWeight: 700 }}>·</span>
               <span>{line}</span>
             </li>
@@ -952,7 +1385,7 @@ function MicDisclosure({ onAccept, onCancel }) {
         <button
           onClick={onCancel}
           style={{
-            width: '100%', height: 48, marginTop: 8, background: 'transparent', color: 'rgba(62,76,94,.6)',
+            width: '100%', height: 48, marginTop: 8, background: 'transparent', color: 'rgba(28,32,51,.6)',
             border: 'none', fontSize: 15, fontWeight: 600,
           }}
         >
@@ -1005,8 +1438,8 @@ function SessionSetupScreen({ langA, langB, onBack, onStart, onLangPick }) {
   return (
     <div style={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', overflowY: 'auto', background: T.cream }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '60px 22px 18px' }}>
-        <button onClick={onBack} style={{ width: 34, height: 34, borderRadius: 11, display: 'grid', placeItems: 'center', background: 'rgba(62,76,94,.05)', color: T.slate }}><Icon name="chevron-left" size={17} /></button>
-        <h1 style={{ fontFamily: "'Instrument Serif', serif", fontSize: 26, fontWeight: 400, color: T.slate }}>Session setup</h1>
+        <button onClick={onBack} style={{ width: 34, height: 34, borderRadius: 11, display: 'grid', placeItems: 'center', background: 'rgba(28,32,51,.05)', color: T.slate }}><Icon name="chevron-left" size={17} /></button>
+        <h1 style={{ fontFamily: T.display, fontSize: 26, fontWeight: 700, letterSpacing: '-.02em', color: T.slate }}>Session setup</h1>
       </div>
 
       <div style={{ padding: '0 20px 28px' }}>
@@ -1030,15 +1463,15 @@ function SessionSetupScreen({ langA, langB, onBack, onStart, onLangPick }) {
           />
         </Section>
 
-        <div style={{ fontSize: 10.5, letterSpacing: '.16em', textTransform: 'uppercase', color: 'rgba(62,76,94,.45)', fontWeight: 700, margin: '22px 0 9px' }}>Microphone</div>
+        <div style={{ fontSize: 10.5, letterSpacing: '.16em', textTransform: 'uppercase', color: 'rgba(28,32,51,.45)', fontWeight: 700, margin: '22px 0 9px' }}>Microphone</div>
         <div style={{ borderRadius: 18, padding: 15, background: T.slate, border: `1px solid ${T.slate}`, color: T.cream }}>
           <Icon name="mic" size={19} color={T.cream} />
           <div style={{ fontSize: 14.5, fontWeight: 600, marginTop: 8 }}>Hold to speak</div>
         </div>
 
         <div style={{ marginTop: 22, background: T.slate, borderRadius: 22, padding: '18px 18px 20px', color: T.cream }}>
-          <div style={{ fontSize: 10.5, letterSpacing: '.16em', textTransform: 'uppercase', color: 'rgba(251,243,235,.5)', fontWeight: 700 }}>How it works</div>
-          <div style={{ fontSize: 13.5, lineHeight: 1.55, color: 'rgba(251,243,235,.78)', marginTop: 10 }}>Lay the phone flat between you. Hold your half to talk; release and the other half hears it translated.</div>
+          <div style={{ fontSize: 10.5, letterSpacing: '.16em', textTransform: 'uppercase', color: 'rgba(251,249,247,.5)', fontWeight: 700 }}>How it works</div>
+          <div style={{ fontSize: 13.5, lineHeight: 1.55, color: 'rgba(251,249,247,.78)', marginTop: 10 }}>Lay the phone flat between you. Hold your half to talk; release and the other half hears it translated.</div>
         </div>
 
         <button
@@ -1046,7 +1479,7 @@ function SessionSetupScreen({ langA, langB, onBack, onStart, onLangPick }) {
           style={{
             width: '100%', height: 62, marginTop: 18, background: T.amber, color: '#fff', border: 'none', borderRadius: 20,
             fontSize: 17, fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
-            boxShadow: '0 12px 24px -8px rgba(244,124,54,.55)',
+            boxShadow: '0 12px 24px -8px rgba(108,92,231,.55)',
           }}
         >
           Start session
@@ -1059,7 +1492,7 @@ function SessionSetupScreen({ langA, langB, onBack, onStart, onLangPick }) {
 function Section({ title, children }) {
   return (
     <div>
-      <h3 style={{ fontSize: 10.5, fontWeight: 700, color: 'rgba(62,76,94,.45)', textTransform: 'uppercase', letterSpacing: '.16em', margin: '6px 0 9px' }}>
+      <h3 style={{ fontSize: 10.5, fontWeight: 700, color: 'rgba(28,32,51,.45)', textTransform: 'uppercase', letterSpacing: '.16em', margin: '6px 0 9px' }}>
         {title}
       </h3>
       {children}
@@ -1094,7 +1527,7 @@ function ToggleCard({ active, title, subtitle, icon, onClick }) {
 function PersonRow({ label, name, lang, onNameChange, onLangTap, dimmed = false, variant = 'amber', style = {} }) {
   const langInfo = getLang(lang);
   const accent = variant === 'teal' ? T.teal : T.amber;
-  const ink = variant === 'teal' ? '#2E8E86' : T.amber;
+  const ink = variant === 'teal' ? '#2A8B5D' : T.amber;
   return (
     <div style={{
       display: 'flex', alignItems: 'center', gap: 12, padding: '13px 15px', background: '#fff',
@@ -1105,7 +1538,7 @@ function PersonRow({ label, name, lang, onNameChange, onLangTap, dimmed = false,
       <div style={{ width: 8, height: 34, borderRadius: 99, background: accent, flexShrink: 0 }} />
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontSize: 9.5, letterSpacing: '.14em', textTransform: 'uppercase', fontWeight: 700, color: ink }}>{label}</div>
-        <input value={name} onChange={e => onNameChange(e.target.value)} disabled={dimmed} style={{ width: '100%', marginTop: 3, padding: 0, fontSize: 16, fontWeight: 600, color: T.slate, background: 'none', border: 'none', outline: 'none', fontFamily: "'Space Grotesk', sans-serif" }} />
+        <input value={name} onChange={e => onNameChange(e.target.value)} disabled={dimmed} style={{ width: '100%', marginTop: 3, padding: 0, fontSize: 16, fontWeight: 600, color: T.slate, background: 'none', border: 'none', outline: 'none', fontFamily: T.body }} />
       </div>
       <button
         onClick={onLangTap}
@@ -1130,8 +1563,8 @@ function PersonRow({ label, name, lang, onNameChange, onLangTap, dimmed = false,
 // ─────────────────────────────────────────────
 
 function PersonNameTag({ langInfo, name, color, pressing, tint, ink }) {
-  const textColor = T.cream;
-  const subColor = T.creamMute;
+  const textColor = T.slate;
+  const subColor = T.inkMute;
   const tileBg = tint || (color + '29');
   const tileInk = ink || color;
   return (
@@ -1159,9 +1592,9 @@ function PersonNameTag({ langInfo, name, color, pressing, tint, ink }) {
 // ─────────────────────────────────────────────
 
 function LiveTurn({ turn, mine, side }) {
-  const tagColor = mine ? T.creamFaint : (side === 'A' ? T.amberSoft : T.tealPale);
-  const bg = mine ? 'rgba(251,243,235,.08)' : (side === 'A' ? 'rgba(244,124,54,.9)' : 'rgba(88,191,180,.9)');
-  const fg = mine ? 'rgba(251,243,235,.82)' : '#fff';
+  const tagColor = mine ? 'rgba(28,32,51,.4)' : (side === 'A' ? T.amberDeep : T.tealDeep);
+  const bg = mine ? T.surface : (side === 'A' ? T.amber : T.teal);
+  const fg = mine ? T.slate : '#fff';
   const text = mine ? turn.original : turn.translated;
   const sub = mine ? null : turn.original;
   const zhFont = { fontFamily: "'Noto Sans SC', 'Space Grotesk', sans-serif" };
@@ -1176,7 +1609,7 @@ function LiveTurn({ turn, mine, side }) {
         {text}
       </div>
       {sub && (
-        <div style={{ fontSize: 11.5, color: T.creamFaint, marginTop: 5, fontStyle: 'italic', ...(isZh(sub) ? zhFont : {}) }}>
+        <div style={{ fontSize: 11.5, color: 'rgba(28,32,51,.4)', marginTop: 5, fontStyle: 'italic', ...(isZh(sub) ? zhFont : {}) }}>
           {sub}
         </div>
       )}
@@ -1185,10 +1618,157 @@ function LiveTurn({ turn, mine, side }) {
 }
 
 // ─────────────────────────────────────────────
+// LiveSplitView — the two-sided session screen
+// ─────────────────────────────────────────────
+//
+// Presentation only. Both live screens render this, so a cloud session and an
+// on-device session look and behave identically; only the badge in the centre
+// bar differs. It holds no state and touches no engine, which keeps the
+// separation the offline screen was built with — that separation was always
+// about logic, never about pixels.
+//
+// Each `side` descriptor is:
+//   { langInfo, name, status, pressing, disabled, onDown, onUp, turns, note }
+// where `turns` is [{ key, turn, mine }] oldest-first — the panel reverses it so
+// the newest sits nearest that person's microphone.
+
+function LiveSidePanel({ side, data, rotated }) {
+  const isA = side === 'A';
+  const accent = isA ? T.amber : T.teal;
+  const accentDeep = isA ? T.amberDeep : T.tealDeep;
+  const idleBg = isA ? T.panelAIdle : T.panelBIdle;
+  const activeBg = isA ? T.panelA : T.panelB;
+  const micIdle = isA ? T.inkA14 : T.inkB14;
+  const micBorder = isA ? T.inkA35 : T.inkB35;
+  const tint = isA ? T.tileA : T.tileB;
+
+  return (
+    <div style={{
+      flex: 1, minHeight: 0,
+      background: data.pressing ? activeBg : idleBg,
+      display: 'flex', flexDirection: 'column',
+      transition: 'background 0.3s', position: 'relative',
+      ...(rotated ? { transform: 'rotate(180deg)' } : null),
+    }}>
+      <div style={{ padding: '14px 18px 6px', display: 'flex', alignItems: 'center', gap: 10 }}>
+        <PersonNameTag langInfo={data.langInfo} name={data.name} tint={tint} ink={isA ? accent : accentDeep} pressing={data.pressing} />
+        <div style={{
+          marginLeft: 'auto', fontSize: 10.5, letterSpacing: '.1em', textTransform: 'uppercase',
+          fontWeight: 700, color: data.pressing ? accentDeep : 'rgba(28,32,51,.4)',
+        }}>{data.status}</div>
+      </div>
+
+      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column-reverse', gap: 10, padding: '6px 18px 4px' }}>
+        {data.turns.slice().reverse().map(t => (
+          <LiveTurn key={t.key} turn={t.turn} side={side} mine={t.mine} />
+        ))}
+        {data.note && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, alignSelf: 'flex-start' }}>
+            <TypingDots color={'rgba(28,32,51,.4)'} />
+            <span style={{ fontSize: 13, color: T.inkMute }}>{data.note}</span>
+          </div>
+        )}
+      </div>
+
+      <div style={{
+        height: 150, flex: 'none', display: 'grid', placeItems: 'center',
+        ...(rotated ? null : { paddingBottom: 'env(safe-area-inset-bottom, 0px)' }),
+      }}>
+        <div style={{ position: 'relative', width: 104, height: 104, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          {data.pressing && <PulseRing color={accent} size={104} />}
+          <button
+            data-ptt="true"
+            onPointerDown={data.onDown}
+            onPointerUp={data.onUp}
+            onPointerCancel={data.onUp}
+            onContextMenu={e => e.preventDefault()}
+            disabled={data.disabled}
+            aria-label={`${data.name} hold to speak`}
+            style={{
+              width: 104, height: 104, borderRadius: '50%',
+              background: data.pressing ? accent : micIdle,
+              border: `2px solid ${data.pressing ? accentDeep : micBorder}`,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              transition: 'transform .12s, background .2s, border-color .2s',
+              transform: data.pressing ? 'scale(1.12)' : 'scale(1)',
+              cursor: data.disabled ? 'default' : 'pointer',
+              opacity: data.dimmed ? 0.58 : 1,
+              touchAction: 'none', WebkitTouchCallout: 'none', WebkitUserSelect: 'none', userSelect: 'none',
+              position: 'relative', zIndex: 1,
+            }}
+          >
+            <Icon name="mic" size={30} color={data.pressing ? '#fff' : (isA ? accent : accentDeep)} />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LiveSplitView({ sideA, sideB, elapsedStr, onEnd, badge, notice, children }) {
+  return (
+    <div style={{
+      flex: 1, display: 'flex', flexDirection: 'column', background: T.bg, overflow: 'hidden',
+      userSelect: 'none', WebkitUserSelect: 'none', WebkitTouchCallout: 'none',
+    }}>
+      {children}
+
+      {/* Person B — top half, rotated so they read it from across the table */}
+      <LiveSidePanel side="B" data={sideB} rotated />
+
+      <div style={{
+        height: 56, background: T.surface, display: 'flex', alignItems: 'center',
+        padding: '0 16px', gap: 12, flexShrink: 0,
+        borderTop: `1px solid ${T.hairline}`, borderBottom: `1px solid ${T.hairline}`,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+          <span style={{ fontSize: 11, fontWeight: 700, color: T.tealSoft }}>{sideB.langInfo.code.toUpperCase()}</span>
+          <Icon name="swap" size={15} color="rgba(28,32,51,.35)" />
+          <span style={{ fontSize: 11, fontWeight: 700, color: T.amberSoft }}>{sideA.langInfo.code.toUpperCase()}</span>
+        </div>
+
+        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+          {badge ? (
+            <span style={{
+              fontFamily: T.mono, fontSize: 9, letterSpacing: '.12em', textTransform: 'uppercase',
+              fontWeight: 700, color: T.tealDeep, background: T.tealLight, borderRadius: 99, padding: '4px 8px',
+            }}>{badge}</span>
+          ) : (
+            <div style={{ width: 6, height: 6, borderRadius: '50%', background: T.gold, animation: 'dot-blink 1.6s ease-in-out infinite' }} />
+          )}
+          <span style={{ fontSize: 12.5, color: 'rgba(28,32,51,.75)', fontVariantNumeric: 'tabular-nums', fontWeight: 500 }}>{elapsedStr}</span>
+        </div>
+
+        <button
+          onClick={onEnd}
+          style={{
+            height: 34, padding: '0 14px', borderRadius: 12, background: 'rgba(52,164,111,.15)',
+            color: T.tealSoft, border: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7,
+          }}
+        >
+          <span style={{ width: 9, height: 9, background: 'currentColor', borderRadius: 2, display: 'block' }} />
+          <span style={{ fontSize: 12.5, fontWeight: 600 }}>End</span>
+        </button>
+      </div>
+
+      {notice && (
+        <div style={{
+          flexShrink: 0, padding: '9px 18px', background: T.errorLight, color: T.error,
+          fontSize: 12, lineHeight: 1.4,
+        }}>{notice}</div>
+      )}
+
+      {/* Person A — bottom half, the phone's owner */}
+      <LiveSidePanel side="A" data={sideA} />
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
 // FaceToFaceLiveScreen — real WebRTC, PTT
 // ─────────────────────────────────────────────
 
-function FaceToFaceLiveScreen({ config, onStop, onError }) {
+function FaceToFaceLiveScreen({ config, onStop, onError, budgetSeconds = Infinity, onUsage, onExhausted }) {
   const { nameA, nameB, langA, langB } = config;
   const langAInfo = getLang(langA);
   const langBInfo = getLang(langB);
@@ -1359,13 +1939,38 @@ function FaceToFaceLiveScreen({ config, onStop, onError }) {
     }
   }
 
+  // Metered minutes are only honest if they survive a crash, so usage is
+  // reported on a short cadence rather than only at teardown. Reports carry the
+  // session's total elapsed seconds, so a duplicate or a retry settles to the
+  // same balance instead of charging twice.
+  const USAGE_REPORT_EVERY = 15;
+
+  function reportElapsed() {
+    if (onUsage && sessionIdRef.current) onUsage(sessionIdRef.current, elapsedRef.current);
+  }
+
   function startTimer() {
     if (timerRef.current) return;
     timerRef.current = setInterval(() => {
-      if (mountedRef.current) setElapsed(e => {
+      if (!mountedRef.current) return;
+      setElapsed(e => {
         elapsedRef.current = e + 1;
         return elapsedRef.current;
       });
+
+      const spent = elapsedRef.current;
+      if (spent % USAGE_REPORT_EVERY === 0) reportElapsed();
+
+      // Out of credit: end the call rather than let it run on unbilled. The
+      // user keeps what was said — the transcript is persisted first.
+      if (spent >= budgetSeconds) {
+        reportElapsed();
+        persistSession('ended').finally(() => {
+          cleanup();
+          if (onExhausted) onExhausted();
+          else onStop();
+        });
+      }
     }, 1000);
   }
 
@@ -1595,178 +2200,46 @@ function FaceToFaceLiveScreen({ config, onStop, onError }) {
     : !spokenByA(ev));
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.navy, overflow: 'hidden', userSelect: 'none', WebkitUserSelect: 'none', WebkitTouchCallout: 'none' }}>
-      {/* Hidden audio elements */}
+    <LiveSplitView
+      elapsedStr={elapsedStr}
+      onEnd={async () => { await persistSession('ended'); reportElapsed(); cleanup(); onStop(); }}
+      sideA={{
+        langInfo: langAInfo,
+        name: nameA,
+        pressing: pressA,
+        disabled: phase !== 'connected' || turnStateA === 'translating' || pressB,
+        dimmed: turnStateA === 'translating',
+        onDown: pressAStart,
+        onUp: pressAEnd,
+        status: pressA ? 'Recording'
+          : turnStateA === 'translating' ? 'Translating...'
+          : pressB ? `Listening to ${nameB}`
+          : phase === 'connected' ? (hasSpokenA ? 'Ready - speak again' : 'Ready')
+          : connState,
+        turns: allTurns.map((t, i) => ({ key: i, turn: t, mine: spokenByA(t) })),
+        note: phase === 'connecting' && !lastTurnA ? connState : null,
+      }}
+      sideB={{
+        langInfo: langBInfo,
+        name: nameB,
+        pressing: pressB,
+        disabled: phase !== 'connected' || turnStateB === 'translating' || pressA,
+        dimmed: turnStateB === 'translating',
+        onDown: pressBStart,
+        onUp: pressBEnd,
+        status: pressB ? 'Recording'
+          : turnStateB === 'translating' ? 'Translating...'
+          : pressA ? `Listening to ${nameA}`
+          : phase === 'connected' ? (hasSpokenB ? 'Ready - speak again' : 'Ready')
+          : connState,
+        turns: allTurns.map((t, i) => ({ key: i, turn: t, mine: !spokenByA(t) })),
+        note: phase === 'connecting' && !lastTurnB ? connState : null,
+      }}
+    >
+      {/* Hidden audio elements — one per leg */}
       <audio ref={audioRefA} autoPlay playsInline style={{ display: 'none' }} />
       <audio ref={audioRefB} autoPlay playsInline style={{ display: 'none' }} />
-
-      {/* Person B panel — top half, rotated 180° */}
-      <div style={{
-        flex: 1,
-        minHeight: 0,
-        transform: 'rotate(180deg)',
-        background: pressB ? T.panelB : T.panelIdle,
-        display: 'flex',
-        flexDirection: 'column',
-        transition: 'background 0.3s',
-        position: 'relative',
-      }}>
-        {/* Person info */}
-        <div style={{ padding: '14px 18px 6px', display: 'flex', alignItems: 'center', gap: 10 }}>
-          <PersonNameTag langInfo={langBInfo} name={nameB} tint={T.tileB} ink={T.tealSoft} pressing={pressB} />
-          <div style={{ marginLeft: 'auto', fontSize: 10.5, letterSpacing: '.1em', textTransform: 'uppercase', fontWeight: 700, color: pressB ? T.tealPale : T.creamFaint }}>{pressB ? 'Recording' : turnStateB === 'translating' ? 'Translating...' : pressA ? `Listening to ${nameA}` : phase === 'connected' ? hasSpokenB ? 'Ready - speak again' : 'Ready' : connState}</div>
-        </div>
-
-        {/* Transcript — newest nearest the mic */}
-        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column-reverse', gap: 10, padding: '6px 18px 4px' }}>
-          {allTurns.slice().reverse().map((t, i) => (
-            <LiveTurn key={allTurns.length - 1 - i} turn={t} side="B" mine={!spokenByA(t)} />
-          ))}
-          {phase === 'connecting' && !lastTurnB && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, alignSelf: 'flex-start' }}>
-              <TypingDots color={T.creamFaint} />
-              <span style={{ fontSize: 13, color: T.creamMute }}>{connState}</span>
-            </div>
-          )}
-        </div>
-
-        {/* Hold to speak */}
-        <div style={{ height: 150, flex: 'none', display: 'grid', placeItems: 'center' }}>
-          <div style={{ position: 'relative', width: 104, height: 104, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            {pressB && <PulseRing color={T.teal} size={104} />}
-            <button
-              data-ptt="true"
-              onPointerDown={pressBStart}
-              onPointerUp={pressBEnd}
-              onPointerCancel={pressBEnd}
-              onContextMenu={e => e.preventDefault()}
-              disabled={phase !== 'connected' || turnStateB === 'translating' || pressA}
-              aria-label={turnStateB === 'translating' ? `${nameB} translation in progress` : `${nameB} hold to speak`}
-              style={{
-                width: 104, height: 104,
-                borderRadius: '50%',
-                background: pressB ? T.teal : T.inkB14,
-                border: `2px solid ${pressB ? '#CDEDE8' : 'rgba(127,211,201,.4)'}`,
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                transition: 'transform .12s, background .2s, border-color .2s',
-                transform: pressB ? 'scale(1.12)' : 'scale(1)',
-                cursor: phase === 'connected' && turnStateB === 'ready' && !pressA ? 'pointer' : 'default',
-                opacity: turnStateB === 'translating' ? 0.58 : 1,
-                touchAction: 'none',
-                WebkitTouchCallout: 'none',
-                WebkitUserSelect: 'none',
-                userSelect: 'none',
-                position: 'relative',
-                zIndex: 1,
-              }}
-            >
-              <Icon name="mic" size={30} color={pressB ? '#fff' : T.tealPale} />
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* Center divider — 44px, white bg */}
-      <div style={{
-        height: 56, background: T.navy,
-        display: 'flex',
-        alignItems: 'center',
-        padding: '0 16px',
-        gap: 12,
-        flexShrink: 0,
-        borderTop: '1px solid rgba(251,243,235,.1)', borderBottom: '1px solid rgba(251,243,235,.1)',
-      }}>
-        {/* Language pair */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-          <span style={{ fontSize: 11, fontWeight: 700, color: T.tealSoft }}>{langBInfo.code.toUpperCase()}</span>
-          <Icon name="swap" size={15} color="rgba(251,243,235,.35)" />
-          <span style={{ fontSize: 11, fontWeight: 700, color: T.amberSoft }}>{langAInfo.code.toUpperCase()}</span>
-        </div>
-
-        {/* Elapsed time — the only thing the centre carries */}
-        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
-          <div style={{ width: 6, height: 6, borderRadius: '50%', background: T.gold, animation: 'dot-blink 1.6s ease-in-out infinite' }} />
-          <span style={{ fontSize: 12.5, color: 'rgba(251,243,235,.75)', fontVariantNumeric: 'tabular-nums', fontWeight: 500 }}>{elapsedStr}</span>
-        </div>
-
-        <button
-          onClick={async () => { await persistSession('ended'); cleanup(); onStop(); }}
-          style={{
-            height: 34, padding: '0 14px', borderRadius: 12, background: 'rgba(88,191,180,.15)', color: T.tealSoft,
-            border: 'none',
-            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7,
-          }}
-        >
-          <span style={{ width: 9, height: 9, background: 'currentColor', borderRadius: 2, display: 'block' }} />
-          <span style={{ fontSize: 12.5, fontWeight: 600 }}>End</span>
-        </button>
-      </div>
-
-      {/* Person A panel — bottom half */}
-      <div style={{
-        flex: 1,
-        minHeight: 0,
-        background: pressA ? T.panelA : T.panelIdle,
-        display: 'flex',
-        flexDirection: 'column',
-        transition: 'background 0.3s',
-        position: 'relative',
-      }}>
-        {/* Person info */}
-        <div style={{ padding: '14px 18px 6px', display: 'flex', alignItems: 'center', gap: 10 }}>
-          <PersonNameTag langInfo={langAInfo} name={nameA} tint={T.tileA} ink={T.amberSoft} pressing={pressA} />
-          <div style={{ marginLeft: 'auto', fontSize: 10.5, letterSpacing: '.1em', textTransform: 'uppercase', fontWeight: 700, color: pressA ? T.amberSoft : T.creamFaint }}>{pressA ? 'Recording' : turnStateA === 'translating' ? 'Translating...' : pressB ? `Listening to ${nameB}` : phase === 'connected' ? hasSpokenA ? 'Ready - speak again' : 'Ready' : connState}</div>
-        </div>
-
-        {/* Transcript — newest nearest the mic */}
-        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column-reverse', gap: 10, padding: '6px 18px 4px' }}>
-          {allTurns.slice().reverse().map((t, i) => (
-            <LiveTurn key={allTurns.length - 1 - i} turn={t} side="A" mine={spokenByA(t)} />
-          ))}
-          {phase === 'connecting' && !lastTurnA && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, alignSelf: 'flex-start' }}>
-              <TypingDots color={T.creamFaint} />
-              <span style={{ fontSize: 13, color: T.creamMute }}>{connState}</span>
-            </div>
-          )}
-        </div>
-
-        {/* Hold to speak */}
-        <div style={{ height: 150, flex: 'none', display: 'grid', placeItems: 'center', paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}>
-          <div style={{ position: 'relative', width: 104, height: 104, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            {pressA && <PulseRing color={T.amber} size={104} />}
-            <button
-              data-ptt="true"
-              onPointerDown={pressAStart}
-              onPointerUp={pressAEnd}
-              onPointerCancel={pressAEnd}
-              onContextMenu={e => e.preventDefault()}
-              disabled={phase !== 'connected' || turnStateA === 'translating' || pressB}
-              aria-label={turnStateA === 'translating' ? `${nameA} translation in progress` : `${nameA} hold to speak`}
-              style={{
-                width: 104, height: 104,
-                borderRadius: '50%',
-                background: pressA ? T.amber : T.inkA14,
-                border: `2px solid ${pressA ? T.amberSoft : 'rgba(251,176,122,.4)'}`,
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                transition: 'transform .12s, background .2s, border-color .2s',
-                transform: pressA ? 'scale(1.12)' : 'scale(1)',
-                cursor: phase === 'connected' && turnStateA === 'ready' && !pressB ? 'pointer' : 'default',
-                opacity: turnStateA === 'translating' ? 0.58 : 1,
-                touchAction: 'none',
-                WebkitTouchCallout: 'none',
-                WebkitUserSelect: 'none',
-                userSelect: 'none',
-                position: 'relative',
-                zIndex: 1,
-              }}
-            >
-              <Icon name="mic" size={30} color={pressA ? '#fff' : T.amberSoft} />
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
+    </LiveSplitView>
   );
 }
 
@@ -2275,8 +2748,8 @@ function LanguagePairScreen({ langA, langB, onBack, onSave }) {
 
 function LangScreen({ onBack, onSelect, targetName = 'Person', variant = 'amber', selected }) {
   const [query, setQuery] = useState('');
-  const accent = variant === 'teal' ? '#2E8E86' : T.amber;
-  const tint = variant === 'teal' ? 'rgba(88,191,180,.1)' : 'rgba(244,124,54,.08)';
+  const accent = variant === 'teal' ? '#2A8B5D' : T.amber;
+  const tint = variant === 'teal' ? 'rgba(52,164,111,.1)' : 'rgba(108,92,231,.08)';
 
   const filtered = query.trim()
     ? LANGUAGES.filter(l =>
@@ -2290,22 +2763,22 @@ function LangScreen({ onBack, onSelect, targetName = 'Person', variant = 'amber'
       {/* Header */}
       <div style={{
         display: 'flex', alignItems: 'center', gap: 12,
-        padding: '60px 20px 14px', background: '#fff', borderBottom: '1px solid rgba(62,76,94,.08)',
+        padding: '60px 20px 14px', background: '#fff', borderBottom: '1px solid rgba(28,32,51,.08)',
         flexShrink: 0,
       }}>
-        <button onClick={onBack} style={{ width: 34, height: 34, borderRadius: 11, display: 'grid', placeItems: 'center', background: 'rgba(62,76,94,.05)', color: T.slate }}>
+        <button onClick={onBack} style={{ width: 34, height: 34, borderRadius: 11, display: 'grid', placeItems: 'center', background: 'rgba(28,32,51,.05)', color: T.slate }}>
           <Icon name="chevron-left" size={17} />
         </button>
-        <div><div style={{ fontSize: 9.5, letterSpacing: '.14em', textTransform: 'uppercase', fontWeight: 700, color: accent }}>{targetName}</div><h1 style={{ fontFamily: "'Instrument Serif', serif", fontSize: 24, fontWeight: 400, color: T.slate, lineHeight: 1.1 }}>Choose language</h1></div>
+        <div><div style={{ fontSize: 9.5, letterSpacing: '.14em', textTransform: 'uppercase', fontWeight: 700, color: accent }}>{targetName}</div><h1 style={{ fontFamily: T.display, fontSize: 24, fontWeight: 700, letterSpacing: '-.02em', color: T.slate, lineHeight: 1.1 }}>Choose language</h1></div>
       </div>
 
       {/* Search */}
       <div style={{ padding: '0 20px 14px', background: '#fff', flexShrink: 0 }}>
         <div style={{
           display: 'flex', alignItems: 'center', gap: 10,
-          padding: '11px 13px', background: 'rgba(62,76,94,.05)', borderRadius: 14,
+          padding: '11px 13px', background: 'rgba(28,32,51,.05)', borderRadius: 14,
         }}>
-          <Icon name="search" size={16} color="rgba(62,76,94,.4)" />
+          <Icon name="search" size={16} color="rgba(28,32,51,.4)" />
           <input
             value={query}
             onChange={e => setQuery(e.target.value)}
@@ -2373,44 +2846,28 @@ const SPEECH_LOCALE = {
 const speechLocale = code => SPEECH_LOCALE[code] || code;
 
 
-function OfflineHalf({ side, code, variant, active, disabled, onPress, onRelease }) {
-  return (
-    <button
-      onPointerDown={() => onPress(side)}
-      onPointerUp={() => onRelease(side)}
-      onPointerLeave={() => active && onRelease(side)}
-      disabled={disabled}
-      style={{
-        flex: 1, borderRadius: 22, border: 'none', padding: 18,
-        background: active ? (variant === 'amber' ? T.amber : '#2E8E86') : '#fff',
-        color: active ? '#fff' : T.slate,
-        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8,
-        boxShadow: active ? '0 12px 24px -8px rgba(62,76,94,.35)' : 'none',
-        opacity: disabled ? 0.5 : 1,
-      }}
-    >
-      <Icon name="mic" size={26} color={active ? '#fff' : T.slate} />
-      <div style={{ fontSize: 15, fontWeight: 600 }}>{getLang(code).label}</div>
-      <div style={{ fontSize: 11.5, opacity: 0.7 }}>{active ? 'Release to translate' : 'Hold to speak'}</div>
-    </button>
-  );
-}
-
 function OfflineLiveScreen({ langA, langB, onBack }) {
   const [turns, setTurns] = useState([]);
   const [holding, setHolding] = useState(null);   // 'a' | 'b' | null
   const [phase, setPhase] = useState('idle');     // idle | listening | translating | speaking
   const [error, setError] = useState(null);
   const [partial, setPartial] = useState('');
-  const [picking, setPicking] = useState(null);       // 'a' | 'b' | null
-  const [a, setA] = useState(langA);
-  const [b, setB] = useState(langB);
+  // Fixed for the session: the pair is chosen on the home screen, exactly as it
+  // is for a cloud session.
+  const a = langA;
+  const b = langB;
   const [sttLocales, setSttLocales] = useState(null); // locales the recognizer knows
+  const [elapsed, setElapsed] = useState(0);
   const listenerRef = useRef(null);
   const startRef = useRef(null);
 
   const SR = window.Capacitor?.Plugins?.SpeechRecognition;
   const TTS = window.Capacitor?.Plugins?.TextToSpeech;
+
+  useEffect(() => {
+    const tick = setInterval(() => setElapsed(e => e + 1), 1000);
+    return () => clearInterval(tick);
+  }, []);
 
   useEffect(() => {
     let handle;
@@ -2539,12 +2996,6 @@ function OfflineLiveScreen({ langA, langB, onBack }) {
   }
 
   const busy = phase !== 'idle';
-  const statusText = {
-    idle: 'Hold a button to speak',
-    listening: 'Listening…',
-    translating: 'Translating on device…',
-    speaking: 'Speaking…',
-  }[phase];
 
   // NOTE: Half, Panel and Note live at module scope on purpose. A component
   // declared inside a render is a NEW component type each time, so React
@@ -2553,129 +3004,58 @@ function OfflineLiveScreen({ langA, langB, onBack }) {
   // hold-to-speak button that sometimes never releases.
 
 
-  // Only languages with an on-device translation model are offered — picking one
-  // without a model would produce a button that silently cannot work.
-  if (picking) {
-    const options = offlineTranslationLanguages();
-    const current = picking === 'a' ? a : b;
-    const other = picking === 'a' ? b : a;
-    return (
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.cream }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '60px 22px 14px' }}>
-          <button onClick={() => setPicking(null)} style={{ width: 34, height: 34, borderRadius: 11, display: 'grid', placeItems: 'center', background: 'rgba(62,76,94,.05)', color: T.slate }}>
-            <Icon name="chevron-left" size={17} />
-          </button>
-          <h1 style={{ fontFamily: "'Instrument Serif', serif", fontSize: 24, fontWeight: 400, color: T.slate }}>
-            {picking === 'a' ? 'This side speaks' : 'Far side speaks'}
-          </h1>
-        </div>
-        <div style={{ padding: '0 20px 10px', fontSize: 12.5, color: 'rgba(62,76,94,.55)' }}>
-          Only languages that can translate on this device are shown. Cantonese has no offline model
-          on any phone.
-        </div>
-        <div style={{ flex: 1, overflowY: 'auto', padding: '0 20px 28px' }}>
-          <div style={{ background: '#fff', border: '1px solid rgba(62,76,94,.08)', borderRadius: 18, overflow: 'hidden' }}>
-            {options.map((code, i) => {
-              const taken = code === other;
-              const locale = speechLocale(code).toLowerCase();
-              const sttKnown = sttLocales === null
-                ? null
-                : sttLocales.some(l => l === locale || l.startsWith(code + '-') || l === code);
-              return (
-                <button
-                  key={code}
-                  disabled={taken}
-                  onClick={() => { picking === 'a' ? setA(code) : setB(code); setPicking(null); setError(null); }}
-                  style={{ width: '100%', padding: '13px 15px', display: 'flex', alignItems: 'center', gap: 12, borderTop: i ? '1px solid rgba(62,76,94,.06)' : 'none', textAlign: 'left', opacity: taken ? 0.4 : 1, background: code === current ? 'rgba(244,124,54,.06)' : '#fff' }}
-                >
-                  <span style={{ fontSize: 17 }}>{getLang(code).flag}</span>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 14.5, fontWeight: 600, color: T.slate }}>{getLang(code).label}</div>
-                    {sttKnown === false && (
-                      <div style={{ fontSize: 11, color: 'rgba(62,76,94,.45)', marginTop: 2 }}>
-                        Dictation for this language may need installing
-                      </div>
-                    )}
-                  </div>
-                  {code === current && <Icon name="check" size={16} color={T.amber} />}
-                  {taken && <span style={{ fontSize: 11.5, color: 'rgba(62,76,94,.45)' }}>Other side</span>}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-    );
-  }
+  const langAInfo = getLang(a);
+  const langBInfo = getLang(b);
+
+  const sideStatus = (side) => {
+    if (holding === side) return 'Recording';
+    if (phase === 'translating') return 'Translating...';
+    if (phase === 'speaking') return 'Speaking...';
+    if (holding) return side === 'a' ? 'Listening to Person B' : 'Listening to Person A';
+    return turns.length ? 'Ready - speak again' : 'Ready';
+  };
+
+  const sideTurns = (side) => turns.map((t, i) => ({
+    key: i,
+    turn: t,
+    mine: t.side === side,
+  }));
+
+  // The partial transcript belongs on the speaker's own half — it is what they
+  // are saying, not what the other person is hearing.
+  const sideNote = (side) => (holding === side && partial ? partial : null);
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.cream }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '60px 22px 10px' }}>
-        <button onClick={onBack} style={{ width: 34, height: 34, borderRadius: 11, display: 'grid', placeItems: 'center', background: 'rgba(62,76,94,.05)', color: T.slate }}>
-          <Icon name="chevron-left" size={17} />
-        </button>
-        <div style={{ flex: 1 }}>
-          <h1 style={{ fontFamily: "'Instrument Serif', serif", fontSize: 24, fontWeight: 400, color: T.slate }}>Offline session</h1>
-        </div>
-        <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '.1em', textTransform: 'uppercase', color: '#2E8E86', background: '#DDF4F1', borderRadius: 99, padding: '5px 9px' }}>On device</span>
-      </div>
-
-      <div style={{ padding: '0 20px 6px', fontSize: 12.5, color: 'rgba(62,76,94,.55)' }}>
-        Nothing is sent to a server. Speech, translation and the spoken reply all happen on this phone.
-      </div>
-
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 20px 4px' }}>
-        <button onClick={() => setPicking('a')} style={{ flex: 1, padding: '10px 12px', borderRadius: 14, background: '#fff', border: '1px solid rgba(62,76,94,.12)', textAlign: 'left' }}>
-          <div style={{ fontSize: 9.5, letterSpacing: '.14em', textTransform: 'uppercase', color: T.amber, fontWeight: 700 }}>This side</div>
-          <div style={{ fontSize: 14.5, fontWeight: 600, color: T.slate, marginTop: 2 }}>{getLang(a).label}</div>
-        </button>
-        <button
-          onClick={() => { setA(b); setB(a); }}
-          style={{ width: 38, height: 38, borderRadius: 12, background: 'rgba(62,76,94,.05)', border: 'none', color: T.slate, fontSize: 15 }}
-          aria-label="Swap languages"
-        >⇄</button>
-        <button onClick={() => setPicking('b')} style={{ flex: 1, padding: '10px 12px', borderRadius: 14, background: '#fff', border: '1px solid rgba(62,76,94,.12)', textAlign: 'right' }}>
-          <div style={{ fontSize: 9.5, letterSpacing: '.14em', textTransform: 'uppercase', color: '#2E8E86', fontWeight: 700 }}>Far side</div>
-          <div style={{ fontSize: 14.5, fontWeight: 600, color: T.slate, marginTop: 2 }}>{getLang(b).label}</div>
-        </button>
-      </div>
-
-      <div style={{ flex: 1, overflowY: 'auto', padding: '12px 20px' }}>
-        {turns.length === 0 && !partial && (
-          <div style={{ fontSize: 13.5, color: 'rgba(62,76,94,.45)', textAlign: 'center', marginTop: 28 }}>
-            Hold either side and speak. The other side hears it translated.
-          </div>
-        )}
-        {turns.map((t, i) => (
-          <div key={i} style={{ marginBottom: 14, alignSelf: 'flex-start' }}>
-            <div style={{ fontSize: 9.5, letterSpacing: '.12em', textTransform: 'uppercase', fontWeight: 700, color: t.side === 'a' ? T.amber : '#2E8E86', marginBottom: 4 }}>
-              {getLang(t.from).label} → {getLang(t.to).label}
-            </div>
-            <div style={{ background: '#fff', border: '1px solid rgba(62,76,94,.1)', borderRadius: 16, padding: '11px 13px' }}>
-              <div style={{ fontSize: 14.5, lineHeight: 1.45, color: T.slate }}>{t.translated}</div>
-              <div style={{ fontSize: 11.5, color: 'rgba(62,76,94,.45)', marginTop: 5, fontStyle: 'italic' }}>{t.original}</div>
-            </div>
-          </div>
-        ))}
-        {partial && (
-          <div style={{ fontSize: 13.5, color: 'rgba(62,76,94,.5)', fontStyle: 'italic', marginTop: 6 }}>{partial}</div>
-        )}
-      </div>
-
-      {error && (
-        <div style={{ margin: '0 20px 8px', padding: '10px 12px', background: '#FCE4D5', borderLeft: `3px solid ${T.amber}`, borderRadius: '0 8px 8px 0', fontSize: 12.5, lineHeight: 1.45, color: T.slate }}>
-          {error}
-        </div>
-      )}
-
-      <div style={{ padding: '4px 20px 8px', textAlign: 'center', fontSize: 12, fontWeight: 600, color: 'rgba(62,76,94,.5)' }}>{statusText}</div>
-      <div style={{ display: 'flex', gap: 12, padding: '0 20px 28px' }}>
-        <OfflineHalf side="a" code={a} variant="amber" active={holding === 'a'}
-          disabled={busy && holding !== 'a'} onPress={press} onRelease={release} />
-        <OfflineHalf side="b" code={b} variant="teal" active={holding === 'b'}
-          disabled={busy && holding !== 'b'} onPress={press} onRelease={release} />
-      </div>
-    </div>
+    <LiveSplitView
+      elapsedStr={formatClock(elapsed)}
+      onEnd={onBack}
+      badge="On device"
+      notice={error}
+      sideA={{
+        langInfo: langAInfo,
+        name: 'Person A',
+        pressing: holding === 'a',
+        disabled: busy && holding !== 'a',
+        dimmed: busy && holding !== 'a',
+        onDown: () => press('a'),
+        onUp: () => release('a'),
+        status: sideStatus('a'),
+        turns: sideTurns('a'),
+        note: sideNote('a'),
+      }}
+      sideB={{
+        langInfo: langBInfo,
+        name: 'Person B',
+        pressing: holding === 'b',
+        disabled: busy && holding !== 'b',
+        dimmed: busy && holding !== 'b',
+        onDown: () => press('b'),
+        onUp: () => release('b'),
+        status: sideStatus('b'),
+        turns: sideTurns('b'),
+        note: sideNote('b'),
+      }}
+    />
   );
 }
 
@@ -2707,7 +3087,7 @@ function HistoryScreen({ onBack, onSession }) {
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: T.cream }}>
       <div style={{ padding: '62px 22px 14px', flexShrink: 0 }}>
-        <h1 style={{ fontFamily: "'Instrument Serif', serif", fontSize: 34, fontWeight: 400, color: T.slate, lineHeight: 1.05 }}>History</h1>
+        <h1 style={{ fontFamily: T.display, fontSize: 34, fontWeight: 700, letterSpacing: '-.02em', color: T.slate, lineHeight: 1.05 }}>History</h1>
       </div>
 
       <div style={{ flex: 1, overflowY: 'auto' }}>
@@ -2724,14 +3104,14 @@ function HistoryScreen({ onBack, onSession }) {
           <div style={{ padding: '6px 20px 96px' }}>
             {live.length > 0 && (
               <>
-                <p style={{ fontSize: 10.5, fontWeight: 700, color: '#2E8E86', textTransform: 'uppercase', letterSpacing: '.16em', margin: '6px 0 9px' }}>In progress</p>
-                {live.map(s => <div key={s.session_id} style={{ background: T.slate, borderRadius: 20, padding: 16, marginBottom: 8 }}><button onClick={() => onSession(s.session_id)} style={{ width: '100%', color: T.cream, textAlign: 'left' }}><div style={{ display: 'flex', alignItems: 'center', gap: 8 }}><span style={{ width: 7, height: 7, borderRadius: '50%', background: T.teal, animation: 'dot-blink 1.6s ease-in-out infinite' }} /><span style={{ fontSize: 10, letterSpacing: '.14em', textTransform: 'uppercase', fontWeight: 700, color: T.tealSoft }}>Live · {formatDuration(s.duration)}</span></div><div style={{ fontSize: 17, fontWeight: 600, marginTop: 8 }}>{s.topic || 'Translation Session'}</div><div style={{ fontSize: 12, color: 'rgba(251,243,235,.55)', marginTop: 3 }}>{s.caller_name}</div></button></div>)}
+                <p style={{ fontSize: 10.5, fontWeight: 700, color: '#2A8B5D', textTransform: 'uppercase', letterSpacing: '.16em', margin: '6px 0 9px' }}>In progress</p>
+                {live.map(s => <div key={s.session_id} style={{ background: T.slate, borderRadius: 20, padding: 16, marginBottom: 8 }}><button onClick={() => onSession(s.session_id)} style={{ width: '100%', color: T.cream, textAlign: 'left' }}><div style={{ display: 'flex', alignItems: 'center', gap: 8 }}><span style={{ width: 7, height: 7, borderRadius: '50%', background: T.teal, animation: 'dot-blink 1.6s ease-in-out infinite' }} /><span style={{ fontSize: 10, letterSpacing: '.14em', textTransform: 'uppercase', fontWeight: 700, color: T.tealSoft }}>Live · {formatDuration(s.duration)}</span></div><div style={{ fontSize: 17, fontWeight: 600, marginTop: 8 }}>{s.topic || 'Translation Session'}</div><div style={{ fontSize: 12, color: 'rgba(251,249,247,.55)', marginTop: 3 }}>{s.caller_name}</div></button></div>)}
               </>
             )}
             {ended.length > 0 && (
               <>
                 {live.length > 0 && <div style={{ height: 8 }} />}
-                <p style={{ fontSize: 10.5, fontWeight: 700, color: 'rgba(62,76,94,.45)', textTransform: 'uppercase', letterSpacing: '.16em', margin: '18px 0 9px' }}>Past</p>
+                <p style={{ fontSize: 10.5, fontWeight: 700, color: 'rgba(28,32,51,.45)', textTransform: 'uppercase', letterSpacing: '.16em', margin: '18px 0 9px' }}>Past</p>
                 {ended.map(s => <SessionCard key={s.session_id} session={s} onClick={() => onSession(s.session_id)} />)}
               </>
             )}
@@ -2754,18 +3134,18 @@ function SessionDetailScreen({ sessionId, onBack }) {
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: T.cream }}>
       <div style={{ padding: '58px 20px 16px', background: T.slate, borderRadius: '0 0 28px 28px' }}>
-        <button onClick={onBack} style={{ width: 34, height: 34, borderRadius: 11, display: 'grid', placeItems: 'center', background: 'rgba(251,243,235,.1)', color: T.cream }}><Icon name="chevron-left" size={17} /></button>
-        <h1 style={{ fontFamily: "'Instrument Serif', serif", fontSize: 27, fontWeight: 400, color: T.cream, marginTop: 14, lineHeight: 1.15 }}>{detail?.topic || 'Translation session'}</h1>
-        <div style={{ fontSize: 12, color: 'rgba(251,243,235,.55)', marginTop: 6 }}>{detail?.caller_name || sessionId}</div>
+        <button onClick={onBack} style={{ width: 34, height: 34, borderRadius: 11, display: 'grid', placeItems: 'center', background: 'rgba(251,249,247,.1)', color: T.cream }}><Icon name="chevron-left" size={17} /></button>
+        <h1 style={{ fontFamily: T.display, fontSize: 27, fontWeight: 700, letterSpacing: '-.02em', color: T.cream, marginTop: 14, lineHeight: 1.15 }}>{detail?.topic || 'Translation session'}</h1>
+        <div style={{ fontSize: 12, color: 'rgba(251,249,247,.55)', marginTop: 6 }}>{detail?.caller_name || sessionId}</div>
       </div>
       <div style={{ flex: 1, overflowY: 'auto', padding: '18px 20px 40px' }}>
-        <div style={{ background: '#fff', border: '1px solid rgba(244,124,54,.18)', borderRadius: 20, padding: 16 }}>
+        <div style={{ background: '#fff', border: '1px solid rgba(108,92,231,.18)', borderRadius: 20, padding: 16 }}>
           <div style={{ fontSize: 10.5, letterSpacing: '.16em', textTransform: 'uppercase', color: T.amber, fontWeight: 700 }}>Automated notes</div>
           <div style={{ fontSize: 13.5, lineHeight: 1.5, color: T.slate, marginTop: 11 }}>{transcript.length ? `${transcript.length} translated conversation turn${transcript.length === 1 ? '' : 's'} recorded.` : 'Notes will appear after translated conversation turns are recorded.'}</div>
         </div>
-        <div style={{ fontSize: 10.5, letterSpacing: '.16em', textTransform: 'uppercase', color: 'rgba(62,76,94,.45)', fontWeight: 700, margin: '20px 0 10px' }}>Full transcript</div>
+        <div style={{ fontSize: 10.5, letterSpacing: '.16em', textTransform: 'uppercase', color: 'rgba(28,32,51,.45)', fontWeight: 700, margin: '20px 0 10px' }}>Full transcript</div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          {transcript.map((t, i) => <div key={i} style={{ alignSelf: i % 2 ? 'flex-end' : 'flex-start', maxWidth: '86%' }}><div style={{ fontSize: 9.5, letterSpacing: '.12em', textTransform: 'uppercase', fontWeight: 700, color: i % 2 ? '#2E8E86' : T.amber, marginBottom: 4 }}>{t.speaker_name || 'Speaker'}</div><div style={{ background: i % 2 ? '#fff' : 'rgba(244,124,54,.06)', border: `1px solid ${i % 2 ? 'rgba(88,191,180,.2)' : 'rgba(244,124,54,.16)'}`, borderRadius: 16, padding: '11px 13px', fontSize: 14.5, lineHeight: 1.45, color: T.slate }}>{t.original}</div><div style={{ fontSize: 11.5, color: 'rgba(62,76,94,.42)', marginTop: 4, fontStyle: 'italic' }}>{t.translated}</div></div>)}
+          {transcript.map((t, i) => <div key={i} style={{ alignSelf: i % 2 ? 'flex-end' : 'flex-start', maxWidth: '86%' }}><div style={{ fontSize: 9.5, letterSpacing: '.12em', textTransform: 'uppercase', fontWeight: 700, color: i % 2 ? '#2A8B5D' : T.amber, marginBottom: 4 }}>{t.speaker_name || 'Speaker'}</div><div style={{ background: i % 2 ? '#fff' : 'rgba(108,92,231,.06)', border: `1px solid ${i % 2 ? 'rgba(52,164,111,.2)' : 'rgba(108,92,231,.16)'}`, borderRadius: 16, padding: '11px 13px', fontSize: 14.5, lineHeight: 1.45, color: T.slate }}>{t.original}</div><div style={{ fontSize: 11.5, color: 'rgba(28,32,51,.42)', marginTop: 4, fontStyle: 'italic' }}>{t.translated}</div></div>)}
         </div>
       </div>
     </div>
@@ -2777,14 +3157,14 @@ function SessionDetailScreen({ sessionId, onBack }) {
 function OfflinePanel({ children }) {
   return (
     <div style={{ marginBottom: 20 }}>
-      <div style={{ fontSize: 10.5, letterSpacing: '.16em', textTransform: 'uppercase', color: 'rgba(62,76,94,.45)', fontWeight: 700, marginBottom: 9 }}>Offline translation</div>
-      <div style={{ background: '#fff', border: '1px solid rgba(62,76,94,.08)', borderRadius: 18, overflow: 'hidden' }}>{children}</div>
+      <div style={{ fontSize: 10.5, letterSpacing: '.16em', textTransform: 'uppercase', color: 'rgba(28,32,51,.45)', fontWeight: 700, marginBottom: 9 }}>Offline translation</div>
+      <div style={{ background: '#fff', border: '1px solid rgba(28,32,51,.08)', borderRadius: 18, overflow: 'hidden' }}>{children}</div>
     </div>
   );
 }
 
 function OfflineNote({ children }) {
-  return <div style={{ padding: '14px 15px', fontSize: 13, lineHeight: 1.5, color: 'rgba(62,76,94,.6)' }}>{children}</div>;
+  return <div style={{ padding: '14px 15px', fontSize: 13, lineHeight: 1.5, color: 'rgba(28,32,51,.6)' }}>{children}</div>;
 }
 
 function OfflineTranslationSection({ onStart }) {
@@ -2809,7 +3189,8 @@ function OfflineTranslationSection({ onStart }) {
     setBusy(code); setError(null);
     try {
       // English is the pivot both engines translate through, so it is needed too.
-      await downloadOfflineModels(['en', code]);
+      // English is the pivot both engines translate through.
+      await downloadOfflinePair('en', code);
       await refresh();
     } catch (err) {
       setError(`Could not download ${getLang(code).label}. Check your connection and try again.`);
@@ -2830,7 +3211,7 @@ function OfflineTranslationSection({ onStart }) {
   return (
     <div>
       <OfflinePanel>
-        <div style={{ padding: '13px 15px', borderBottom: '1px solid rgba(62,76,94,.06)', fontSize: 12.5, lineHeight: 1.5, color: 'rgba(62,76,94,.62)' }}>
+        <div style={{ padding: '13px 15px', borderBottom: '1px solid rgba(28,32,51,.06)', fontSize: 12.5, lineHeight: 1.5, color: 'rgba(28,32,51,.62)' }}>
           {canDownload
             ? 'Download a language to translate it to and from English with no connection. Each is about 30MB, so use Wi-Fi.'
             : 'Languages you have downloaded on this device can be translated to and from English with no connection. Add more in Settings \u203a Apps \u203a Translate \u203a Downloaded Languages.'}
@@ -2839,22 +3220,22 @@ function OfflineTranslationSection({ onStart }) {
         {supported.map((code, i) => {
           const status = statuses ? statuses[code] : undefined;
           return (
-            <div key={code} style={{ padding: '12px 15px', display: 'flex', alignItems: 'center', gap: 12, borderTop: i ? '1px solid rgba(62,76,94,.06)' : 'none' }}>
+            <div key={code} style={{ padding: '12px 15px', display: 'flex', alignItems: 'center', gap: 12, borderTop: i ? '1px solid rgba(28,32,51,.06)' : 'none' }}>
               <span style={{ fontSize: 17 }}>{getLang(code).flag}</span>
               <div style={{ flex: 1, fontSize: 14.5, fontWeight: 600, color: T.slate }}>{getLang(code).label}</div>
-              {statuses === null && <span style={{ fontSize: 12, color: 'rgba(62,76,94,.4)' }}>Checking\u2026</span>}
-              {status === 'installed' && <span style={{ fontSize: 12, fontWeight: 600, color: '#2E8E86' }}>On device</span>}
-              {status === 'unsupported' && <span style={{ fontSize: 12, color: 'rgba(62,76,94,.35)' }}>Not available</span>}
+              {statuses === null && <span style={{ fontSize: 12, color: 'rgba(28,32,51,.4)' }}>Checking\u2026</span>}
+              {status === 'installed' && <span style={{ fontSize: 12, fontWeight: 600, color: '#2A8B5D' }}>On device</span>}
+              {status === 'unsupported' && <span style={{ fontSize: 12, color: 'rgba(28,32,51,.35)' }}>Not available</span>}
               {status === 'supported' && (canDownload ? (
                 <button
                   onClick={() => handleDownload(code)}
                   disabled={busy === code}
-                  style={{ fontSize: 12.5, fontWeight: 600, color: busy === code ? 'rgba(62,76,94,.4)' : T.amber, background: 'transparent', border: 'none', padding: '4px 2px' }}
+                  style={{ fontSize: 12.5, fontWeight: 600, color: busy === code ? 'rgba(28,32,51,.4)' : T.amber, background: 'transparent', border: 'none', padding: '4px 2px' }}
                 >
                   {busy === code ? 'Downloading\u2026' : 'Download'}
                 </button>
               ) : (
-                <span style={{ fontSize: 12, color: 'rgba(62,76,94,.45)' }}>In iPhone Settings</span>
+                <span style={{ fontSize: 12, color: 'rgba(28,32,51,.45)' }}>In iPhone Settings</span>
               ))}
             </div>
           );
@@ -2865,7 +3246,7 @@ function OfflineTranslationSection({ onStart }) {
           onClick={onStart}
           style={{
             width: '100%', height: 52, marginTop: -8, marginBottom: 18, background: '#fff',
-            color: T.slate, border: '1px solid rgba(62,76,94,.14)', borderRadius: 18,
+            color: T.slate, border: '1px solid rgba(28,32,51,.14)', borderRadius: 18,
             fontSize: 15, fontWeight: 600, display: 'flex', alignItems: 'center',
             justifyContent: 'center', gap: 8,
           }}
@@ -2874,12 +3255,60 @@ function OfflineTranslationSection({ onStart }) {
           Start an offline session
         </button>
       )}
-      {error && <div style={{ fontSize: 12, color: '#C0453B', marginTop: -12, marginBottom: 16, paddingLeft: 2 }}>{error}</div>}
+      {error && <div style={{ fontSize: 12, color: '#D93A5C', marginTop: -12, marginBottom: 16, paddingLeft: 2 }}>{error}</div>}
     </div>
   );
 }
 
-function SettingsScreen({ onStartOffline }) {
+// Subscription state, and the only in-app route to changing it. Cancellation
+// deliberately is not offered here: both stores require it to happen in the
+// user's store account, and a button that only says so is worse than the row
+// that shows what they have.
+function SubscriptionSection({ tier, secondsLeft, onUpgrade }) {
+  const pro = tier === 'pro';
+  return (
+    <div style={{ marginBottom: 20 }}>
+      <div style={{ fontFamily: T.mono, fontSize: 10.5, letterSpacing: '.16em', textTransform: 'uppercase', color: 'rgba(28,32,51,.45)', fontWeight: 700, marginBottom: 9 }}>
+        Subscription
+      </div>
+      <div style={{ background: T.surface, border: `1px solid ${T.hairline}`, borderRadius: 18, overflow: 'hidden' }}>
+        <div style={{ padding: '15px 16px' }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+            <div style={{ fontFamily: T.display, fontSize: 20, fontWeight: 700, letterSpacing: '-.02em', color: T.slate }}>
+              {pro ? 'Voca Pro' : 'Free'}
+            </div>
+            {pro && (
+              <div style={{ fontFamily: T.mono, fontSize: 10, letterSpacing: '.1em', textTransform: 'uppercase', fontWeight: 700, color: secondsLeft > 0 ? T.tealDeep : T.error }}>
+                {formatMinutes(secondsLeft)} left
+              </div>
+            )}
+          </div>
+          <div style={{ fontSize: 12.5, lineHeight: 1.5, color: T.inkMute, marginTop: 4, textWrap: 'pretty' }}>
+            {pro
+              ? `${PLAN_MINUTES} minutes of cloud translation each month, then on-device translation stays available.`
+              : 'On-device translation, free and unlimited, for the language pairs your phone can do without a network.'}
+          </div>
+          {pro && (
+            <div style={{ height: 6, borderRadius: 99, background: 'rgba(28,32,51,.08)', marginTop: 11, overflow: 'hidden' }}>
+              <div style={{ height: '100%', borderRadius: 99, background: T.amber, width: `${Math.round(100 * Math.max(0, secondsLeft) / (PLAN_MINUTES * 60))}%` }} />
+            </div>
+          )}
+        </div>
+        <button
+          onClick={onUpgrade}
+          style={{ width: '100%', padding: '14px 16px', borderTop: '1px solid rgba(28,32,51,.06)', display: 'flex', alignItems: 'center', gap: 12, textAlign: 'left' }}
+        >
+          <div style={{ flex: 1, fontSize: 14.5, fontWeight: 600, color: pro ? T.slate : T.amber }}>
+            {pro ? 'Manage or restore purchase' : `Upgrade to Pro — ${PLAN_PRICE_FALLBACK}/mo`}
+          </div>
+          <Icon name="chevron" size={16} color="rgba(28,32,51,.3)" style={{ transform: 'rotate(180deg)' }} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function SettingsScreen({ onStartOffline, tier = 'free', secondsLeft = 0, onUpgrade }) {
   const [values, setValues] = useState({ notes: true, save: true, autoplay: true, haptics: true, large: false });
   const groups = [
     ['Session', [['notes','Automated notes','Summarise each session when it ends'],['save','Save transcripts','Keep full text on this device'],['autoplay','Speak translations aloud','Play synthesised voice on the other half']]],
@@ -2890,7 +3319,7 @@ function SettingsScreen({ onStartOffline }) {
   const links = [
     ['Privacy policy', 'How microphone audio and transcripts are handled', `${apiBase()}/privacy`],
   ];
-  return <div style={{ flex: 1, overflowY: 'auto', background: T.cream }}><div style={{ padding: '62px 22px 14px' }}><h1 style={{ fontFamily: "'Instrument Serif', serif", fontSize: 34, fontWeight: 400, color: T.slate }}>Settings</h1></div><div style={{ padding: '6px 20px 96px' }}>{groups.map(([title, rows]) => <div key={title} style={{ marginBottom: 20 }}><div style={{ fontSize: 10.5, letterSpacing: '.16em', textTransform: 'uppercase', color: 'rgba(62,76,94,.45)', fontWeight: 700, marginBottom: 9 }}>{title}</div><div style={{ background: '#fff', border: '1px solid rgba(62,76,94,.08)', borderRadius: 18, overflow: 'hidden' }}>{rows.map(([key,label,hint], i) => <button key={key} onClick={() => setValues(v => ({...v, [key]: !v[key]}))} style={{ width: '100%', padding: '14px 15px', display: 'flex', alignItems: 'center', gap: 12, borderTop: i ? '1px solid rgba(62,76,94,.06)' : 'none', textAlign: 'left' }}><div style={{ flex: 1 }}><div style={{ fontSize: 14.5, fontWeight: 600, color: T.slate }}>{label}</div><div style={{ fontSize: 11.5, color: 'rgba(62,76,94,.48)', marginTop: 2 }}>{hint}</div></div><div style={{ width: 44, height: 26, borderRadius: 99, background: values[key] ? T.amber : 'rgba(62,76,94,.16)', padding: 3, display: 'flex', justifyContent: values[key] ? 'flex-end' : 'flex-start' }}><div style={{ width: 20, height: 20, borderRadius: '50%', background: '#fff', boxShadow: '0 1px 3px rgba(0,0,0,.25)' }} /></div></button>)}</div></div>)}<OfflineTranslationSection onStart={onStartOffline} /><div style={{ marginBottom: 20 }}><div style={{ fontSize: 10.5, letterSpacing: '.16em', textTransform: 'uppercase', color: 'rgba(62,76,94,.45)', fontWeight: 700, marginBottom: 9 }}>Legal</div><div style={{ background: '#fff', border: '1px solid rgba(62,76,94,.08)', borderRadius: 18, overflow: 'hidden' }}>{links.map(([label, hint, href], i) => <a key={label} href={href} rel="noopener noreferrer" style={{ width: '100%', padding: '14px 15px', display: 'flex', alignItems: 'center', gap: 12, borderTop: i ? '1px solid rgba(62,76,94,.06)' : 'none', textAlign: 'left', textDecoration: 'none' }}><div style={{ flex: 1 }}><div style={{ fontSize: 14.5, fontWeight: 600, color: T.slate }}>{label}</div><div style={{ fontSize: 11.5, color: 'rgba(62,76,94,.48)', marginTop: 2 }}>{hint}</div></div><Icon name="chevron-left" size={16} color="rgba(62,76,94,.3)" /></a>)}</div></div></div></div>;
+  return <div style={{ flex: 1, overflowY: 'auto', background: T.cream }}><div style={{ padding: '62px 22px 14px' }}><h1 style={{ fontFamily: T.display, fontSize: 34, fontWeight: 700, letterSpacing: '-.02em', color: T.slate }}>Settings</h1></div><div style={{ padding: '6px 20px 96px' }}>{groups.map(([title, rows]) => <div key={title} style={{ marginBottom: 20 }}><div style={{ fontSize: 10.5, letterSpacing: '.16em', textTransform: 'uppercase', color: 'rgba(28,32,51,.45)', fontWeight: 700, marginBottom: 9 }}>{title}</div><div style={{ background: '#fff', border: '1px solid rgba(28,32,51,.08)', borderRadius: 18, overflow: 'hidden' }}>{rows.map(([key,label,hint], i) => <button key={key} onClick={() => setValues(v => ({...v, [key]: !v[key]}))} style={{ width: '100%', padding: '14px 15px', display: 'flex', alignItems: 'center', gap: 12, borderTop: i ? '1px solid rgba(28,32,51,.06)' : 'none', textAlign: 'left' }}><div style={{ flex: 1 }}><div style={{ fontSize: 14.5, fontWeight: 600, color: T.slate }}>{label}</div><div style={{ fontSize: 11.5, color: 'rgba(28,32,51,.48)', marginTop: 2 }}>{hint}</div></div><div style={{ width: 44, height: 26, borderRadius: 99, background: values[key] ? T.amber : 'rgba(28,32,51,.16)', padding: 3, display: 'flex', justifyContent: values[key] ? 'flex-end' : 'flex-start' }}><div style={{ width: 20, height: 20, borderRadius: '50%', background: '#fff', boxShadow: '0 1px 3px rgba(0,0,0,.25)' }} /></div></button>)}</div></div>)}<SubscriptionSection tier={tier} secondsLeft={secondsLeft} onUpgrade={onUpgrade} /><OfflineTranslationSection onStart={onStartOffline} /><div style={{ marginBottom: 20 }}><div style={{ fontSize: 10.5, letterSpacing: '.16em', textTransform: 'uppercase', color: 'rgba(28,32,51,.45)', fontWeight: 700, marginBottom: 9 }}>Legal</div><div style={{ background: '#fff', border: '1px solid rgba(28,32,51,.08)', borderRadius: 18, overflow: 'hidden' }}>{links.map(([label, hint, href], i) => <a key={label} href={href} rel="noopener noreferrer" style={{ width: '100%', padding: '14px 15px', display: 'flex', alignItems: 'center', gap: 12, borderTop: i ? '1px solid rgba(28,32,51,.06)' : 'none', textAlign: 'left', textDecoration: 'none' }}><div style={{ flex: 1 }}><div style={{ fontSize: 14.5, fontWeight: 600, color: T.slate }}>{label}</div><div style={{ fontSize: 11.5, color: 'rgba(28,32,51,.48)', marginTop: 2 }}>{hint}</div></div><Icon name="chevron-left" size={16} color="rgba(28,32,51,.3)" style={{ transform: 'rotate(180deg)' }} /></a>)}</div></div></div></div>;
 }
 
 // ─────────────────────────────────────────────
@@ -2921,7 +3350,7 @@ function ErrorScreen({ type, onRetry, onBack }) {
         <Icon name={isMic ? 'mic-off' : 'wifi-off'} size={36} color={T.error} />
       </div>
 
-      <h2 style={{ fontFamily: "'Instrument Serif', serif", fontSize: 28, fontWeight: 400, marginBottom: 8, textAlign: 'center', color: T.navy, lineHeight: 1.1 }}>
+      <h2 style={{ fontFamily: T.display, fontSize: 28, fontWeight: 700, letterSpacing: '-.02em', marginBottom: 8, textAlign: 'center', color: T.navy, lineHeight: 1.1 }}>
         {isMic ? 'Microphone access required' : 'Connection failed'}
       </h2>
       <p style={{ fontSize: 13.5, color: T.inkMute, textAlign: 'center', lineHeight: 1.55, maxWidth: 280, marginBottom: 32 }}>
@@ -2940,7 +3369,7 @@ function ErrorScreen({ type, onRetry, onBack }) {
             borderRadius: 18,
             fontSize: 16,
             fontWeight: 600,
-            boxShadow: '0 12px 24px -8px rgba(244,124,54,.6)',
+            boxShadow: '0 12px 24px -8px rgba(108,92,231,.6)',
           }}
         >
           {'Try again'}
@@ -2965,6 +3394,181 @@ function ErrorScreen({ type, onRetry, onBack }) {
 }
 
 // ─────────────────────────────────────────────
+// PaywallScreen
+// ─────────────────────────────────────────────
+//
+// Reached three ways, and the copy changes for each because the user's
+// situation is genuinely different:
+//   'upsell'      — a free user who wants the cloud engine.
+//   'unsupported' — a free user whose language pair has no on-device model.
+//                   This is the honest upsell: the free tier cannot do it.
+//   'exhausted'   — a subscriber who has spent this month's minutes.
+
+function PaywallScreen({ reason = 'upsell', balance, langA, langB, onClose, onPurchased }) {
+  const [busy, setBusy] = useState(null);
+  const [error, setError] = useState(null);
+
+  const heading = reason === 'exhausted'
+    ? 'You are out of minutes'
+    : reason === 'unsupported'
+      ? 'This pair needs Voca Pro'
+      : 'Voca Pro';
+
+  const lede = reason === 'exhausted'
+    ? `Your ${PLAN_MINUTES} minutes reset at the start of next month. Until then you can keep translating on-device, free.`
+    : reason === 'unsupported'
+      ? `${getLang(langA).label} to ${getLang(langB).label} has no on-device model, so it needs the cloud engine.`
+      : 'Natural two-way conversation, translated live by a voice on each side.';
+
+  async function run(kind, fn) {
+    setBusy(kind);
+    setError(null);
+    try {
+      const result = await fn();
+
+      if (result.status === 'cancelled') return;
+      if (result.status === 'pending') {
+        setError('Your purchase is awaiting approval. Minutes appear as soon as it clears.');
+        return;
+      }
+      if (result.status !== 'purchased') {
+        setError(kind === 'restore'
+          ? 'No previous subscription found on this account.'
+          : 'The purchase did not complete.');
+        return;
+      }
+
+      // The server is what decides the tier — it re-checks the receipt with
+      // Apple or Google before granting a single minute.
+      const fresh = await activateEntitlement({ receipt: result.receipt, reachable: true });
+      if (fresh.tier !== 'pro') {
+        setError('The store confirmed a purchase but it could not be verified. No charge has been kept — please contact support.');
+        return;
+      }
+      // Only now is it safe to acknowledge on Play; an unacknowledged purchase
+      // is auto-refunded, which is the correct outcome if we got this far and
+      // could not verify.
+      await acknowledgeIfNeeded(result.raw);
+      onPurchased(fresh);
+    } catch (err) {
+      setError(
+        String(err?.message) === 'in_app_purchase_unavailable'
+          ? 'Purchases are only available in the App Store and Google Play builds.'
+          : 'Something went wrong reaching the store. Please try again.'
+      );
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  // Show the storefront's own price when the store can tell us; the Australian
+  // price is only a fallback for the browser build.
+  const [price, setPrice] = useState(PLAN_PRICE_FALLBACK);
+  useEffect(() => {
+    let active = true;
+    storePrice().then(p => { if (active && p) setPrice(p); });
+    return () => { active = false; };
+  }, []);
+
+  const perks = [
+    ['mic', 'Two live voices', 'Each person hears the other in their own language, in the moment.'],
+    ['globe', 'Every language pair', 'All eleven languages, including the pairs no phone can do on-device.'],
+    ['clock', `${PLAN_MINUTES} minutes a month`, 'Minutes count real conversation, not time the app sits idle.'],
+  ];
+
+  return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflowY: 'auto', background: T.bg }}>
+      <div style={{ padding: '54px 22px 0', flexShrink: 0 }}>
+        <button onClick={onClose} style={{ width: 34, height: 34, borderRadius: 11, display: 'grid', placeItems: 'center', background: 'rgba(28,32,51,.05)', color: T.slate }} aria-label="Close">
+          <Icon name="chevron-left" size={17} />
+        </button>
+      </div>
+
+      <div style={{ padding: '18px 22px 0' }}>
+        <div style={{ fontFamily: T.mono, fontSize: 10, letterSpacing: '.16em', textTransform: 'uppercase', color: T.amber, fontWeight: 700 }}>
+          {reason === 'exhausted' ? 'Monthly allowance' : 'Upgrade'}
+        </div>
+        <h1 style={{ fontFamily: T.display, fontSize: 33, fontWeight: 700, letterSpacing: '-.025em', color: T.slate, lineHeight: 1.05, marginTop: 8 }}>
+          {heading}
+        </h1>
+        <p style={{ fontSize: 14, lineHeight: 1.55, color: T.inkMute, marginTop: 10, textWrap: 'pretty' }}>{lede}</p>
+      </div>
+
+      {balance && balance.tier === 'pro' && (
+        <div style={{ margin: '18px 20px 0', background: T.surface, border: `1px solid ${T.hairline}`, borderRadius: 18, padding: '14px 16px' }}>
+          <div style={{ fontFamily: T.mono, fontSize: 9.5, letterSpacing: '.14em', textTransform: 'uppercase', color: T.inkMute, fontWeight: 700 }}>Remaining this month</div>
+          <div style={{ fontFamily: T.display, fontSize: 26, fontWeight: 700, letterSpacing: '-.02em', color: T.slate, marginTop: 4 }}>
+            {formatMinutes(balance.seconds_remaining)}
+          </div>
+          <div style={{ height: 6, borderRadius: 99, background: 'rgba(28,32,51,.08)', marginTop: 10, overflow: 'hidden' }}>
+            <div style={{
+              height: '100%', borderRadius: 99, background: T.amber,
+              width: `${balance.seconds_total ? Math.round(100 * balance.seconds_remaining / balance.seconds_total) : 0}%`,
+            }} />
+          </div>
+        </div>
+      )}
+
+      <div style={{ padding: '18px 20px 0', display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {perks.map(([icon, title, body]) => (
+          <div key={title} style={{ display: 'flex', gap: 12, background: T.surface, border: `1px solid ${T.hairline}`, borderRadius: 18, padding: '14px 15px' }}>
+            <div style={{ width: 38, height: 38, flexShrink: 0, borderRadius: 12, background: T.inkA08, color: T.amber, display: 'grid', placeItems: 'center' }}>
+              <Icon name={icon} size={18} />
+            </div>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 14.5, fontWeight: 600, color: T.slate }}>{title}</div>
+              <div style={{ fontSize: 12, lineHeight: 1.45, color: T.inkMute, marginTop: 2, textWrap: 'pretty' }}>{body}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ padding: '20px 20px 0' }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'center', gap: 6 }}>
+          <span style={{ fontFamily: T.display, fontSize: 34, fontWeight: 700, letterSpacing: '-.025em', color: T.slate }}>{price}</span>
+          <span style={{ fontSize: 14, color: T.inkMute }}>/ month</span>
+        </div>
+        <p style={{ textAlign: 'center', fontSize: 11.5, color: T.textFaint, marginTop: 6 }}>
+          Renews monthly. Cancel any time in your store account.
+        </p>
+      </div>
+
+      <div style={{ padding: '16px 20px 0' }}>
+        {error && (
+          <div style={{ background: T.errorLight, color: T.error, borderRadius: 14, padding: '11px 13px', fontSize: 12.5, lineHeight: 1.45, marginBottom: 10 }}>
+            {error}
+          </div>
+        )}
+        <button
+          onClick={() => run('purchase', purchasePro)}
+          disabled={Boolean(busy)}
+          style={{
+            width: '100%', height: 62, background: T.amber, color: '#fff', border: 'none', borderRadius: 20,
+            fontSize: 17, fontWeight: 600, opacity: busy ? .6 : 1,
+            boxShadow: '0 12px 26px -8px rgba(108,92,231,.6)',
+          }}
+        >
+          {busy === 'purchase' ? 'Contacting the store…' : `Subscribe — ${price}/mo`}
+        </button>
+        <button
+          onClick={() => run('restore', restorePurchases)}
+          disabled={Boolean(busy)}
+          style={{ width: '100%', height: 46, marginTop: 8, background: 'none', border: 'none', color: T.amber, fontSize: 13.5, fontWeight: 600 }}
+        >
+          {busy === 'restore' ? 'Checking…' : 'Restore a previous purchase'}
+        </button>
+      </div>
+
+      <div style={{ padding: '10px 24px 32px' }}>
+        <button onClick={onClose} style={{ width: '100%', background: 'none', border: 'none', color: T.inkMute, fontSize: 13, fontWeight: 600, padding: '10px 0' }}>
+          {reason === 'unsupported' ? 'Pick another language pair' : 'Keep translating on-device, free'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
 // App root
 // ─────────────────────────────────────────────
 
@@ -2978,6 +3582,62 @@ function App() {
   const [langPickSide, setLangPickSide] = useState('a');
   const [detailSessionId, setDetailSessionId] = useState(null);
   const [pendingMicConfig, setPendingMicConfig] = useState(null);
+  const [balance, setBalance] = useState(null);
+  const [paywallReason, setPaywallReason] = useState('upsell');
+  const [offlinePref, setOfflinePref] = useState(readOfflinePref);
+
+  const tier = balance?.tier === 'pro' ? 'pro' : 'free';
+  const secondsLeft = balance?.seconds_remaining ?? 0;
+  // Before the store products exist the server meters usage but refuses nobody,
+  // so a build with no purchases still reaches the cloud engine. The tier shown
+  // in the UI stays honest — it just does not gate anything yet.
+  const metered = balance?.enforced !== false;
+  const cloudAllowed = tier === 'pro' || !metered;
+
+  // Free users default to on-device: it is free to run, needs no connection,
+  // and is the tier's actual product rather than a degraded version of the
+  // paid one. Once the user touches the switch their choice wins for good.
+  const offlineMode = offlinePref === null ? tier !== 'pro' : offlinePref;
+
+  function setOfflineMode(value) {
+    setOfflinePref(value);
+    writeOfflinePref(value);
+  }
+
+  // Ask the store what the user actually owns, tell the server, then read the
+  // balance back. The server's answer wins for minutes — the store only ever
+  // decides the tier.
+  const syncEntitlement = useCallback(async () => {
+    try {
+      const { receipt, reachable } = await currentReceipt();
+      // No store on this build (a browser): just read the balance rather than
+      // telling the server the user owns nothing.
+      const fresh = (!reachable && !receipt)
+        ? await fetchBalance()
+        : await activateEntitlement({ receipt, reachable });
+      setBalance(fresh);
+      return fresh;
+    } catch (error) {
+      console.warn('Could not sync entitlement:', error);
+      return null;
+    }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    (async () => { if (active) await syncEntitlement(); })();
+    // A renewal, lapse or refund can happen while the app is closed. Re-verify
+    // on the plugin's signal rather than trusting what the event carries.
+    const off = onEntitlementChanged(() => { syncEntitlement(); });
+    return () => { active = false; off(); };
+  }, [syncEntitlement]);
+
+  // Ads are for free users, and never over a live conversation.
+  useEffect(() => {
+    const live = screen === 'live-face' || screen === 'live-auto' || screen === 'live-offline';
+    if (tier === 'free' && metered && !live && balance) showFreeTierBanner();
+    else hideFreeTierBanner();
+  }, [tier, screen, balance]);
 
   function goTab(t) {
     setTab(t);
@@ -2987,10 +3647,34 @@ function App() {
     else if (t === 'settings') setScreen('settings');
   }
 
+  // One funnel for every route into a live session, so tier routing sits beside
+  // the microphone disclosure rather than being repeated at each call site.
+  //
+  //   free → the on-device screen, when the pair has a model. Same gestures,
+  //          no network, no cost. When it has no model, that is the one honest
+  //          moment to ask for money.
+  //   pro  → the cloud screen, unless this month's minutes are gone.
   function enterSession(cfg) {
     setSessionConfig(cfg);
     setLangA(cfg.langA);
     setLangB(cfg.langB);
+
+    // The switch is the user's explicit instruction, so it is checked before
+    // tier. If the pair has no on-device model we fall through rather than
+    // failing — OfflineSwitch has already said so on the home screen.
+    if (offlineMode && canTranslateOffline(cfg.langA, cfg.langB)) {
+      return setScreen('live-offline');
+    }
+
+    if (!cloudAllowed) {
+      if (canTranslateOffline(cfg.langA, cfg.langB)) return setScreen('live-offline');
+      setPaywallReason('unsupported');
+      return setScreen('paywall');
+    }
+    if (metered && secondsLeft <= 0) {
+      setPaywallReason('exhausted');
+      return setScreen('paywall');
+    }
     setScreen('live-face');
   }
 
@@ -3049,8 +3733,11 @@ function App() {
           onPickA={() => { setLangPickSide('a'); setScreen('lang-pick'); }}
           onPickB={() => { setLangPickSide('b'); setScreen('lang-pick'); }}
           onSwap={() => { setLangA(langB); setLangB(langA); }}
-          onHistory={() => { setTab('history'); setScreen('history'); }}
-          onSession={id => { setDetailSessionId(id); setScreen('detail'); }}
+          tier={tier}
+          secondsLeft={secondsLeft}
+          offlineMode={offlineMode}
+          onOfflineChange={setOfflineMode}
+          onUpgrade={() => { setPaywallReason(tier === 'pro' && secondsLeft <= 0 ? 'exhausted' : 'upsell'); setScreen('paywall'); }}
         />
       );
       break;
@@ -3083,6 +3770,9 @@ function App() {
       content = (
         <FaceToFaceLiveScreen
           config={sessionConfig}
+          budgetSeconds={metered ? secondsLeft : Infinity}
+          onUsage={(sessionId, seconds) => reportUsage(sessionId, seconds).then(b => b && setBalance(b))}
+          onExhausted={() => { setPaywallReason('exhausted'); setScreen('paywall'); }}
           onStop={handleStop}
           onError={handleError}
         />
@@ -3103,17 +3793,37 @@ function App() {
       break;
 
     case 'settings':
-      content = <SettingsScreen onStartOffline={() => setScreen('live-offline')} />;
+      content = <SettingsScreen onStartOffline={() => setScreen('live-offline')} tier={tier} secondsLeft={secondsLeft} onUpgrade={() => { setPaywallReason(tier === 'pro' && secondsLeft <= 0 ? 'exhausted' : 'upsell'); setScreen('paywall'); }} />;
       break;
 
     case 'live-offline':
-      // Entered deliberately from Settings. Never routed to automatically, so it
-      // can never pre-empt a live server session.
+      // Two ways in: chosen from Settings, or routed here for a free-tier user
+      // by enterSession(). Either way it is the on-device engine end to end —
+      // it opens no peer connection, so it cannot disturb a server session.
       content = (
         <OfflineLiveScreen
           langA={langA}
           langB={langB}
-          onBack={() => { setTab('settings'); setScreen('settings'); }}
+          onBack={() => { setTab('home'); setScreen('home'); }}
+        />
+      );
+      break;
+
+    case 'paywall':
+      content = (
+        <PaywallScreen
+          reason={paywallReason}
+          balance={balance}
+          langA={langA}
+          langB={langB}
+          onClose={() => { setTab('home'); setScreen('home'); }}
+          onPurchased={fresh => {
+            setBalance(fresh);
+            hideFreeTierBanner();
+            // Straight into the session they were trying to start.
+            if (sessionConfig && (fresh?.seconds_remaining ?? 0) > 0) setScreen('live-face');
+            else { setTab('home'); setScreen('home'); }
+          }}
         />
       );
       break;

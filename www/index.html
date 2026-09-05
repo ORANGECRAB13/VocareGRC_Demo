@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <meta name="theme-color" content="#3E4C5E" />
+  <meta name="theme-color" content="#1C2033" />
   <title>Voca — Live Translation</title>
   <link href="./vendor/fonts.css" rel="stylesheet" />
   <script src="./vendor/react.production.min.js"></script>
@@ -16,36 +16,36 @@
 
     :root {
       /* ── Voca palette (mirrors the T token object in vocare-app.jsx) ── */
-      --navy:        #3E4C5E;
-      --cream:       #FBF3EB;
-      --amber:       #F47C36;
-      --amber-deep:  #D9631F;
-      --amber-soft:  #FBB07A;
-      --teal:        #58BFB4;
-      --teal-deep:   #2E8E86;
-      --teal-soft:   #7FD3C9;
-      --teal-pale:   #9BDCD4;
-      --gold:        #FFD37E;
+      --navy:        #1C2033;
+      --cream:       #FBF9F7;
+      --amber:       #6C5CE7;
+      --amber-deep:  #5546C9;
+      --amber-soft:  #8B7CF0;
+      --teal:        #34A46F;
+      --teal-deep:   #2A8B5D;
+      --teal-soft:   #5FBF8E;
+      --teal-pale:   #7ED3A6;
+      --gold:        #34A46F;
 
       /* Live-screen panels */
-      --panel-idle:  #48586D;
-      --panel-a:     #B05A24;
-      --panel-b:     #2C7B73;
+      --panel-idle:  #FBF9F7;
+      --panel-a:     #EBE7FD;
+      --panel-b:     #E2F3E9;
 
-      --teal-light:  #DDF4F1;
-      --teal-mid:    #8FD5CE;
-      --amber-light: #FCE4D5;
-      --bg:          #FBF3EB;
+      --teal-light:  #E2F3E9;
+      --teal-mid:    #5FBF8E;
+      --amber-light: #EBE7FD;
+      --bg:          #FBF9F7;
       --surface:     #FFFFFF;
-      --surface2:    #E5EEF2;
-      --text-primary:#3E4C5E;
-      --text-muted:  #71808F;
-      --text-faint:  #A6B1BA;
-      --border:      #D3DEE4;
-      --hairline:    rgba(62, 76, 94, .08);
-      --error:       #C52E42;
-      --error-light: #F8E1E5;
-      --success:     #409B76;
+      --surface2:    #F1EEFC;
+      --text-primary:#1C2033;
+      --text-muted:  #6E7285;
+      --text-faint:  #9EA1AF;
+      --border:      #E6E4EC;
+      --hairline:    rgba(28, 32, 51, .08);
+      --error:       #D93A5C;
+      --error-light: #FBE4E9;
+      --success:     #34A46F;
     }
 
     html, body {
@@ -127,6 +127,43 @@
       from { transform: translateY(100%); opacity: 0; }
       to   { transform: translateY(0);   opacity: 1; }
     }
+
+    /* ── Voca mascot (canvas: hop / shadow / wander / blink / arc / wave / flap) ── */
+    @keyframes voca-hop {
+      0%, 100% { transform: translateY(0) scale(1, 1); }
+      12%      { transform: translateY(0) scale(1.09, .9); }
+      42%      { transform: translateY(-42px) scale(.95, 1.06); }
+      72%      { transform: translateY(0) scale(1.07, .92); }
+      86%      { transform: translateY(0) scale(1, 1); }
+    }
+    @keyframes voca-shadow {
+      0%, 100% { transform: scale(1);   opacity: .55; }
+      42%      { transform: scale(.66); opacity: .24; }
+    }
+    @keyframes voca-wander {
+      0%, 100% { transform: translateX(-46px) rotate(-4deg); }
+      50%      { transform: translateX(46px)  rotate(4deg); }
+    }
+    @keyframes voca-blink {
+      0%, 92%, 100% { transform: scaleY(1); }
+      96%           { transform: scaleY(.12); }
+    }
+    @keyframes voca-arc {
+      0%, 100% { opacity: .18; }
+      50%      { opacity: .7; }
+    }
+    @keyframes voca-wave {
+      0%, 62%, 100% { transform: rotate(0deg); }
+      68%           { transform: rotate(-26deg); }
+      74%           { transform: rotate(12deg); }
+      80%           { transform: rotate(-22deg); }
+      86%           { transform: rotate(10deg); }
+      92%           { transform: rotate(-6deg); }
+    }
+    @keyframes voca-flap {
+      0%, 100% { transform: skewY(0deg) scaleX(1); }
+      50%      { transform: skewY(-5deg) scaleX(.94); }
+    }
   </style>
 </head>
 <body>
@@ -134,6 +171,9 @@
 <script>
   window.VOCARE_API_BASE = "https://vocare-grc-bot.yellowtree-d62e92d2.australiaeast.azurecontainerapps.io";
   window.VOCARE_NATIVE_BUNDLE = true;
+  window.VOCARE_ADMOB_IOS_BANNER = "";
+  window.VOCARE_ADMOB_ANDROID_BANNER = "";
+  window.VOCARE_ADS_TEST = true;
 </script>
 <script src="./app.js"></script>
 </body>

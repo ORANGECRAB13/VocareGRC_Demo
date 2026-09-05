@@ -17,8 +17,10 @@
 		50B271D11FEDC1A000F3C39B /* public in Resources */ = {isa = PBXBuildFile; fileRef = 50B271D01FEDC1A000F3C39B /* public */; };
 		9582B6832FE993A70072D4E8 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9582B6822FE993A50072D4E8 /* SceneDelegate.swift */; };
 		A1B2C3D42FEA100000000001 /* TranslationHistoryPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D42FEA100000000002 /* TranslationHistoryPlugin.swift */; };
-		A1B2C3D42FEA100000000021 /* OfflineTranslatePlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D42FEA100000000022 /* OfflineTranslatePlugin.swift */; };
 		A1B2C3D42FEA100000000003 /* TranslationHistoryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D42FEA100000000004 /* TranslationHistoryStore.swift */; };
+		A1B2C3D42FEA100000000011 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D42FEA100000000010 /* PrivacyInfo.xcprivacy */; };
+		A1B2C3D42FEA100000000021 /* OfflineTranslatePlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D42FEA100000000022 /* OfflineTranslatePlugin.swift */; };
+		A1B2C3D42FEA100000000031 /* PurchasesPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D42FEA100000000032 /* PurchasesPlugin.swift */; };
 		B00000000000000000000001 /* VocareWatchApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000101 /* VocareWatchApp.swift */; };
 		B00000000000000000000002 /* WatchTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000102 /* WatchTheme.swift */; };
 		B00000000000000000000003 /* WatchAudioController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000103 /* WatchAudioController.swift */; };
@@ -28,9 +30,8 @@
 		B00000000000000000000007 /* WatchContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000107 /* WatchContentView.swift */; };
 		B00000000000000000000008 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000108 /* Assets.xcassets */; };
 		B00000000000000000000009 /* WatchSessionReceiver.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000109 /* WatchSessionReceiver.swift */; };
-		A1B2C3D42FEA100000000011 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D42FEA100000000010 /* PrivacyInfo.xcprivacy */; };
-		B0000000000000000000000B /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000111 /* PrivacyInfo.xcprivacy */; };
 		B0000000000000000000000A /* Vocare Watch App.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = B00000000000000000000110 /* Vocare Watch App.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		B0000000000000000000000B /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000111 /* PrivacyInfo.xcprivacy */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -67,10 +68,14 @@
 		504EC3111FED79650016851F /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		504EC3131FED79650016851F /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		50B271D01FEDC1A000F3C39B /* public */ = {isa = PBXFileReference; lastKnownFileType = folder; path = public; sourceTree = "<group>"; };
+		808A86BB304BE0D6004E20AF /* Vocare.storekit */ = {isa = PBXFileReference; lastKnownFileType = text; path = Vocare.storekit; sourceTree = "<group>"; };
 		9582B6822FE993A50072D4E8 /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
+		958DCC722DB07C7200EA8C5F /* debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = debug.xcconfig; path = ../debug.xcconfig; sourceTree = SOURCE_ROOT; };
 		A1B2C3D42FEA100000000002 /* TranslationHistoryPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranslationHistoryPlugin.swift; sourceTree = "<group>"; };
-		A1B2C3D42FEA100000000022 /* OfflineTranslatePlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineTranslatePlugin.swift; sourceTree = "<group>"; };
 		A1B2C3D42FEA100000000004 /* TranslationHistoryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranslationHistoryStore.swift; sourceTree = "<group>"; };
+		A1B2C3D42FEA100000000010 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		A1B2C3D42FEA100000000022 /* OfflineTranslatePlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineTranslatePlugin.swift; sourceTree = "<group>"; };
+		A1B2C3D42FEA100000000032 /* PurchasesPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PurchasesPlugin.swift; sourceTree = "<group>"; };
 		B00000000000000000000101 /* VocareWatchApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VocareWatchApp.swift; sourceTree = "<group>"; };
 		B00000000000000000000102 /* WatchTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchTheme.swift; sourceTree = "<group>"; };
 		B00000000000000000000103 /* WatchAudioController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchAudioController.swift; sourceTree = "<group>"; };
@@ -80,10 +85,8 @@
 		B00000000000000000000107 /* WatchContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchContentView.swift; sourceTree = "<group>"; };
 		B00000000000000000000108 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B00000000000000000000109 /* WatchSessionReceiver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchSessionReceiver.swift; sourceTree = "<group>"; };
-		A1B2C3D42FEA100000000010 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
-		B00000000000000000000111 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		B00000000000000000000110 /* Vocare Watch App.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Vocare Watch App.app"; sourceTree = BUILT_PRODUCTS_DIR; };
-		958DCC722DB07C7200EA8C5F /* debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = debug.xcconfig; path = ../debug.xcconfig; sourceTree = SOURCE_ROOT; };
+		B00000000000000000000111 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -108,6 +111,7 @@
 		504EC2FB1FED79650016851F = {
 			isa = PBXGroup;
 			children = (
+				808A86BB304BE0D6004E20AF /* Vocare.storekit */,
 				958DCC722DB07C7200EA8C5F /* debug.xcconfig */,
 				504EC3061FED79650016851F /* App */,
 				B00000000000000000000501 /* Vocare Watch App */,
@@ -130,6 +134,7 @@
 				9582B6822FE993A50072D4E8 /* SceneDelegate.swift */,
 				A1B2C3D42FEA100000000002 /* TranslationHistoryPlugin.swift */,
 				A1B2C3D42FEA100000000022 /* OfflineTranslatePlugin.swift */,
+				A1B2C3D42FEA100000000032 /* PurchasesPlugin.swift */,
 				A1B2C3D42FEA100000000004 /* TranslationHistoryStore.swift */,
 				B00000000000000000000109 /* WatchSessionReceiver.swift */,
 				50379B222058CBB4000EE86E /* capacitor.config.json */,
@@ -282,6 +287,7 @@
 				9582B6832FE993A70072D4E8 /* SceneDelegate.swift in Sources */,
 				A1B2C3D42FEA100000000001 /* TranslationHistoryPlugin.swift in Sources */,
 				A1B2C3D42FEA100000000021 /* OfflineTranslatePlugin.swift in Sources */,
+				A1B2C3D42FEA100000000031 /* PurchasesPlugin.swift in Sources */,
 				A1B2C3D42FEA100000000003 /* TranslationHistoryStore.swift in Sources */,
 				B00000000000000000000009 /* WatchSessionReceiver.swift in Sources */,
 			);
@@ -499,7 +505,10 @@
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Vocare uses the Apple Watch microphone for hold-to-speak translation.";
 				INFOPLIST_KEY_WKApplication = YES;
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.vocare.translate;
-				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.vocare.translate.watchkitapp;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -526,7 +535,10 @@
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Vocare uses the Apple Watch microphone for hold-to-speak translation.";
 				INFOPLIST_KEY_WKApplication = YES;
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.vocare.translate;
-				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.vocare.translate.watchkitapp;
 				PRODUCT_NAME = "$(TARGET_NAME)";

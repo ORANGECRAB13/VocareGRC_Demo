@@ -2,6 +2,13 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- Google Mobile Ads. The SDK throws GADInvalidInitializationException and
+	     terminates the app if it is started without this key, so it must be present
+	     whenever the AdMob plugin is linked. This is Google's public iOS TEST app id
+	     — replace it with the real one from the AdMob console before shipping the
+	     free tier, and never ship a debug build against live ad units. -->
+	<key>GADApplicationIdentifier</key>
+	<string>ca-app-pub-3940256099942544~1458002511</string>
   <key>CAPACITOR_DEBUG</key>
 	<string>$(CAPACITOR_DEBUG)</string>
 	<key>CFBundleDevelopmentRegion</key>

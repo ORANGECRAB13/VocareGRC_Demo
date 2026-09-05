@@ -105,6 +105,20 @@ def build_conversation_config(target: str) -> dict:
         "turn": {
             # Interpreting starts only once the speaker actually stops.
             "turn_timeout": 7,
+            # ElevenLabs bills Agents on wall-clock connection time, not on speech.
+            # Left at the default (-1, disabled) every abandoned session ran to the
+            # full max_duration_seconds cap: in August 2026, 168 of 559 sessions hit
+            # the 601 s ceiling and accounted for 78% of all billed minutes against a
+            # 71 s median. Hanging up on silence is what makes a per-minute credit
+            # balance mean the same thing to the user and to the invoice.
+            "silence_end_call_timeout": int(
+                os.getenv("ELEVENLABS_AGENT_SILENCE_END_SECS", "45")
+            ),
+        },
+        "conversation": {
+            "max_duration_seconds": int(
+                os.getenv("ELEVENLABS_AGENT_MAX_DURATION_SECS", "600")
+            ),
         },
     }
 

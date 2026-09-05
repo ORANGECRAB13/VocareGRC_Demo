@@ -18,7 +18,7 @@ mkdir -p "$OUT"
 UA='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
 # latin subset only — the UI chrome is English; CJK comes from system fonts.
-CSS_URL='https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Space+Grotesk:wght@400;500;600;700&display=swap'
+CSS_URL='https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap'
 
 echo "Fetching font CSS…"
 css=$(curl -sS -A "$UA" "$CSS_URL")

@@ -97,5 +97,6 @@ final class VocareBridgeViewController: CAPBridgeViewController {
         super.capacitorDidLoad()
         bridge?.registerPluginInstance(TranslationHistoryPlugin())
         bridge?.registerPluginInstance(OfflineTranslatePlugin())
+        bridge?.registerPluginInstance(PurchasesPlugin())
     }
 }

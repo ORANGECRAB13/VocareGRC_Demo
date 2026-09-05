@@ -2,55 +2,67 @@
 (() => {
   const { useState, useEffect, useRef, useCallback, useMemo } = React;
   const T = {
-    teal: "#58BFB4",
-    tealLight: "#DDF4F1",
-    tealMid: "#8FD5CE",
-    amber: "#F47C36",
-    amberLight: "#FCE4D5",
-    bg: "#FBF3EB",
+    // ── Voca palette (Live speech translation redesign) ──
+    // Person B / green
+    teal: "#34A46F",
+    tealLight: "#E2F3E9",
+    tealMid: "#5FBF8E",
+    // Person A / violet — also the brand primary
+    amber: "#6C5CE7",
+    amberLight: "#EBE7FD",
+    bg: "#FBF9F7",
     surface: "#FFFFFF",
-    surface2: "#E5EEF2",
-    textPrimary: "#3E4C5E",
-    textMuted: "#71808F",
-    textFaint: "#A6B1BA",
-    border: "#D3DEE4",
-    error: "#C52E42",
-    errorLight: "#F8E1E5",
-    success: "#409B76",
-    slate: "#3E4C5E",
-    cream: "#FBF3EB",
-    // ── Voca design canvas tokens ──
-    navy: "#3E4C5E",
-    // brand navy / slate
-    gold: "#FFD37E",
-    // hero italic + live indicator dot
-    tealDeep: "#2E8E86",
+    surface2: "#F1EEFC",
+    textPrimary: "#1C2033",
+    textMuted: "#6E7285",
+    textFaint: "#9EA1AF",
+    border: "#E6E4EC",
+    error: "#D93A5C",
+    errorLight: "#FBE4E9",
+    success: "#34A46F",
+    slate: "#1C2033",
+    cream: "#FBF9F7",
+    navy: "#1C2033",
+    // brand ink
+    accent: "#E0397F",
+    // pink highlight
+    gold: "#34A46F",
+    // live indicator dot
+    tealDeep: "#2A8B5D",
     // Person B ink on light surfaces
-    tealSoft: "#7FD3C9",
-    // Person B ink on navy
-    tealPale: "#9BDCD4",
-    // Person B ink, brightest (recording)
-    amberSoft: "#FBB07A",
-    // Person A ink on navy
-    amberDeep: "#D9631F",
+    tealSoft: "#5FBF8E",
+    tealPale: "#7ED3A6",
+    amberSoft: "#8B7CF0",
+    // Person A ink, light
+    amberDeep: "#5546C9",
     // Person A pressed
-    panelIdle: "#48586D",
-    // live panel resting background
-    panelA: "#B05A24",
-    // live panel while A records
-    panelB: "#2C7B73",
-    // live panel while B records
-    // Alpha washes lifted verbatim from the canvas
-    inkA08: "rgba(244,124,54,.08)",
-    inkA14: "rgba(244,124,54,.14)",
-    inkB09: "rgba(88,191,180,.09)",
-    inkB14: "rgba(88,191,180,.14)",
-    tileA: "rgba(251,176,122,.18)",
-    tileB: "rgba(88,191,180,.16)",
-    hairline: "rgba(62,76,94,.08)",
-    inkMute: "rgba(62,76,94,.45)",
-    creamMute: "rgba(251,243,235,.45)",
-    creamFaint: "rgba(251,243,235,.4)"
+    // Live panels are light in this design, tinted toward each speaker.
+    panelIdle: "#FBF9F7",
+    panelAIdle: "#F7F5FF",
+    panelBIdle: "#F4FAF6",
+    panelA: "#EBE7FD",
+    // while A records
+    panelB: "#E2F3E9",
+    // while B records
+    // Alpha washes lifted from the canvas
+    inkA07: "rgba(108,92,231,.07)",
+    inkA08: "rgba(108,92,231,.08)",
+    inkA14: "rgba(108,92,231,.14)",
+    inkA35: "rgba(108,92,231,.35)",
+    inkB09: "rgba(52,164,111,.09)",
+    inkB14: "rgba(52,164,111,.14)",
+    inkB35: "rgba(52,164,111,.35)",
+    tileA: "rgba(139,124,240,.18)",
+    tileB: "rgba(52,164,111,.16)",
+    hairline: "rgba(28,32,51,.08)",
+    inkMute: "rgba(28,32,51,.45)",
+    // Panels are light now, so what used to be cream-on-navy is ink-on-tint.
+    creamMute: "rgba(28,32,51,.45)",
+    creamFaint: "rgba(28,32,51,.4)",
+    // Type
+    display: "'Outfit', system-ui, sans-serif",
+    body: "'Space Grotesk', system-ui, sans-serif",
+    mono: "'JetBrains Mono', ui-monospace, monospace"
   };
   const LANGUAGES = [
     { code: "en", flag: "\u{1F1FA}\u{1F1F8}", label: "English" },
@@ -101,8 +113,7 @@
     return MLKIT_LANGUAGE_CODE[code] || code;
   }
   function offlineCanSelfDownload() {
-    var _a;
-    return ((_a = offlineEngine()) == null ? void 0 : _a.kind) === "mlkit";
+    return offlineEngine() !== null;
   }
   async function offlinePairStatus(a, b) {
     const engine = offlineEngine();
@@ -120,14 +131,20 @@
       return null;
     }
   }
-  async function downloadOfflineModels(codes) {
+  async function downloadOfflinePair(a, b) {
     const engine = offlineEngine();
-    if ((engine == null ? void 0 : engine.kind) !== "mlkit") {
-      throw new Error("This device installs translation languages through system settings.");
+    if (!engine) throw new Error("offline_unavailable");
+    if (engine.kind === "mlkit") {
+      for (const code of [a, b]) {
+        await engine.plugin.downloadModel({ language: mlkitCode(code) });
+      }
+      return true;
     }
-    for (const code of codes) {
-      await engine.plugin.downloadModel({ language: mlkitCode(code) });
+    for (const [source, target] of [[a, b], [b, a]]) {
+      const { installed } = await engine.plugin.prepare({ source, target });
+      if (!installed) return false;
     }
+    return true;
   }
   async function translateOffline(text, sourceCode, targetCode) {
     const engine = offlineEngine();
@@ -174,6 +191,143 @@
       _clientId = _clientId || `c-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     }
     return _clientId;
+  }
+  const PLAN_PRICE_FALLBACK = "A$29.99";
+  const PLAN_MINUTES = 60;
+  function purchasesPlugin() {
+    var _a, _b;
+    return ((_b = (_a = window.Capacitor) == null ? void 0 : _a.Plugins) == null ? void 0 : _b.VocarePurchases) || null;
+  }
+  function admobPlugin() {
+    var _a, _b;
+    return ((_b = (_a = window.Capacitor) == null ? void 0 : _a.Plugins) == null ? void 0 : _b.AdMob) || null;
+  }
+  function storePlatform() {
+    return nativePlatform() === "ios" ? "ios" : "android";
+  }
+  function receiptOf(result) {
+    return (result == null ? void 0 : result.jws) || (result == null ? void 0 : result.purchaseToken) || "";
+  }
+  function onEntitlementChanged(handler) {
+    const plugin = purchasesPlugin();
+    if (!(plugin == null ? void 0 : plugin.addListener)) return () => {
+    };
+    const registration = plugin.addListener("entitlementChanged", handler);
+    return () => {
+      Promise.resolve(registration).then((r) => {
+        var _a;
+        return (_a = r == null ? void 0 : r.remove) == null ? void 0 : _a.call(r);
+      }).catch(() => {
+      });
+    };
+  }
+  async function storePrice() {
+    const plugin = purchasesPlugin();
+    if (!plugin) return null;
+    try {
+      const product = await plugin.getProduct();
+      return (product == null ? void 0 : product.displayPrice) || null;
+    } catch (error) {
+      console.warn("Could not read product price:", error);
+      return null;
+    }
+  }
+  async function currentReceipt() {
+    const plugin = purchasesPlugin();
+    if (!plugin) return { reachable: false, receipt: "" };
+    try {
+      const held = await plugin.currentEntitlement();
+      return { reachable: true, receipt: (held == null ? void 0 : held.active) ? receiptOf(held) : "" };
+    } catch (error) {
+      console.warn("Could not read entitlement:", error);
+      return { reachable: false, receipt: "" };
+    }
+  }
+  async function purchasePro() {
+    const plugin = purchasesPlugin();
+    if (!plugin) throw new Error("in_app_purchase_unavailable");
+    const result = await plugin.purchase();
+    if ((result == null ? void 0 : result.status) === "cancelled") return { status: "cancelled" };
+    if ((result == null ? void 0 : result.status) === "pending") return { status: "pending" };
+    if ((result == null ? void 0 : result.status) !== "purchased") throw new Error("purchase_failed");
+    return { status: "purchased", receipt: receiptOf(result), raw: result };
+  }
+  async function restorePurchases() {
+    const plugin = purchasesPlugin();
+    if (!plugin) throw new Error("in_app_purchase_unavailable");
+    const held = await plugin.restore();
+    return (held == null ? void 0 : held.active) ? { status: "purchased", receipt: receiptOf(held), raw: held } : { status: "none" };
+  }
+  async function acknowledgeIfNeeded(raw) {
+    const plugin = purchasesPlugin();
+    if (!(plugin == null ? void 0 : plugin.acknowledge) || !(raw == null ? void 0 : raw.purchaseToken) || raw.acknowledged) return;
+    try {
+      await plugin.acknowledge({ purchaseToken: raw.purchaseToken });
+    } catch (error) {
+      console.warn("Could not acknowledge purchase:", error);
+    }
+  }
+  async function showFreeTierBanner() {
+    const plugin = admobPlugin();
+    if (!plugin) return;
+    const adId = nativePlatform() === "ios" ? window.VOCARE_ADMOB_IOS_BANNER : window.VOCARE_ADMOB_ANDROID_BANNER;
+    if (!adId) return;
+    try {
+      await plugin.initialize({ initializeForTesting: Boolean(window.VOCARE_ADS_TEST) });
+      await plugin.showBanner({
+        adId,
+        position: "BOTTOM_CENTER",
+        margin: 82
+        // clears the tab bar
+      });
+    } catch (error) {
+      console.warn("Could not show banner:", error);
+    }
+  }
+  async function hideFreeTierBanner() {
+    var _a;
+    try {
+      await ((_a = admobPlugin()) == null ? void 0 : _a.hideBanner());
+    } catch (_) {
+    }
+  }
+  async function fetchBalance() {
+    const res = await api(`/api/entitlement?subject=${encodeURIComponent(clientId())}`);
+    if (!res.ok) throw new Error(`balance ${res.status}`);
+    return res.json();
+  }
+  async function activateEntitlement({ receipt = "", reachable = false } = {}) {
+    const res = await api("/api/entitlement/activate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        subject: clientId(),
+        platform: storePlatform(),
+        receipt,
+        store_reachable: reachable
+      })
+    });
+    if (!res.ok) throw new Error(`activate ${res.status}`);
+    return res.json();
+  }
+  async function reportUsage(sessionId, sessionSeconds) {
+    try {
+      const res = await api("/api/entitlement/consume", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subject: clientId(), session_id: sessionId, session_seconds: Math.round(sessionSeconds) }),
+        keepalive: true
+      });
+      return res.ok ? res.json() : null;
+    } catch (_) {
+      return null;
+    }
+  }
+  function formatMinutes(seconds) {
+    const mins = Math.floor(Math.max(0, seconds) / 60);
+    const secs = Math.max(0, Math.round(seconds)) % 60;
+    if (mins >= 10) return `${mins} min`;
+    return `${mins}:${String(secs).padStart(2, "0")}`;
   }
   async function fetchIceServers() {
     const r = await api("/api/ice");
@@ -375,9 +529,9 @@
       display: "flex",
       alignItems: "flex-start",
       paddingTop: 11,
-      background: "rgba(251,243,235,.92)",
+      background: "rgba(251,249,247,.92)",
       backdropFilter: "blur(18px)",
-      borderTop: "1px solid rgba(62,76,94,.08)",
+      borderTop: "1px solid rgba(28,32,51,.08)",
       paddingBottom: "env(safe-area-inset-bottom, 0px)",
       flexShrink: 0
     } }, tabs.map((t) => {
@@ -395,7 +549,7 @@
             justifyContent: "center",
             padding: 0,
             gap: 5,
-            color: isActive ? T.amber : "rgba(62,76,94,.38)",
+            color: isActive ? T.amber : "rgba(28,32,51,.38)",
             transition: "color 0.15s"
           }
         },
@@ -404,46 +558,210 @@
       );
     }));
   }
-  function WelcomeScreen({ langA, langB, onStart, onPickA, onPickB, onSwap, onHistory, onSession }) {
-    const [sessions, setSessions] = useState([]);
-    const langAInfo = getLang(langA);
-    const langBInfo = getLang(langB);
+  const OFFLINE_PREF_KEY = "vocare.offlineMode";
+  function readOfflinePref() {
+    try {
+      const raw = localStorage.getItem(OFFLINE_PREF_KEY);
+      return raw === null ? null : raw === "true";
+    } catch (_) {
+      return null;
+    }
+  }
+  function writeOfflinePref(value) {
+    try {
+      localStorage.setItem(OFFLINE_PREF_KEY, String(value));
+    } catch (_) {
+    }
+  }
+  function OfflineSwitch({ on, onChange, langA, langB }) {
+    const [status, setStatus] = useState(void 0);
+    const [busy, setBusy] = useState(false);
+    const [error, setError] = useState(null);
+    const pairPossible = canTranslateOffline(langA, langB);
     useEffect(() => {
       let active = true;
-      const poll = async () => {
-        try {
-          const history = await loadSessionHistory();
-          if (active) setSessions(history);
-        } catch {
-        }
-      };
-      poll();
-      const id = setInterval(poll, 3e3);
+      setError(null);
+      offlinePairStatus(langA, langB).then((s) => {
+        if (active) setStatus(s);
+      });
       return () => {
         active = false;
-        clearInterval(id);
       };
-    }, []);
-    const topSessions = sessions.slice(0, 3);
-    return /* @__PURE__ */ React.createElement("div", { style: { flex: 1, display: "flex", flexDirection: "column", overflowY: "auto", background: T.cream } }, /* @__PURE__ */ React.createElement("div", { style: {
-      background: T.slate,
-      padding: "58px 26px 22px",
-      borderRadius: "0 0 34px 34px",
-      color: T.cream,
-      flexShrink: 0
-    } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } }, /* @__PURE__ */ React.createElement("div", { style: {
-      width: 30,
+    }, [langA, langB]);
+    if (!offlineTranslationLanguages().length || !offlineEngine()) return null;
+    async function download() {
+      setBusy(true);
+      setError(null);
+      try {
+        const ok = await downloadOfflinePair(langA, langB);
+        if (!ok) setError("The download was declined. Offline translation needs both languages installed.");
+        setStatus(await offlinePairStatus(langA, langB));
+      } catch (_) {
+        setError("Could not install the languages. Check your connection and try again.");
+      } finally {
+        setBusy(false);
+      }
+    }
+    const needsDownload = on && pairPossible && status === "supported";
+    const impossible = on && !pairPossible;
+    const subtitle = !pairPossible ? `${getLang(langA).label} and ${getLang(langB).label} cannot be translated on-device \u2014 this pair needs a connection.` : status === "installed" ? "Translated on this device. No connection needed, and nothing leaves your phone." : status === "supported" ? "Both languages need to be installed on this device first." : "Runs on this device instead of the cloud.";
+    return /* @__PURE__ */ React.createElement("div", { style: {
+      background: T.surface,
+      border: `1px solid ${needsDownload || impossible ? T.inkA35 : T.hairline}`,
+      borderRadius: 18,
+      padding: "13px 15px",
+      marginBottom: 8,
+      boxShadow: "0 10px 30px -20px rgba(28,32,51,.28)"
+    } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12 } }, /* @__PURE__ */ React.createElement("div", { style: { flex: 1, minWidth: 0 } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 7 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 14.5, fontWeight: 600, color: T.slate } }, "Offline mode"), on && status === "installed" && /* @__PURE__ */ React.createElement("span", { style: { fontFamily: T.mono, fontSize: 9, letterSpacing: ".1em", textTransform: "uppercase", fontWeight: 700, color: T.tealDeep } }, "Ready")), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, lineHeight: 1.45, color: T.inkMute, marginTop: 2, textWrap: "pretty" } }, subtitle)), /* @__PURE__ */ React.createElement(
+      "button",
+      {
+        onClick: () => onChange(!on),
+        role: "switch",
+        "aria-checked": on,
+        "aria-label": "Offline mode",
+        style: {
+          width: 44,
+          height: 26,
+          flexShrink: 0,
+          borderRadius: 99,
+          border: "none",
+          background: on ? T.amber : "rgba(28,32,51,.16)",
+          padding: 3,
+          display: "flex",
+          justifyContent: on ? "flex-end" : "flex-start",
+          transition: "background .2s"
+        }
+      },
+      /* @__PURE__ */ React.createElement("div", { style: { width: 20, height: 20, borderRadius: "50%", background: "#fff", boxShadow: "0 1px 3px rgba(0,0,0,.25)" } })
+    )), needsDownload && /* @__PURE__ */ React.createElement(
+      "button",
+      {
+        onClick: download,
+        disabled: busy,
+        style: {
+          width: "100%",
+          marginTop: 11,
+          height: 42,
+          borderRadius: 13,
+          border: "none",
+          background: T.inkA08,
+          color: T.amber,
+          fontSize: 13.5,
+          fontWeight: 600,
+          opacity: busy ? 0.6 : 1
+        }
+      },
+      busy ? "Installing\u2026" : `Install ${getLang(langA).label} and ${getLang(langB).label}`
+    ), error && /* @__PURE__ */ React.createElement("div", { style: { marginTop: 9, fontSize: 11.5, lineHeight: 1.45, color: T.error } }, error));
+  }
+  function VocaMascot() {
+    const arc = (side, size, delay) => ({
+      position: "absolute",
+      [side]: size === 30 ? 44 : size === 48 ? 26 : 8,
+      top: 97,
+      width: size,
+      height: size,
+      marginTop: -size / 2,
+      border: "3.5px solid transparent",
+      [side === "left" ? "borderLeftColor" : "borderRightColor"]: T.amberSoft,
+      borderRadius: "50%",
+      opacity: 0.45,
+      animation: "voca-arc 1.9s ease-in-out infinite",
+      animationDelay: `${delay}ms`
+    });
+    return /* @__PURE__ */ React.createElement("div", { "aria-hidden": "true", style: { width: 290, height: 180, position: "relative", animation: "voca-wander 7s ease-in-out infinite" } }, [[30, 0], [48, 200], [66, 400]].map(([size, delay]) => /* @__PURE__ */ React.createElement(React.Fragment, { key: size }, /* @__PURE__ */ React.createElement("div", { style: arc("left", size, delay) }), /* @__PURE__ */ React.createElement("div", { style: arc("right", size, delay) }))), /* @__PURE__ */ React.createElement("div", { style: {
+      position: "absolute",
+      left: "50%",
+      bottom: 8,
+      width: 88,
+      height: 14,
+      marginLeft: -44,
+      borderRadius: "50%",
+      background: "radial-gradient(50% 50% at 50% 50%, rgba(76,60,180,.34) 0%, rgba(76,60,180,0) 72%)",
+      animation: "voca-shadow 1.15s ease-in-out infinite"
+    } }), /* @__PURE__ */ React.createElement("div", { style: { position: "absolute", left: "50%", bottom: 22, marginLeft: -62, width: 124, height: 122, animation: "voca-hop 1.15s ease-in-out infinite" } }, /* @__PURE__ */ React.createElement("div", { style: {
+      position: "absolute",
+      right: -4,
+      top: 34,
+      width: 14,
+      height: 26,
+      borderRadius: 8,
+      background: "linear-gradient(230deg,#FFFFFF,#DED8F5)",
+      boxShadow: "inset 2px -2px 5px rgba(76,60,180,.2)",
+      transformOrigin: "50% 100%",
+      animation: "voca-wave 7s ease-in-out infinite"
+    } }), /* @__PURE__ */ React.createElement("div", { style: { position: "absolute", right: -40, top: -8, width: 70, height: 74, transformOrigin: "16% 92%", animation: "voca-wave 7s ease-in-out infinite" } }, /* @__PURE__ */ React.createElement("div", { style: { position: "absolute", left: 9, bottom: 0, width: 3.5, height: 70, borderRadius: 2, background: "linear-gradient(180deg,#F3F0FD,#B9AEE8)" } }), /* @__PURE__ */ React.createElement("div", { style: {
+      position: "absolute",
+      left: 10,
+      top: 2,
+      width: 46,
       height: 30,
-      background: T.cream,
-      color: T.slate,
-      borderRadius: 9,
+      borderRadius: "3px 8px 8px 3px",
+      background: "linear-gradient(135deg,#8B7CF0,#6C5CE7 60%,#5546C9)",
+      boxShadow: "0 4px 10px -4px rgba(76,60,180,.65)",
+      display: "grid",
+      placeItems: "center",
+      transformOrigin: "left center",
+      animation: "voca-flap 1.1s ease-in-out infinite"
+    } }, /* @__PURE__ */ React.createElement("span", { style: { fontFamily: T.mono, fontSize: 14, fontWeight: 700, color: T.cream, letterSpacing: ".06em" } }, "\u6587A"))), /* @__PURE__ */ React.createElement("div", { style: { position: "absolute", left: -10, top: 52, width: 22, height: 34, borderRadius: 12, background: "linear-gradient(120deg,#FFFFFF,#DED8F5)", boxShadow: "inset -2px -3px 6px rgba(76,60,180,.2)" } }), /* @__PURE__ */ React.createElement("div", { style: { position: "absolute", right: -10, top: 52, width: 22, height: 34, borderRadius: 12, background: "linear-gradient(240deg,#FFFFFF,#DED8F5)", boxShadow: "inset 2px -3px 6px rgba(76,60,180,.2)" } }), /* @__PURE__ */ React.createElement("div", { style: { position: "absolute", left: 26, bottom: -7, width: 22, height: 14, borderRadius: "0 0 8px 8px", background: "linear-gradient(180deg,#2A2358,#151233)" } }), /* @__PURE__ */ React.createElement("div", { style: { position: "absolute", right: 26, bottom: -7, width: 22, height: 14, borderRadius: "0 0 8px 8px", background: "linear-gradient(180deg,#2A2358,#151233)" } }), /* @__PURE__ */ React.createElement("div", { style: {
+      position: "absolute",
+      inset: 0,
+      borderRadius: 40,
+      background: "linear-gradient(158deg,#FFFFFF 4%,#F3F0FD 44%,#DAD2F4 78%,#C6BCEC 100%)",
+      boxShadow: "inset 0 10px 16px rgba(255,255,255,.9), inset 0 -14px 22px rgba(108,92,231,.22), inset 0 0 0 1px rgba(255,255,255,.7), 0 22px 34px -14px rgba(76,60,180,.5)"
+    } }), /* @__PURE__ */ React.createElement("div", { style: { position: "absolute", left: 14, top: 9, width: 44, height: 16, borderRadius: "50%", background: "rgba(255,255,255,.9)", filter: "blur(5px)" } }), /* @__PURE__ */ React.createElement("div", { style: {
+      position: "absolute",
+      left: 21,
+      top: 19,
+      right: 21,
+      height: 74,
+      borderRadius: 23,
+      background: "radial-gradient(120% 110% at 26% 14%, #35286E 0%, #1A1442 46%, #0E0B29 100%)",
+      boxShadow: "inset 0 0 0 1.5px rgba(140,110,255,.5), inset 0 2px 10px rgba(0,0,0,.6), 0 3px 8px rgba(20,14,60,.45)",
+      overflow: "hidden"
+    } }, /* @__PURE__ */ React.createElement("div", { style: { position: "absolute", left: "-10%", top: "-30%", width: "70%", height: "150%", background: "linear-gradient(100deg,rgba(255,255,255,.16),rgba(255,255,255,0) 62%)", transform: "skewX(-14deg)" } }), /* @__PURE__ */ React.createElement("div", { style: { position: "absolute", left: 0, top: 0, bottom: 0, width: 2, background: `linear-gradient(180deg,${T.accent},${T.amber} 60%,rgba(108,92,231,0))` } }), /* @__PURE__ */ React.createElement("div", { style: { position: "absolute", right: 0, top: 8, bottom: 8, width: 2, background: `linear-gradient(180deg,rgba(108,92,231,0),${T.amberSoft})` } }), /* @__PURE__ */ React.createElement("div", { style: { position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 9 } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 22 } }, [0, 1].map((i) => /* @__PURE__ */ React.createElement("span", { key: i, style: { width: 11, height: 15, borderRadius: 5, background: "#FFFFFF", boxShadow: "0 0 10px rgba(255,255,255,.75)", display: "block", animation: "voca-blink 4.2s ease-in-out infinite" } }))), /* @__PURE__ */ React.createElement("div", { style: { width: 30, height: 15, border: "3.5px solid transparent", borderBottomColor: "#FFFFFF", borderRadius: "0 0 34px 34px", filter: "drop-shadow(0 0 6px rgba(255,255,255,.6))" } })))));
+  }
+  function WelcomeScreen({ langA, langB, onStart, onPickA, onPickB, onSwap, tier = "free", secondsLeft = 0, onUpgrade, offlineMode = false, onOfflineChange }) {
+    const langAInfo = getLang(langA);
+    const langBInfo = getLang(langB);
+    return /* @__PURE__ */ React.createElement("div", { style: {
+      flex: 1,
       display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
-      flexShrink: 0,
-      fontFamily: "'Instrument Serif', serif",
-      fontSize: 19
-    } }, "A"), /* @__PURE__ */ React.createElement("h1", { style: { color: T.cream, fontSize: 14, fontWeight: 600, letterSpacing: ".16em", textTransform: "uppercase" } }, "Voca")), /* @__PURE__ */ React.createElement("p", { style: { fontFamily: "'Instrument Serif', serif", fontSize: 44, fontWeight: 400, letterSpacing: "-.015em", lineHeight: 0.98, margin: "26px 0 0" } }, "Speak freely.", /* @__PURE__ */ React.createElement("br", null), /* @__PURE__ */ React.createElement("span", { style: { fontStyle: "italic", color: "#FFD37E" } }, "Understand"), " instantly."), /* @__PURE__ */ React.createElement("p", { style: { fontSize: 13.5, color: "rgba(251,243,235,.6)", lineHeight: 1.5, marginTop: 12, maxWidth: 230 } }, "One phone between two people.")), /* @__PURE__ */ React.createElement("div", { style: { padding: "16px 20px 0" } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "stretch", gap: 8, background: "#fff", border: "1px solid rgba(62,76,94,.09)", borderRadius: 22, padding: 8 } }, /* @__PURE__ */ React.createElement("button", { onClick: onPickA, style: { flex: 1, minWidth: 0, padding: "12px 14px", borderRadius: 15, background: "rgba(244,124,54,.07)", textAlign: "left" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 9.5, letterSpacing: ".14em", textTransform: "uppercase", color: T.amber, fontWeight: 700 } }, "Person A"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 16, fontWeight: 600, color: T.slate, marginTop: 5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, langAInfo.label)), /* @__PURE__ */ React.createElement("button", { onClick: onSwap, "aria-label": "Swap languages", style: { width: 38, display: "grid", placeItems: "center", color: "rgba(62,76,94,.4)", borderRadius: 12 } }, /* @__PURE__ */ React.createElement(Icon, { name: "swap", size: 18 })), /* @__PURE__ */ React.createElement("button", { onClick: onPickB, style: { flex: 1, minWidth: 0, padding: "12px 14px", borderRadius: 15, background: T.inkB09, textAlign: "right" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 9.5, letterSpacing: ".14em", textTransform: "uppercase", color: T.tealDeep, fontWeight: 700 } }, "Person B"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 16, fontWeight: 600, color: T.slate, marginTop: 5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, langBInfo.label))), /* @__PURE__ */ React.createElement(
+      flexDirection: "column",
+      overflow: "hidden",
+      background: `radial-gradient(120% 70% at 50% 6%, ${T.surface2} 0%, rgba(251,249,247,0) 58%), radial-gradient(90% 50% at 88% 96%, #EBF6F0 0%, rgba(251,249,247,0) 60%), ${T.bg}`
+    } }, /* @__PURE__ */ React.createElement("div", { style: { padding: "30px 26px 0", display: "flex", alignItems: "center", gap: 9, flexShrink: 0 } }, /* @__PURE__ */ React.createElement("div", { style: { width: 26, height: 26, borderRadius: 8, background: T.amber, display: "grid", placeItems: "center" } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 4 } }, /* @__PURE__ */ React.createElement("span", { style: { width: 4, height: 4, borderRadius: "50%", background: "#fff", display: "block" } }), /* @__PURE__ */ React.createElement("span", { style: { width: 4, height: 4, borderRadius: "50%", background: "#fff", display: "block" } }))), /* @__PURE__ */ React.createElement("div", { style: { fontFamily: T.display, fontSize: 17, fontWeight: 700, letterSpacing: "-.01em", color: T.slate } }, "Voca"), /* @__PURE__ */ React.createElement(
+      "button",
+      {
+        onClick: onUpgrade,
+        style: {
+          marginLeft: "auto",
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          padding: "6px 11px",
+          borderRadius: 99,
+          border: `1px solid ${T.hairline}`,
+          background: tier === "pro" ? T.inkA07 : T.surface,
+          fontFamily: T.mono,
+          fontSize: 9.5,
+          letterSpacing: ".1em",
+          textTransform: "uppercase",
+          fontWeight: 700,
+          color: tier === "pro" ? T.amberDeep : T.inkMute
+        }
+      },
+      tier === "pro" ? /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("span", { style: { width: 5, height: 5, borderRadius: "50%", background: secondsLeft > 0 ? T.teal : T.error, display: "block" } }), formatMinutes(secondsLeft), " left") : "Free \xB7 Upgrade"
+    )), /* @__PURE__ */ React.createElement("div", { style: { flex: 1, minHeight: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", paddingBottom: 8 } }, /* @__PURE__ */ React.createElement(VocaMascot, null), /* @__PURE__ */ React.createElement("div", { style: { fontFamily: T.display, fontSize: 15.5, fontWeight: 500, color: "rgba(28,32,51,.5)", marginTop: 16, whiteSpace: "nowrap" } }, "Ready when you are")), /* @__PURE__ */ React.createElement("div", { style: { padding: "0 20px 24px", flexShrink: 0 } }, /* @__PURE__ */ React.createElement(OfflineSwitch, { on: offlineMode, onChange: onOfflineChange, langA, langB }), /* @__PURE__ */ React.createElement("div", { style: {
+      display: "flex",
+      alignItems: "stretch",
+      gap: 8,
+      background: T.surface,
+      border: `1px solid ${T.hairline}`,
+      borderRadius: 22,
+      padding: 8,
+      boxShadow: "0 10px 30px -18px rgba(28,32,51,.28)"
+    } }, /* @__PURE__ */ React.createElement("button", { onClick: onPickA, style: { flex: 1, minWidth: 0, padding: "12px 14px", borderRadius: 15, background: T.inkA07, textAlign: "left" } }, /* @__PURE__ */ React.createElement("div", { style: { fontFamily: T.mono, fontSize: 9.5, letterSpacing: ".12em", textTransform: "uppercase", color: T.amberDeep, fontWeight: 700 } }, "Person A"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 16, fontWeight: 600, color: T.slate, marginTop: 5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, langAInfo.label)), /* @__PURE__ */ React.createElement("button", { onClick: onSwap, "aria-label": "Swap languages", style: { width: 38, display: "grid", placeItems: "center", color: "rgba(28,32,51,.4)", borderRadius: 12 } }, /* @__PURE__ */ React.createElement(Icon, { name: "swap", size: 18 })), /* @__PURE__ */ React.createElement("button", { onClick: onPickB, style: { flex: 1, minWidth: 0, padding: "12px 14px", borderRadius: 15, background: T.inkB09, textAlign: "right" } }, /* @__PURE__ */ React.createElement("div", { style: { fontFamily: T.mono, fontSize: 9.5, letterSpacing: ".12em", textTransform: "uppercase", color: T.tealDeep, fontWeight: 700 } }, "Person B"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 16, fontWeight: 600, color: T.slate, marginTop: 5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, langBInfo.label))), /* @__PURE__ */ React.createElement(
       "button",
       {
         onClick: onStart,
@@ -461,12 +779,20 @@
           alignItems: "center",
           justifyContent: "center",
           gap: 11,
-          boxShadow: "0 12px 24px -8px rgba(244,124,54,.6)"
+          boxShadow: "0 12px 26px -8px rgba(108,92,231,.6)"
         }
       },
       /* @__PURE__ */ React.createElement(Icon, { name: "mic", size: 19, color: "#fff" }),
       " Start a session"
-    )), /* @__PURE__ */ React.createElement("div", { style: { padding: "18px 20px 0" } }, topSessions.length > 0 && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 9 } }, /* @__PURE__ */ React.createElement("h2", { style: { fontSize: 10.5, fontWeight: 700, color: T.inkMute, textTransform: "uppercase", letterSpacing: ".16em" } }, "Recent sessions"), /* @__PURE__ */ React.createElement("button", { onClick: onHistory, style: { fontSize: 12, color: T.amber, fontWeight: 600 } }, "All")), topSessions.map((s) => /* @__PURE__ */ React.createElement(SessionCard, { key: s.session_id, session: s, onClick: () => onSession(s.session_id) })))), /* @__PURE__ */ React.createElement("div", { style: { flex: 1, display: "flex", alignItems: "flex-end", justifyContent: "center", padding: "24px 34px 24px", minHeight: 96 } }, /* @__PURE__ */ React.createElement("p", { style: { fontSize: 12.5, lineHeight: 1.6, color: T.inkMute, textAlign: "center" } }, "Lay the phone flat between you. Hold your half to talk; release and the other half hears it translated.")));
+    ), /* @__PURE__ */ React.createElement("div", { style: {
+      textAlign: "center",
+      fontFamily: T.mono,
+      fontSize: 10,
+      letterSpacing: ".14em",
+      textTransform: "uppercase",
+      color: "rgba(28,32,51,.35)",
+      marginTop: 14
+    } }, "Hold your half to talk")));
   }
   function SessionCard({ session, onClick }) {
     const isLive = session.status === "live" || session.status === "active";
@@ -483,7 +809,7 @@
           gap: 12,
           padding: "14px 15px",
           background: "#fff",
-          border: "1px solid rgba(62,76,94,.08)",
+          border: "1px solid rgba(28,32,51,.08)",
           borderRadius: 18,
           marginBottom: 8,
           cursor: "pointer",
@@ -493,8 +819,8 @@
       /* @__PURE__ */ React.createElement("div", { style: {
         width: 38,
         height: 38,
-        background: isLive ? "rgba(88,191,180,.12)" : "rgba(244,124,54,.08)",
-        color: isLive ? "#2E8E86" : T.amber,
+        background: isLive ? "rgba(52,164,111,.12)" : "rgba(108,92,231,.08)",
+        color: isLive ? "#2A8B5D" : T.amber,
         borderRadius: 12,
         display: "grid",
         placeItems: "center",
@@ -502,7 +828,7 @@
         fontSize: 11,
         fontWeight: 700
       } }, String(session.lang || "EN").toUpperCase()),
-      /* @__PURE__ */ React.createElement("div", { style: { flex: 1, minWidth: 0 } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6, marginBottom: 3 } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 14.5, fontWeight: 600, color: T.slate, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, session.topic || session.caller_name || "Translation Session"), isLive && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 10, fontWeight: 700, color: "#2E8E86", background: "rgba(88,191,180,.12)", padding: "4px 8px", borderRadius: 99, letterSpacing: ".1em" } }, "Live")), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 11.5, color: "rgba(62,76,94,.5)" } }, session.caller_name), session.participant_count != null && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: T.textFaint } }, "\xB7 ", session.participant_count, " people"), durationStr && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: T.textFaint } }, "\xB7 ", durationStr)))
+      /* @__PURE__ */ React.createElement("div", { style: { flex: 1, minWidth: 0 } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6, marginBottom: 3 } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 14.5, fontWeight: 600, color: T.slate, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, session.topic || session.caller_name || "Translation Session"), isLive && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 10, fontWeight: 700, color: "#2A8B5D", background: "rgba(52,164,111,.12)", padding: "4px 8px", borderRadius: 99, letterSpacing: ".1em" } }, "Live")), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 11.5, color: "rgba(28,32,51,.5)" } }, session.caller_name), session.participant_count != null && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: T.textFaint } }, "\xB7 ", session.participant_count, " people"), durationStr && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: T.textFaint } }, "\xB7 ", durationStr)))
     );
   }
   function formatDuration(secs) {
@@ -537,19 +863,19 @@
       zIndex: 40,
       display: "flex",
       alignItems: "flex-end",
-      background: "rgba(62,76,94,.55)",
+      background: "rgba(28,32,51,.55)",
       animation: "fade-in .2s ease-out"
     } }, /* @__PURE__ */ React.createElement("div", { style: {
       width: "100%",
       background: T.cream,
       borderRadius: "26px 26px 0 0",
       padding: "24px 22px 28px",
-      boxShadow: "0 -18px 40px -12px rgba(62,76,94,.4)"
-    } }, /* @__PURE__ */ React.createElement("div", { style: { width: 46, height: 46, borderRadius: 15, display: "grid", placeItems: "center", background: T.slate } }, /* @__PURE__ */ React.createElement(Icon, { name: "mic", size: 21, color: T.cream })), /* @__PURE__ */ React.createElement("h2", { style: { fontFamily: "'Instrument Serif', serif", fontSize: 25, fontWeight: 400, color: T.slate, marginTop: 14 } }, "Before we turn on the microphone"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 14, lineHeight: 1.6, color: "rgba(62,76,94,.78)", marginTop: 12 } }, "To translate your conversation, Vocare records audio while you hold the speak button and sends it to our servers, where it is transcribed and translated."), /* @__PURE__ */ React.createElement("ul", { style: { listStyle: "none", marginTop: 14, display: "flex", flexDirection: "column", gap: 9 } }, [
+      boxShadow: "0 -18px 40px -12px rgba(28,32,51,.4)"
+    } }, /* @__PURE__ */ React.createElement("div", { style: { width: 46, height: 46, borderRadius: 15, display: "grid", placeItems: "center", background: T.slate } }, /* @__PURE__ */ React.createElement(Icon, { name: "mic", size: 21, color: T.cream })), /* @__PURE__ */ React.createElement("h2", { style: { fontFamily: T.display, fontSize: 25, fontWeight: 700, letterSpacing: "-.02em", color: T.slate, marginTop: 14 } }, "Before we turn on the microphone"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 14, lineHeight: 1.6, color: "rgba(28,32,51,.78)", marginTop: 12 } }, "To translate your conversation, Vocare records audio while you hold the speak button and sends it to our servers, where it is transcribed and translated."), /* @__PURE__ */ React.createElement("ul", { style: { listStyle: "none", marginTop: 14, display: "flex", flexDirection: "column", gap: 9 } }, [
       "Audio is captured only while a speak button is held down \u2014 never in the background.",
       "Transcripts of the conversation are saved on this device so you can read them later.",
       "There are no accounts, and nothing is used for advertising or tracking."
-    ].map((line) => /* @__PURE__ */ React.createElement("li", { key: line, style: { display: "flex", gap: 9, fontSize: 13, lineHeight: 1.5, color: "rgba(62,76,94,.7)" } }, /* @__PURE__ */ React.createElement("span", { style: { color: T.amber, fontWeight: 700 } }, "\xB7"), /* @__PURE__ */ React.createElement("span", null, line)))), /* @__PURE__ */ React.createElement(
+    ].map((line) => /* @__PURE__ */ React.createElement("li", { key: line, style: { display: "flex", gap: 9, fontSize: 13, lineHeight: 1.5, color: "rgba(28,32,51,.7)" } }, /* @__PURE__ */ React.createElement("span", { style: { color: T.amber, fontWeight: 700 } }, "\xB7"), /* @__PURE__ */ React.createElement("span", null, line)))), /* @__PURE__ */ React.createElement(
       "a",
       {
         href: `${apiBase()}/privacy`,
@@ -586,7 +912,7 @@
           height: 48,
           marginTop: 8,
           background: "transparent",
-          color: "rgba(62,76,94,.6)",
+          color: "rgba(28,32,51,.6)",
           border: "none",
           fontSize: 15,
           fontWeight: 600
@@ -629,7 +955,7 @@
         }
       );
     }
-    return /* @__PURE__ */ React.createElement("div", { style: { flex: 1, position: "relative", display: "flex", flexDirection: "column", overflowY: "auto", background: T.cream } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12, padding: "60px 22px 18px" } }, /* @__PURE__ */ React.createElement("button", { onClick: onBack, style: { width: 34, height: 34, borderRadius: 11, display: "grid", placeItems: "center", background: "rgba(62,76,94,.05)", color: T.slate } }, /* @__PURE__ */ React.createElement(Icon, { name: "chevron-left", size: 17 })), /* @__PURE__ */ React.createElement("h1", { style: { fontFamily: "'Instrument Serif', serif", fontSize: 26, fontWeight: 400, color: T.slate } }, "Session setup")), /* @__PURE__ */ React.createElement("div", { style: { padding: "0 20px 28px" } }, /* @__PURE__ */ React.createElement(Section, { title: "Who is talking" }, /* @__PURE__ */ React.createElement(
+    return /* @__PURE__ */ React.createElement("div", { style: { flex: 1, position: "relative", display: "flex", flexDirection: "column", overflowY: "auto", background: T.cream } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12, padding: "60px 22px 18px" } }, /* @__PURE__ */ React.createElement("button", { onClick: onBack, style: { width: 34, height: 34, borderRadius: 11, display: "grid", placeItems: "center", background: "rgba(28,32,51,.05)", color: T.slate } }, /* @__PURE__ */ React.createElement(Icon, { name: "chevron-left", size: 17 })), /* @__PURE__ */ React.createElement("h1", { style: { fontFamily: T.display, fontSize: 26, fontWeight: 700, letterSpacing: "-.02em", color: T.slate } }, "Session setup")), /* @__PURE__ */ React.createElement("div", { style: { padding: "0 20px 28px" } }, /* @__PURE__ */ React.createElement(Section, { title: "Who is talking" }, /* @__PURE__ */ React.createElement(
       PersonRow,
       {
         label: "Person A \xB7 this side",
@@ -650,7 +976,7 @@
         variant: "teal",
         style: { marginTop: 8 }
       }
-    )), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, letterSpacing: ".16em", textTransform: "uppercase", color: "rgba(62,76,94,.45)", fontWeight: 700, margin: "22px 0 9px" } }, "Microphone"), /* @__PURE__ */ React.createElement("div", { style: { borderRadius: 18, padding: 15, background: T.slate, border: `1px solid ${T.slate}`, color: T.cream } }, /* @__PURE__ */ React.createElement(Icon, { name: "mic", size: 19, color: T.cream }), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 14.5, fontWeight: 600, marginTop: 8 } }, "Hold to speak")), /* @__PURE__ */ React.createElement("div", { style: { marginTop: 22, background: T.slate, borderRadius: 22, padding: "18px 18px 20px", color: T.cream } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, letterSpacing: ".16em", textTransform: "uppercase", color: "rgba(251,243,235,.5)", fontWeight: 700 } }, "How it works"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13.5, lineHeight: 1.55, color: "rgba(251,243,235,.78)", marginTop: 10 } }, "Lay the phone flat between you. Hold your half to talk; release and the other half hears it translated.")), /* @__PURE__ */ React.createElement(
+    )), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, letterSpacing: ".16em", textTransform: "uppercase", color: "rgba(28,32,51,.45)", fontWeight: 700, margin: "22px 0 9px" } }, "Microphone"), /* @__PURE__ */ React.createElement("div", { style: { borderRadius: 18, padding: 15, background: T.slate, border: `1px solid ${T.slate}`, color: T.cream } }, /* @__PURE__ */ React.createElement(Icon, { name: "mic", size: 19, color: T.cream }), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 14.5, fontWeight: 600, marginTop: 8 } }, "Hold to speak")), /* @__PURE__ */ React.createElement("div", { style: { marginTop: 22, background: T.slate, borderRadius: 22, padding: "18px 18px 20px", color: T.cream } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, letterSpacing: ".16em", textTransform: "uppercase", color: "rgba(251,249,247,.5)", fontWeight: 700 } }, "How it works"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13.5, lineHeight: 1.55, color: "rgba(251,249,247,.78)", marginTop: 10 } }, "Lay the phone flat between you. Hold your half to talk; release and the other half hears it translated.")), /* @__PURE__ */ React.createElement(
       "button",
       {
         onClick: handleStart,
@@ -668,19 +994,19 @@
           alignItems: "center",
           justifyContent: "center",
           gap: 10,
-          boxShadow: "0 12px 24px -8px rgba(244,124,54,.55)"
+          boxShadow: "0 12px 24px -8px rgba(108,92,231,.55)"
         }
       },
       "Start session"
     )));
   }
   function Section({ title, children }) {
-    return /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h3", { style: { fontSize: 10.5, fontWeight: 700, color: "rgba(62,76,94,.45)", textTransform: "uppercase", letterSpacing: ".16em", margin: "6px 0 9px" } }, title), children);
+    return /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h3", { style: { fontSize: 10.5, fontWeight: 700, color: "rgba(28,32,51,.45)", textTransform: "uppercase", letterSpacing: ".16em", margin: "6px 0 9px" } }, title), children);
   }
   function PersonRow({ label, name, lang, onNameChange, onLangTap, dimmed = false, variant = "amber", style = {} }) {
     const langInfo = getLang(lang);
     const accent = variant === "teal" ? T.teal : T.amber;
-    const ink = variant === "teal" ? "#2E8E86" : T.amber;
+    const ink = variant === "teal" ? "#2A8B5D" : T.amber;
     return /* @__PURE__ */ React.createElement("div", { style: {
       display: "flex",
       alignItems: "center",
@@ -691,7 +1017,7 @@
       borderRadius: 18,
       opacity: dimmed ? 0.55 : 1,
       ...style
-    } }, /* @__PURE__ */ React.createElement("div", { style: { width: 8, height: 34, borderRadius: 99, background: accent, flexShrink: 0 } }), /* @__PURE__ */ React.createElement("div", { style: { flex: 1, minWidth: 0 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 9.5, letterSpacing: ".14em", textTransform: "uppercase", fontWeight: 700, color: ink } }, label), /* @__PURE__ */ React.createElement("input", { value: name, onChange: (e) => onNameChange(e.target.value), disabled: dimmed, style: { width: "100%", marginTop: 3, padding: 0, fontSize: 16, fontWeight: 600, color: T.slate, background: "none", border: "none", outline: "none", fontFamily: "'Space Grotesk', sans-serif" } })), /* @__PURE__ */ React.createElement(
+    } }, /* @__PURE__ */ React.createElement("div", { style: { width: 8, height: 34, borderRadius: 99, background: accent, flexShrink: 0 } }), /* @__PURE__ */ React.createElement("div", { style: { flex: 1, minWidth: 0 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 9.5, letterSpacing: ".14em", textTransform: "uppercase", fontWeight: 700, color: ink } }, label), /* @__PURE__ */ React.createElement("input", { value: name, onChange: (e) => onNameChange(e.target.value), disabled: dimmed, style: { width: "100%", marginTop: 3, padding: 0, fontSize: 16, fontWeight: 600, color: T.slate, background: "none", border: "none", outline: "none", fontFamily: T.body } })), /* @__PURE__ */ React.createElement(
       "button",
       {
         onClick: onLangTap,
@@ -715,8 +1041,8 @@
     ));
   }
   function PersonNameTag({ langInfo, name, color, pressing, tint, ink }) {
-    const textColor = T.cream;
-    const subColor = T.creamMute;
+    const textColor = T.slate;
+    const subColor = T.inkMute;
     const tileBg = tint || color + "29";
     const tileInk = ink || color;
     return /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } }, /* @__PURE__ */ React.createElement("div", { style: {
@@ -733,16 +1059,139 @@
     } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 11, fontWeight: 700 } }, langInfo.code.toUpperCase())), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", { style: { fontSize: 14, fontWeight: 600, color: textColor, transition: "color 0.2s" } }, name), /* @__PURE__ */ React.createElement("p", { style: { fontSize: 11, color: subColor, transition: "color 0.2s" } }, langInfo.label)));
   }
   function LiveTurn({ turn, mine, side }) {
-    const tagColor = mine ? T.creamFaint : side === "A" ? T.amberSoft : T.tealPale;
-    const bg = mine ? "rgba(251,243,235,.08)" : side === "A" ? "rgba(244,124,54,.9)" : "rgba(88,191,180,.9)";
-    const fg = mine ? "rgba(251,243,235,.82)" : "#fff";
+    const tagColor = mine ? "rgba(28,32,51,.4)" : side === "A" ? T.amberDeep : T.tealDeep;
+    const bg = mine ? T.surface : side === "A" ? T.amber : T.teal;
+    const fg = mine ? T.slate : "#fff";
     const text = mine ? turn.original : turn.translated;
     const sub = mine ? null : turn.original;
     const zhFont = { fontFamily: "'Noto Sans SC', 'Space Grotesk', sans-serif" };
     const isZh = (v) => typeof v === "string" && /[一-鿿]/.test(v);
-    return /* @__PURE__ */ React.createElement("div", { style: { maxWidth: "88%", alignSelf: mine ? "flex-end" : "flex-start", animation: "fade-in-up .3s ease-out both" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 9.5, letterSpacing: ".12em", textTransform: "uppercase", fontWeight: 700, color: tagColor, marginBottom: 4 } }, mine ? "You said" : "Translated"), /* @__PURE__ */ React.createElement("div", { style: { background: bg, color: fg, borderRadius: 16, padding: "11px 13px", fontSize: 15.5, lineHeight: 1.4, ...isZh(text) ? zhFont : {} } }, text), sub && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, color: T.creamFaint, marginTop: 5, fontStyle: "italic", ...isZh(sub) ? zhFont : {} } }, sub));
+    return /* @__PURE__ */ React.createElement("div", { style: { maxWidth: "88%", alignSelf: mine ? "flex-end" : "flex-start", animation: "fade-in-up .3s ease-out both" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 9.5, letterSpacing: ".12em", textTransform: "uppercase", fontWeight: 700, color: tagColor, marginBottom: 4 } }, mine ? "You said" : "Translated"), /* @__PURE__ */ React.createElement("div", { style: { background: bg, color: fg, borderRadius: 16, padding: "11px 13px", fontSize: 15.5, lineHeight: 1.4, ...isZh(text) ? zhFont : {} } }, text), sub && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, color: "rgba(28,32,51,.4)", marginTop: 5, fontStyle: "italic", ...isZh(sub) ? zhFont : {} } }, sub));
   }
-  function FaceToFaceLiveScreen({ config, onStop, onError }) {
+  function LiveSidePanel({ side, data, rotated }) {
+    const isA = side === "A";
+    const accent = isA ? T.amber : T.teal;
+    const accentDeep = isA ? T.amberDeep : T.tealDeep;
+    const idleBg = isA ? T.panelAIdle : T.panelBIdle;
+    const activeBg = isA ? T.panelA : T.panelB;
+    const micIdle = isA ? T.inkA14 : T.inkB14;
+    const micBorder = isA ? T.inkA35 : T.inkB35;
+    const tint = isA ? T.tileA : T.tileB;
+    return /* @__PURE__ */ React.createElement("div", { style: {
+      flex: 1,
+      minHeight: 0,
+      background: data.pressing ? activeBg : idleBg,
+      display: "flex",
+      flexDirection: "column",
+      transition: "background 0.3s",
+      position: "relative",
+      ...rotated ? { transform: "rotate(180deg)" } : null
+    } }, /* @__PURE__ */ React.createElement("div", { style: { padding: "14px 18px 6px", display: "flex", alignItems: "center", gap: 10 } }, /* @__PURE__ */ React.createElement(PersonNameTag, { langInfo: data.langInfo, name: data.name, tint, ink: isA ? accent : accentDeep, pressing: data.pressing }), /* @__PURE__ */ React.createElement("div", { style: {
+      marginLeft: "auto",
+      fontSize: 10.5,
+      letterSpacing: ".1em",
+      textTransform: "uppercase",
+      fontWeight: 700,
+      color: data.pressing ? accentDeep : "rgba(28,32,51,.4)"
+    } }, data.status)), /* @__PURE__ */ React.createElement("div", { style: { flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column-reverse", gap: 10, padding: "6px 18px 4px" } }, data.turns.slice().reverse().map((t) => /* @__PURE__ */ React.createElement(LiveTurn, { key: t.key, turn: t.turn, side, mine: t.mine })), data.note && /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, alignSelf: "flex-start" } }, /* @__PURE__ */ React.createElement(TypingDots, { color: "rgba(28,32,51,.4)" }), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 13, color: T.inkMute } }, data.note))), /* @__PURE__ */ React.createElement("div", { style: {
+      height: 150,
+      flex: "none",
+      display: "grid",
+      placeItems: "center",
+      ...rotated ? null : { paddingBottom: "env(safe-area-inset-bottom, 0px)" }
+    } }, /* @__PURE__ */ React.createElement("div", { style: { position: "relative", width: 104, height: 104, display: "flex", alignItems: "center", justifyContent: "center" } }, data.pressing && /* @__PURE__ */ React.createElement(PulseRing, { color: accent, size: 104 }), /* @__PURE__ */ React.createElement(
+      "button",
+      {
+        "data-ptt": "true",
+        onPointerDown: data.onDown,
+        onPointerUp: data.onUp,
+        onPointerCancel: data.onUp,
+        onContextMenu: (e) => e.preventDefault(),
+        disabled: data.disabled,
+        "aria-label": `${data.name} hold to speak`,
+        style: {
+          width: 104,
+          height: 104,
+          borderRadius: "50%",
+          background: data.pressing ? accent : micIdle,
+          border: `2px solid ${data.pressing ? accentDeep : micBorder}`,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          transition: "transform .12s, background .2s, border-color .2s",
+          transform: data.pressing ? "scale(1.12)" : "scale(1)",
+          cursor: data.disabled ? "default" : "pointer",
+          opacity: data.dimmed ? 0.58 : 1,
+          touchAction: "none",
+          WebkitTouchCallout: "none",
+          WebkitUserSelect: "none",
+          userSelect: "none",
+          position: "relative",
+          zIndex: 1
+        }
+      },
+      /* @__PURE__ */ React.createElement(Icon, { name: "mic", size: 30, color: data.pressing ? "#fff" : isA ? accent : accentDeep })
+    ))));
+  }
+  function LiveSplitView({ sideA, sideB, elapsedStr, onEnd, badge, notice, children }) {
+    return /* @__PURE__ */ React.createElement("div", { style: {
+      flex: 1,
+      display: "flex",
+      flexDirection: "column",
+      background: T.bg,
+      overflow: "hidden",
+      userSelect: "none",
+      WebkitUserSelect: "none",
+      WebkitTouchCallout: "none"
+    } }, children, /* @__PURE__ */ React.createElement(LiveSidePanel, { side: "B", data: sideB, rotated: true }), /* @__PURE__ */ React.createElement("div", { style: {
+      height: 56,
+      background: T.surface,
+      display: "flex",
+      alignItems: "center",
+      padding: "0 16px",
+      gap: 12,
+      flexShrink: 0,
+      borderTop: `1px solid ${T.hairline}`,
+      borderBottom: `1px solid ${T.hairline}`
+    } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 7 } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 11, fontWeight: 700, color: T.tealSoft } }, sideB.langInfo.code.toUpperCase()), /* @__PURE__ */ React.createElement(Icon, { name: "swap", size: 15, color: "rgba(28,32,51,.35)" }), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 11, fontWeight: 700, color: T.amberSoft } }, sideA.langInfo.code.toUpperCase())), /* @__PURE__ */ React.createElement("div", { style: { flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 } }, badge ? /* @__PURE__ */ React.createElement("span", { style: {
+      fontFamily: T.mono,
+      fontSize: 9,
+      letterSpacing: ".12em",
+      textTransform: "uppercase",
+      fontWeight: 700,
+      color: T.tealDeep,
+      background: T.tealLight,
+      borderRadius: 99,
+      padding: "4px 8px"
+    } }, badge) : /* @__PURE__ */ React.createElement("div", { style: { width: 6, height: 6, borderRadius: "50%", background: T.gold, animation: "dot-blink 1.6s ease-in-out infinite" } }), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12.5, color: "rgba(28,32,51,.75)", fontVariantNumeric: "tabular-nums", fontWeight: 500 } }, elapsedStr)), /* @__PURE__ */ React.createElement(
+      "button",
+      {
+        onClick: onEnd,
+        style: {
+          height: 34,
+          padding: "0 14px",
+          borderRadius: 12,
+          background: "rgba(52,164,111,.15)",
+          color: T.tealSoft,
+          border: "none",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 7
+        }
+      },
+      /* @__PURE__ */ React.createElement("span", { style: { width: 9, height: 9, background: "currentColor", borderRadius: 2, display: "block" } }),
+      /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12.5, fontWeight: 600 } }, "End")
+    )), notice && /* @__PURE__ */ React.createElement("div", { style: {
+      flexShrink: 0,
+      padding: "9px 18px",
+      background: T.errorLight,
+      color: T.error,
+      fontSize: 12,
+      lineHeight: 1.4
+    } }, notice), /* @__PURE__ */ React.createElement(LiveSidePanel, { side: "A", data: sideA }));
+  }
+  function FaceToFaceLiveScreen({ config, onStop, onError, budgetSeconds = Infinity, onUsage, onExhausted }) {
     const { nameA, nameB, langA, langB } = config;
     const langAInfo = getLang(langA);
     const langBInfo = getLang(langB);
@@ -879,13 +1328,28 @@
         }
       }
     }
+    const USAGE_REPORT_EVERY = 15;
+    function reportElapsed() {
+      if (onUsage && sessionIdRef.current) onUsage(sessionIdRef.current, elapsedRef.current);
+    }
     function startTimer() {
       if (timerRef.current) return;
       timerRef.current = setInterval(() => {
-        if (mountedRef.current) setElapsed((e) => {
+        if (!mountedRef.current) return;
+        setElapsed((e) => {
           elapsedRef.current = e + 1;
           return elapsedRef.current;
         });
+        const spent = elapsedRef.current;
+        if (spent % USAGE_REPORT_EVERY === 0) reportElapsed();
+        if (spent >= budgetSeconds) {
+          reportElapsed();
+          persistSession("ended").finally(() => {
+            cleanup();
+            if (onExhausted) onExhausted();
+            else onStop();
+          });
+        }
       }, 1e3);
     }
     function clearTurnTimeout(side) {
@@ -1121,126 +1585,49 @@
     const spokenByA = (ev) => ev.original_lang === langA;
     const hasSpokenA = allTurns.some((ev) => ev.speaker ? ev.speaker === pcAIdRef.current : spokenByA(ev));
     const hasSpokenB = allTurns.some((ev) => ev.speaker ? ev.speaker === pcBIdRef.current : !spokenByA(ev));
-    return /* @__PURE__ */ React.createElement("div", { style: { flex: 1, display: "flex", flexDirection: "column", background: T.navy, overflow: "hidden", userSelect: "none", WebkitUserSelect: "none", WebkitTouchCallout: "none" } }, /* @__PURE__ */ React.createElement("audio", { ref: audioRefA, autoPlay: true, playsInline: true, style: { display: "none" } }), /* @__PURE__ */ React.createElement("audio", { ref: audioRefB, autoPlay: true, playsInline: true, style: { display: "none" } }), /* @__PURE__ */ React.createElement("div", { style: {
-      flex: 1,
-      minHeight: 0,
-      transform: "rotate(180deg)",
-      background: pressB ? T.panelB : T.panelIdle,
-      display: "flex",
-      flexDirection: "column",
-      transition: "background 0.3s",
-      position: "relative"
-    } }, /* @__PURE__ */ React.createElement("div", { style: { padding: "14px 18px 6px", display: "flex", alignItems: "center", gap: 10 } }, /* @__PURE__ */ React.createElement(PersonNameTag, { langInfo: langBInfo, name: nameB, tint: T.tileB, ink: T.tealSoft, pressing: pressB }), /* @__PURE__ */ React.createElement("div", { style: { marginLeft: "auto", fontSize: 10.5, letterSpacing: ".1em", textTransform: "uppercase", fontWeight: 700, color: pressB ? T.tealPale : T.creamFaint } }, pressB ? "Recording" : turnStateB === "translating" ? "Translating..." : pressA ? `Listening to ${nameA}` : phase === "connected" ? hasSpokenB ? "Ready - speak again" : "Ready" : connState)), /* @__PURE__ */ React.createElement("div", { style: { flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column-reverse", gap: 10, padding: "6px 18px 4px" } }, allTurns.slice().reverse().map((t, i) => /* @__PURE__ */ React.createElement(LiveTurn, { key: allTurns.length - 1 - i, turn: t, side: "B", mine: !spokenByA(t) })), phase === "connecting" && !lastTurnB && /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, alignSelf: "flex-start" } }, /* @__PURE__ */ React.createElement(TypingDots, { color: T.creamFaint }), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 13, color: T.creamMute } }, connState))), /* @__PURE__ */ React.createElement("div", { style: { height: 150, flex: "none", display: "grid", placeItems: "center" } }, /* @__PURE__ */ React.createElement("div", { style: { position: "relative", width: 104, height: 104, display: "flex", alignItems: "center", justifyContent: "center" } }, pressB && /* @__PURE__ */ React.createElement(PulseRing, { color: T.teal, size: 104 }), /* @__PURE__ */ React.createElement(
-      "button",
+    return /* @__PURE__ */ React.createElement(
+      LiveSplitView,
       {
-        "data-ptt": "true",
-        onPointerDown: pressBStart,
-        onPointerUp: pressBEnd,
-        onPointerCancel: pressBEnd,
-        onContextMenu: (e) => e.preventDefault(),
-        disabled: phase !== "connected" || turnStateB === "translating" || pressA,
-        "aria-label": turnStateB === "translating" ? `${nameB} translation in progress` : `${nameB} hold to speak`,
-        style: {
-          width: 104,
-          height: 104,
-          borderRadius: "50%",
-          background: pressB ? T.teal : T.inkB14,
-          border: `2px solid ${pressB ? "#CDEDE8" : "rgba(127,211,201,.4)"}`,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          transition: "transform .12s, background .2s, border-color .2s",
-          transform: pressB ? "scale(1.12)" : "scale(1)",
-          cursor: phase === "connected" && turnStateB === "ready" && !pressA ? "pointer" : "default",
-          opacity: turnStateB === "translating" ? 0.58 : 1,
-          touchAction: "none",
-          WebkitTouchCallout: "none",
-          WebkitUserSelect: "none",
-          userSelect: "none",
-          position: "relative",
-          zIndex: 1
-        }
-      },
-      /* @__PURE__ */ React.createElement(Icon, { name: "mic", size: 30, color: pressB ? "#fff" : T.tealPale })
-    )))), /* @__PURE__ */ React.createElement("div", { style: {
-      height: 56,
-      background: T.navy,
-      display: "flex",
-      alignItems: "center",
-      padding: "0 16px",
-      gap: 12,
-      flexShrink: 0,
-      borderTop: "1px solid rgba(251,243,235,.1)",
-      borderBottom: "1px solid rgba(251,243,235,.1)"
-    } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 7 } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 11, fontWeight: 700, color: T.tealSoft } }, langBInfo.code.toUpperCase()), /* @__PURE__ */ React.createElement(Icon, { name: "swap", size: 15, color: "rgba(251,243,235,.35)" }), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 11, fontWeight: 700, color: T.amberSoft } }, langAInfo.code.toUpperCase())), /* @__PURE__ */ React.createElement("div", { style: { flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 } }, /* @__PURE__ */ React.createElement("div", { style: { width: 6, height: 6, borderRadius: "50%", background: T.gold, animation: "dot-blink 1.6s ease-in-out infinite" } }), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12.5, color: "rgba(251,243,235,.75)", fontVariantNumeric: "tabular-nums", fontWeight: 500 } }, elapsedStr)), /* @__PURE__ */ React.createElement(
-      "button",
-      {
-        onClick: async () => {
+        elapsedStr,
+        onEnd: async () => {
           await persistSession("ended");
+          reportElapsed();
           cleanup();
           onStop();
         },
-        style: {
-          height: 34,
-          padding: "0 14px",
-          borderRadius: 12,
-          background: "rgba(88,191,180,.15)",
-          color: T.tealSoft,
-          border: "none",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          gap: 7
+        sideA: {
+          langInfo: langAInfo,
+          name: nameA,
+          pressing: pressA,
+          disabled: phase !== "connected" || turnStateA === "translating" || pressB,
+          dimmed: turnStateA === "translating",
+          onDown: pressAStart,
+          onUp: pressAEnd,
+          status: pressA ? "Recording" : turnStateA === "translating" ? "Translating..." : pressB ? `Listening to ${nameB}` : phase === "connected" ? hasSpokenA ? "Ready - speak again" : "Ready" : connState,
+          turns: allTurns.map((t, i) => ({ key: i, turn: t, mine: spokenByA(t) })),
+          note: phase === "connecting" && !lastTurnA ? connState : null
+        },
+        sideB: {
+          langInfo: langBInfo,
+          name: nameB,
+          pressing: pressB,
+          disabled: phase !== "connected" || turnStateB === "translating" || pressA,
+          dimmed: turnStateB === "translating",
+          onDown: pressBStart,
+          onUp: pressBEnd,
+          status: pressB ? "Recording" : turnStateB === "translating" ? "Translating..." : pressA ? `Listening to ${nameA}` : phase === "connected" ? hasSpokenB ? "Ready - speak again" : "Ready" : connState,
+          turns: allTurns.map((t, i) => ({ key: i, turn: t, mine: !spokenByA(t) })),
+          note: phase === "connecting" && !lastTurnB ? connState : null
         }
       },
-      /* @__PURE__ */ React.createElement("span", { style: { width: 9, height: 9, background: "currentColor", borderRadius: 2, display: "block" } }),
-      /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12.5, fontWeight: 600 } }, "End")
-    )), /* @__PURE__ */ React.createElement("div", { style: {
-      flex: 1,
-      minHeight: 0,
-      background: pressA ? T.panelA : T.panelIdle,
-      display: "flex",
-      flexDirection: "column",
-      transition: "background 0.3s",
-      position: "relative"
-    } }, /* @__PURE__ */ React.createElement("div", { style: { padding: "14px 18px 6px", display: "flex", alignItems: "center", gap: 10 } }, /* @__PURE__ */ React.createElement(PersonNameTag, { langInfo: langAInfo, name: nameA, tint: T.tileA, ink: T.amberSoft, pressing: pressA }), /* @__PURE__ */ React.createElement("div", { style: { marginLeft: "auto", fontSize: 10.5, letterSpacing: ".1em", textTransform: "uppercase", fontWeight: 700, color: pressA ? T.amberSoft : T.creamFaint } }, pressA ? "Recording" : turnStateA === "translating" ? "Translating..." : pressB ? `Listening to ${nameB}` : phase === "connected" ? hasSpokenA ? "Ready - speak again" : "Ready" : connState)), /* @__PURE__ */ React.createElement("div", { style: { flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column-reverse", gap: 10, padding: "6px 18px 4px" } }, allTurns.slice().reverse().map((t, i) => /* @__PURE__ */ React.createElement(LiveTurn, { key: allTurns.length - 1 - i, turn: t, side: "A", mine: spokenByA(t) })), phase === "connecting" && !lastTurnA && /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, alignSelf: "flex-start" } }, /* @__PURE__ */ React.createElement(TypingDots, { color: T.creamFaint }), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 13, color: T.creamMute } }, connState))), /* @__PURE__ */ React.createElement("div", { style: { height: 150, flex: "none", display: "grid", placeItems: "center", paddingBottom: "env(safe-area-inset-bottom, 0px)" } }, /* @__PURE__ */ React.createElement("div", { style: { position: "relative", width: 104, height: 104, display: "flex", alignItems: "center", justifyContent: "center" } }, pressA && /* @__PURE__ */ React.createElement(PulseRing, { color: T.amber, size: 104 }), /* @__PURE__ */ React.createElement(
-      "button",
-      {
-        "data-ptt": "true",
-        onPointerDown: pressAStart,
-        onPointerUp: pressAEnd,
-        onPointerCancel: pressAEnd,
-        onContextMenu: (e) => e.preventDefault(),
-        disabled: phase !== "connected" || turnStateA === "translating" || pressB,
-        "aria-label": turnStateA === "translating" ? `${nameA} translation in progress` : `${nameA} hold to speak`,
-        style: {
-          width: 104,
-          height: 104,
-          borderRadius: "50%",
-          background: pressA ? T.amber : T.inkA14,
-          border: `2px solid ${pressA ? T.amberSoft : "rgba(251,176,122,.4)"}`,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          transition: "transform .12s, background .2s, border-color .2s",
-          transform: pressA ? "scale(1.12)" : "scale(1)",
-          cursor: phase === "connected" && turnStateA === "ready" && !pressB ? "pointer" : "default",
-          opacity: turnStateA === "translating" ? 0.58 : 1,
-          touchAction: "none",
-          WebkitTouchCallout: "none",
-          WebkitUserSelect: "none",
-          userSelect: "none",
-          position: "relative",
-          zIndex: 1
-        }
-      },
-      /* @__PURE__ */ React.createElement(Icon, { name: "mic", size: 30, color: pressA ? "#fff" : T.amberSoft })
-    )))));
+      /* @__PURE__ */ React.createElement("audio", { ref: audioRefA, autoPlay: true, playsInline: true, style: { display: "none" } }),
+      /* @__PURE__ */ React.createElement("audio", { ref: audioRefB, autoPlay: true, playsInline: true, style: { display: "none" } })
+    );
   }
   function LangScreen({ onBack, onSelect, targetName = "Person", variant = "amber", selected }) {
     const [query, setQuery] = useState("");
-    const accent = variant === "teal" ? "#2E8E86" : T.amber;
-    const tint = variant === "teal" ? "rgba(88,191,180,.1)" : "rgba(244,124,54,.08)";
+    const accent = variant === "teal" ? "#2A8B5D" : T.amber;
+    const tint = variant === "teal" ? "rgba(52,164,111,.1)" : "rgba(108,92,231,.08)";
     const filtered = query.trim() ? LANGUAGES.filter(
       (l) => l.label.toLowerCase().includes(query.toLowerCase()) || l.code.toLowerCase().includes(query.toLowerCase())
     ) : LANGUAGES;
@@ -1250,16 +1637,16 @@
       gap: 12,
       padding: "60px 20px 14px",
       background: "#fff",
-      borderBottom: "1px solid rgba(62,76,94,.08)",
+      borderBottom: "1px solid rgba(28,32,51,.08)",
       flexShrink: 0
-    } }, /* @__PURE__ */ React.createElement("button", { onClick: onBack, style: { width: 34, height: 34, borderRadius: 11, display: "grid", placeItems: "center", background: "rgba(62,76,94,.05)", color: T.slate } }, /* @__PURE__ */ React.createElement(Icon, { name: "chevron-left", size: 17 })), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 9.5, letterSpacing: ".14em", textTransform: "uppercase", fontWeight: 700, color: accent } }, targetName), /* @__PURE__ */ React.createElement("h1", { style: { fontFamily: "'Instrument Serif', serif", fontSize: 24, fontWeight: 400, color: T.slate, lineHeight: 1.1 } }, "Choose language"))), /* @__PURE__ */ React.createElement("div", { style: { padding: "0 20px 14px", background: "#fff", flexShrink: 0 } }, /* @__PURE__ */ React.createElement("div", { style: {
+    } }, /* @__PURE__ */ React.createElement("button", { onClick: onBack, style: { width: 34, height: 34, borderRadius: 11, display: "grid", placeItems: "center", background: "rgba(28,32,51,.05)", color: T.slate } }, /* @__PURE__ */ React.createElement(Icon, { name: "chevron-left", size: 17 })), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 9.5, letterSpacing: ".14em", textTransform: "uppercase", fontWeight: 700, color: accent } }, targetName), /* @__PURE__ */ React.createElement("h1", { style: { fontFamily: T.display, fontSize: 24, fontWeight: 700, letterSpacing: "-.02em", color: T.slate, lineHeight: 1.1 } }, "Choose language"))), /* @__PURE__ */ React.createElement("div", { style: { padding: "0 20px 14px", background: "#fff", flexShrink: 0 } }, /* @__PURE__ */ React.createElement("div", { style: {
       display: "flex",
       alignItems: "center",
       gap: 10,
       padding: "11px 13px",
-      background: "rgba(62,76,94,.05)",
+      background: "rgba(28,32,51,.05)",
       borderRadius: 14
-    } }, /* @__PURE__ */ React.createElement(Icon, { name: "search", size: 16, color: "rgba(62,76,94,.4)" }), /* @__PURE__ */ React.createElement(
+    } }, /* @__PURE__ */ React.createElement(Icon, { name: "search", size: 16, color: "rgba(28,32,51,.4)" }), /* @__PURE__ */ React.createElement(
       "input",
       {
         value: query,
@@ -1308,35 +1695,6 @@
     fil: "fil-PH"
   };
   const speechLocale = (code) => SPEECH_LOCALE[code] || code;
-  function OfflineHalf({ side, code, variant, active, disabled, onPress, onRelease }) {
-    return /* @__PURE__ */ React.createElement(
-      "button",
-      {
-        onPointerDown: () => onPress(side),
-        onPointerUp: () => onRelease(side),
-        onPointerLeave: () => active && onRelease(side),
-        disabled,
-        style: {
-          flex: 1,
-          borderRadius: 22,
-          border: "none",
-          padding: 18,
-          background: active ? variant === "amber" ? T.amber : "#2E8E86" : "#fff",
-          color: active ? "#fff" : T.slate,
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-          gap: 8,
-          boxShadow: active ? "0 12px 24px -8px rgba(62,76,94,.35)" : "none",
-          opacity: disabled ? 0.5 : 1
-        }
-      },
-      /* @__PURE__ */ React.createElement(Icon, { name: "mic", size: 26, color: active ? "#fff" : T.slate }),
-      /* @__PURE__ */ React.createElement("div", { style: { fontSize: 15, fontWeight: 600 } }, getLang(code).label),
-      /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, opacity: 0.7 } }, active ? "Release to translate" : "Hold to speak")
-    );
-  }
   function OfflineLiveScreen({ langA, langB, onBack }) {
     var _a, _b, _c, _d;
     const [turns, setTurns] = useState([]);
@@ -1344,14 +1702,18 @@
     const [phase, setPhase] = useState("idle");
     const [error, setError] = useState(null);
     const [partial, setPartial] = useState("");
-    const [picking, setPicking] = useState(null);
-    const [a, setA] = useState(langA);
-    const [b, setB] = useState(langB);
+    const a = langA;
+    const b = langB;
     const [sttLocales, setSttLocales] = useState(null);
+    const [elapsed, setElapsed] = useState(0);
     const listenerRef = useRef(null);
     const startRef = useRef(null);
     const SR = (_b = (_a = window.Capacitor) == null ? void 0 : _a.Plugins) == null ? void 0 : _b.SpeechRecognition;
     const TTS = (_d = (_c = window.Capacitor) == null ? void 0 : _c.Plugins) == null ? void 0 : _d.TextToSpeech;
+    useEffect(() => {
+      const tick = setInterval(() => setElapsed((e) => e + 1), 1e3);
+      return () => clearInterval(tick);
+    }, []);
     useEffect(() => {
       let handle;
       (async () => {
@@ -1473,73 +1835,54 @@
       setPhase("idle");
     }
     const busy = phase !== "idle";
-    const statusText = {
-      idle: "Hold a button to speak",
-      listening: "Listening\u2026",
-      translating: "Translating on device\u2026",
-      speaking: "Speaking\u2026"
-    }[phase];
-    if (picking) {
-      const options = offlineTranslationLanguages();
-      const current = picking === "a" ? a : b;
-      const other = picking === "a" ? b : a;
-      return /* @__PURE__ */ React.createElement("div", { style: { flex: 1, display: "flex", flexDirection: "column", background: T.cream } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12, padding: "60px 22px 14px" } }, /* @__PURE__ */ React.createElement("button", { onClick: () => setPicking(null), style: { width: 34, height: 34, borderRadius: 11, display: "grid", placeItems: "center", background: "rgba(62,76,94,.05)", color: T.slate } }, /* @__PURE__ */ React.createElement(Icon, { name: "chevron-left", size: 17 })), /* @__PURE__ */ React.createElement("h1", { style: { fontFamily: "'Instrument Serif', serif", fontSize: 24, fontWeight: 400, color: T.slate } }, picking === "a" ? "This side speaks" : "Far side speaks")), /* @__PURE__ */ React.createElement("div", { style: { padding: "0 20px 10px", fontSize: 12.5, color: "rgba(62,76,94,.55)" } }, "Only languages that can translate on this device are shown. Cantonese has no offline model on any phone."), /* @__PURE__ */ React.createElement("div", { style: { flex: 1, overflowY: "auto", padding: "0 20px 28px" } }, /* @__PURE__ */ React.createElement("div", { style: { background: "#fff", border: "1px solid rgba(62,76,94,.08)", borderRadius: 18, overflow: "hidden" } }, options.map((code, i) => {
-        const taken = code === other;
-        const locale = speechLocale(code).toLowerCase();
-        const sttKnown = sttLocales === null ? null : sttLocales.some((l) => l === locale || l.startsWith(code + "-") || l === code);
-        return /* @__PURE__ */ React.createElement(
-          "button",
-          {
-            key: code,
-            disabled: taken,
-            onClick: () => {
-              picking === "a" ? setA(code) : setB(code);
-              setPicking(null);
-              setError(null);
-            },
-            style: { width: "100%", padding: "13px 15px", display: "flex", alignItems: "center", gap: 12, borderTop: i ? "1px solid rgba(62,76,94,.06)" : "none", textAlign: "left", opacity: taken ? 0.4 : 1, background: code === current ? "rgba(244,124,54,.06)" : "#fff" }
-          },
-          /* @__PURE__ */ React.createElement("span", { style: { fontSize: 17 } }, getLang(code).flag),
-          /* @__PURE__ */ React.createElement("div", { style: { flex: 1 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 14.5, fontWeight: 600, color: T.slate } }, getLang(code).label), sttKnown === false && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "rgba(62,76,94,.45)", marginTop: 2 } }, "Dictation for this language may need installing")),
-          code === current && /* @__PURE__ */ React.createElement(Icon, { name: "check", size: 16, color: T.amber }),
-          taken && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 11.5, color: "rgba(62,76,94,.45)" } }, "Other side")
-        );
-      }))));
-    }
-    return /* @__PURE__ */ React.createElement("div", { style: { flex: 1, display: "flex", flexDirection: "column", background: T.cream } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12, padding: "60px 22px 10px" } }, /* @__PURE__ */ React.createElement("button", { onClick: onBack, style: { width: 34, height: 34, borderRadius: 11, display: "grid", placeItems: "center", background: "rgba(62,76,94,.05)", color: T.slate } }, /* @__PURE__ */ React.createElement(Icon, { name: "chevron-left", size: 17 })), /* @__PURE__ */ React.createElement("div", { style: { flex: 1 } }, /* @__PURE__ */ React.createElement("h1", { style: { fontFamily: "'Instrument Serif', serif", fontSize: 24, fontWeight: 400, color: T.slate } }, "Offline session")), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 10, fontWeight: 700, letterSpacing: ".1em", textTransform: "uppercase", color: "#2E8E86", background: "#DDF4F1", borderRadius: 99, padding: "5px 9px" } }, "On device")), /* @__PURE__ */ React.createElement("div", { style: { padding: "0 20px 6px", fontSize: 12.5, color: "rgba(62,76,94,.55)" } }, "Nothing is sent to a server. Speech, translation and the spoken reply all happen on this phone."), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, padding: "10px 20px 4px" } }, /* @__PURE__ */ React.createElement("button", { onClick: () => setPicking("a"), style: { flex: 1, padding: "10px 12px", borderRadius: 14, background: "#fff", border: "1px solid rgba(62,76,94,.12)", textAlign: "left" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 9.5, letterSpacing: ".14em", textTransform: "uppercase", color: T.amber, fontWeight: 700 } }, "This side"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 14.5, fontWeight: 600, color: T.slate, marginTop: 2 } }, getLang(a).label)), /* @__PURE__ */ React.createElement(
-      "button",
+    const langAInfo = getLang(a);
+    const langBInfo = getLang(b);
+    const sideStatus = (side) => {
+      if (holding === side) return "Recording";
+      if (phase === "translating") return "Translating...";
+      if (phase === "speaking") return "Speaking...";
+      if (holding) return side === "a" ? "Listening to Person B" : "Listening to Person A";
+      return turns.length ? "Ready - speak again" : "Ready";
+    };
+    const sideTurns = (side) => turns.map((t, i) => ({
+      key: i,
+      turn: t,
+      mine: t.side === side
+    }));
+    const sideNote = (side) => holding === side && partial ? partial : null;
+    return /* @__PURE__ */ React.createElement(
+      LiveSplitView,
       {
-        onClick: () => {
-          setA(b);
-          setB(a);
+        elapsedStr: formatClock(elapsed),
+        onEnd: onBack,
+        badge: "On device",
+        notice: error,
+        sideA: {
+          langInfo: langAInfo,
+          name: "Person A",
+          pressing: holding === "a",
+          disabled: busy && holding !== "a",
+          dimmed: busy && holding !== "a",
+          onDown: () => press("a"),
+          onUp: () => release("a"),
+          status: sideStatus("a"),
+          turns: sideTurns("a"),
+          note: sideNote("a")
         },
-        style: { width: 38, height: 38, borderRadius: 12, background: "rgba(62,76,94,.05)", border: "none", color: T.slate, fontSize: 15 },
-        "aria-label": "Swap languages"
-      },
-      "\u21C4"
-    ), /* @__PURE__ */ React.createElement("button", { onClick: () => setPicking("b"), style: { flex: 1, padding: "10px 12px", borderRadius: 14, background: "#fff", border: "1px solid rgba(62,76,94,.12)", textAlign: "right" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 9.5, letterSpacing: ".14em", textTransform: "uppercase", color: "#2E8E86", fontWeight: 700 } }, "Far side"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 14.5, fontWeight: 600, color: T.slate, marginTop: 2 } }, getLang(b).label))), /* @__PURE__ */ React.createElement("div", { style: { flex: 1, overflowY: "auto", padding: "12px 20px" } }, turns.length === 0 && !partial && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13.5, color: "rgba(62,76,94,.45)", textAlign: "center", marginTop: 28 } }, "Hold either side and speak. The other side hears it translated."), turns.map((t, i) => /* @__PURE__ */ React.createElement("div", { key: i, style: { marginBottom: 14, alignSelf: "flex-start" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 9.5, letterSpacing: ".12em", textTransform: "uppercase", fontWeight: 700, color: t.side === "a" ? T.amber : "#2E8E86", marginBottom: 4 } }, getLang(t.from).label, " \u2192 ", getLang(t.to).label), /* @__PURE__ */ React.createElement("div", { style: { background: "#fff", border: "1px solid rgba(62,76,94,.1)", borderRadius: 16, padding: "11px 13px" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 14.5, lineHeight: 1.45, color: T.slate } }, t.translated), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, color: "rgba(62,76,94,.45)", marginTop: 5, fontStyle: "italic" } }, t.original)))), partial && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13.5, color: "rgba(62,76,94,.5)", fontStyle: "italic", marginTop: 6 } }, partial)), error && /* @__PURE__ */ React.createElement("div", { style: { margin: "0 20px 8px", padding: "10px 12px", background: "#FCE4D5", borderLeft: `3px solid ${T.amber}`, borderRadius: "0 8px 8px 0", fontSize: 12.5, lineHeight: 1.45, color: T.slate } }, error), /* @__PURE__ */ React.createElement("div", { style: { padding: "4px 20px 8px", textAlign: "center", fontSize: 12, fontWeight: 600, color: "rgba(62,76,94,.5)" } }, statusText), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 12, padding: "0 20px 28px" } }, /* @__PURE__ */ React.createElement(
-      OfflineHalf,
-      {
-        side: "a",
-        code: a,
-        variant: "amber",
-        active: holding === "a",
-        disabled: busy && holding !== "a",
-        onPress: press,
-        onRelease: release
+        sideB: {
+          langInfo: langBInfo,
+          name: "Person B",
+          pressing: holding === "b",
+          disabled: busy && holding !== "b",
+          dimmed: busy && holding !== "b",
+          onDown: () => press("b"),
+          onUp: () => release("b"),
+          status: sideStatus("b"),
+          turns: sideTurns("b"),
+          note: sideNote("b")
+        }
       }
-    ), /* @__PURE__ */ React.createElement(
-      OfflineHalf,
-      {
-        side: "b",
-        code: b,
-        variant: "teal",
-        active: holding === "b",
-        disabled: busy && holding !== "b",
-        onPress: press,
-        onRelease: release
-      }
-    )));
+    );
   }
   function HistoryScreen({ onBack, onSession }) {
     const [sessions, setSessions] = useState([]);
@@ -1566,7 +1909,7 @@
     }, []);
     const live = sessions.filter((s) => s.status === "live" || s.status === "active");
     const ended = sessions.filter((s) => s.status !== "live" && s.status !== "active");
-    return /* @__PURE__ */ React.createElement("div", { style: { flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", background: T.cream } }, /* @__PURE__ */ React.createElement("div", { style: { padding: "62px 22px 14px", flexShrink: 0 } }, /* @__PURE__ */ React.createElement("h1", { style: { fontFamily: "'Instrument Serif', serif", fontSize: 34, fontWeight: 400, color: T.slate, lineHeight: 1.05 } }, "History")), /* @__PURE__ */ React.createElement("div", { style: { flex: 1, overflowY: "auto" } }, loading ? /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "center", padding: "40px 0" } }, /* @__PURE__ */ React.createElement(TypingDots, null)) : sessions.length === 0 ? /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", padding: "60px 24px", color: T.textFaint } }, /* @__PURE__ */ React.createElement(Icon, { name: "history", size: 40, color: T.border, style: { margin: "0 auto 12px" } }), /* @__PURE__ */ React.createElement("p", { style: { fontSize: 15 } }, "No sessions yet")) : /* @__PURE__ */ React.createElement("div", { style: { padding: "6px 20px 96px" } }, live.length > 0 && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("p", { style: { fontSize: 10.5, fontWeight: 700, color: "#2E8E86", textTransform: "uppercase", letterSpacing: ".16em", margin: "6px 0 9px" } }, "In progress"), live.map((s) => /* @__PURE__ */ React.createElement("div", { key: s.session_id, style: { background: T.slate, borderRadius: 20, padding: 16, marginBottom: 8 } }, /* @__PURE__ */ React.createElement("button", { onClick: () => onSession(s.session_id), style: { width: "100%", color: T.cream, textAlign: "left" } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8 } }, /* @__PURE__ */ React.createElement("span", { style: { width: 7, height: 7, borderRadius: "50%", background: T.teal, animation: "dot-blink 1.6s ease-in-out infinite" } }), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", fontWeight: 700, color: T.tealSoft } }, "Live \xB7 ", formatDuration(s.duration))), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 17, fontWeight: 600, marginTop: 8 } }, s.topic || "Translation Session"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "rgba(251,243,235,.55)", marginTop: 3 } }, s.caller_name))))), ended.length > 0 && /* @__PURE__ */ React.createElement(React.Fragment, null, live.length > 0 && /* @__PURE__ */ React.createElement("div", { style: { height: 8 } }), /* @__PURE__ */ React.createElement("p", { style: { fontSize: 10.5, fontWeight: 700, color: "rgba(62,76,94,.45)", textTransform: "uppercase", letterSpacing: ".16em", margin: "18px 0 9px" } }, "Past"), ended.map((s) => /* @__PURE__ */ React.createElement(SessionCard, { key: s.session_id, session: s, onClick: () => onSession(s.session_id) })))), /* @__PURE__ */ React.createElement("div", { style: { height: 16 } })));
+    return /* @__PURE__ */ React.createElement("div", { style: { flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", background: T.cream } }, /* @__PURE__ */ React.createElement("div", { style: { padding: "62px 22px 14px", flexShrink: 0 } }, /* @__PURE__ */ React.createElement("h1", { style: { fontFamily: T.display, fontSize: 34, fontWeight: 700, letterSpacing: "-.02em", color: T.slate, lineHeight: 1.05 } }, "History")), /* @__PURE__ */ React.createElement("div", { style: { flex: 1, overflowY: "auto" } }, loading ? /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "center", padding: "40px 0" } }, /* @__PURE__ */ React.createElement(TypingDots, null)) : sessions.length === 0 ? /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", padding: "60px 24px", color: T.textFaint } }, /* @__PURE__ */ React.createElement(Icon, { name: "history", size: 40, color: T.border, style: { margin: "0 auto 12px" } }), /* @__PURE__ */ React.createElement("p", { style: { fontSize: 15 } }, "No sessions yet")) : /* @__PURE__ */ React.createElement("div", { style: { padding: "6px 20px 96px" } }, live.length > 0 && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("p", { style: { fontSize: 10.5, fontWeight: 700, color: "#2A8B5D", textTransform: "uppercase", letterSpacing: ".16em", margin: "6px 0 9px" } }, "In progress"), live.map((s) => /* @__PURE__ */ React.createElement("div", { key: s.session_id, style: { background: T.slate, borderRadius: 20, padding: 16, marginBottom: 8 } }, /* @__PURE__ */ React.createElement("button", { onClick: () => onSession(s.session_id), style: { width: "100%", color: T.cream, textAlign: "left" } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8 } }, /* @__PURE__ */ React.createElement("span", { style: { width: 7, height: 7, borderRadius: "50%", background: T.teal, animation: "dot-blink 1.6s ease-in-out infinite" } }), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", fontWeight: 700, color: T.tealSoft } }, "Live \xB7 ", formatDuration(s.duration))), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 17, fontWeight: 600, marginTop: 8 } }, s.topic || "Translation Session"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "rgba(251,249,247,.55)", marginTop: 3 } }, s.caller_name))))), ended.length > 0 && /* @__PURE__ */ React.createElement(React.Fragment, null, live.length > 0 && /* @__PURE__ */ React.createElement("div", { style: { height: 8 } }), /* @__PURE__ */ React.createElement("p", { style: { fontSize: 10.5, fontWeight: 700, color: "rgba(28,32,51,.45)", textTransform: "uppercase", letterSpacing: ".16em", margin: "18px 0 9px" } }, "Past"), ended.map((s) => /* @__PURE__ */ React.createElement(SessionCard, { key: s.session_id, session: s, onClick: () => onSession(s.session_id) })))), /* @__PURE__ */ React.createElement("div", { style: { height: 16 } })));
   }
   function SessionDetailScreen({ sessionId, onBack }) {
     const [detail, setDetail] = useState(null);
@@ -1581,13 +1924,13 @@
       };
     }, [sessionId]);
     const transcript = (detail == null ? void 0 : detail.transcript) || [];
-    return /* @__PURE__ */ React.createElement("div", { style: { flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", background: T.cream } }, /* @__PURE__ */ React.createElement("div", { style: { padding: "58px 20px 16px", background: T.slate, borderRadius: "0 0 28px 28px" } }, /* @__PURE__ */ React.createElement("button", { onClick: onBack, style: { width: 34, height: 34, borderRadius: 11, display: "grid", placeItems: "center", background: "rgba(251,243,235,.1)", color: T.cream } }, /* @__PURE__ */ React.createElement(Icon, { name: "chevron-left", size: 17 })), /* @__PURE__ */ React.createElement("h1", { style: { fontFamily: "'Instrument Serif', serif", fontSize: 27, fontWeight: 400, color: T.cream, marginTop: 14, lineHeight: 1.15 } }, (detail == null ? void 0 : detail.topic) || "Translation session"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "rgba(251,243,235,.55)", marginTop: 6 } }, (detail == null ? void 0 : detail.caller_name) || sessionId)), /* @__PURE__ */ React.createElement("div", { style: { flex: 1, overflowY: "auto", padding: "18px 20px 40px" } }, /* @__PURE__ */ React.createElement("div", { style: { background: "#fff", border: "1px solid rgba(244,124,54,.18)", borderRadius: 20, padding: 16 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, letterSpacing: ".16em", textTransform: "uppercase", color: T.amber, fontWeight: 700 } }, "Automated notes"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13.5, lineHeight: 1.5, color: T.slate, marginTop: 11 } }, transcript.length ? `${transcript.length} translated conversation turn${transcript.length === 1 ? "" : "s"} recorded.` : "Notes will appear after translated conversation turns are recorded.")), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, letterSpacing: ".16em", textTransform: "uppercase", color: "rgba(62,76,94,.45)", fontWeight: 700, margin: "20px 0 10px" } }, "Full transcript"), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 12 } }, transcript.map((t, i) => /* @__PURE__ */ React.createElement("div", { key: i, style: { alignSelf: i % 2 ? "flex-end" : "flex-start", maxWidth: "86%" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 9.5, letterSpacing: ".12em", textTransform: "uppercase", fontWeight: 700, color: i % 2 ? "#2E8E86" : T.amber, marginBottom: 4 } }, t.speaker_name || "Speaker"), /* @__PURE__ */ React.createElement("div", { style: { background: i % 2 ? "#fff" : "rgba(244,124,54,.06)", border: `1px solid ${i % 2 ? "rgba(88,191,180,.2)" : "rgba(244,124,54,.16)"}`, borderRadius: 16, padding: "11px 13px", fontSize: 14.5, lineHeight: 1.45, color: T.slate } }, t.original), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, color: "rgba(62,76,94,.42)", marginTop: 4, fontStyle: "italic" } }, t.translated))))));
+    return /* @__PURE__ */ React.createElement("div", { style: { flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", background: T.cream } }, /* @__PURE__ */ React.createElement("div", { style: { padding: "58px 20px 16px", background: T.slate, borderRadius: "0 0 28px 28px" } }, /* @__PURE__ */ React.createElement("button", { onClick: onBack, style: { width: 34, height: 34, borderRadius: 11, display: "grid", placeItems: "center", background: "rgba(251,249,247,.1)", color: T.cream } }, /* @__PURE__ */ React.createElement(Icon, { name: "chevron-left", size: 17 })), /* @__PURE__ */ React.createElement("h1", { style: { fontFamily: T.display, fontSize: 27, fontWeight: 700, letterSpacing: "-.02em", color: T.cream, marginTop: 14, lineHeight: 1.15 } }, (detail == null ? void 0 : detail.topic) || "Translation session"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "rgba(251,249,247,.55)", marginTop: 6 } }, (detail == null ? void 0 : detail.caller_name) || sessionId)), /* @__PURE__ */ React.createElement("div", { style: { flex: 1, overflowY: "auto", padding: "18px 20px 40px" } }, /* @__PURE__ */ React.createElement("div", { style: { background: "#fff", border: "1px solid rgba(108,92,231,.18)", borderRadius: 20, padding: 16 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, letterSpacing: ".16em", textTransform: "uppercase", color: T.amber, fontWeight: 700 } }, "Automated notes"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13.5, lineHeight: 1.5, color: T.slate, marginTop: 11 } }, transcript.length ? `${transcript.length} translated conversation turn${transcript.length === 1 ? "" : "s"} recorded.` : "Notes will appear after translated conversation turns are recorded.")), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, letterSpacing: ".16em", textTransform: "uppercase", color: "rgba(28,32,51,.45)", fontWeight: 700, margin: "20px 0 10px" } }, "Full transcript"), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 12 } }, transcript.map((t, i) => /* @__PURE__ */ React.createElement("div", { key: i, style: { alignSelf: i % 2 ? "flex-end" : "flex-start", maxWidth: "86%" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 9.5, letterSpacing: ".12em", textTransform: "uppercase", fontWeight: 700, color: i % 2 ? "#2A8B5D" : T.amber, marginBottom: 4 } }, t.speaker_name || "Speaker"), /* @__PURE__ */ React.createElement("div", { style: { background: i % 2 ? "#fff" : "rgba(108,92,231,.06)", border: `1px solid ${i % 2 ? "rgba(52,164,111,.2)" : "rgba(108,92,231,.16)"}`, borderRadius: 16, padding: "11px 13px", fontSize: 14.5, lineHeight: 1.45, color: T.slate } }, t.original), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, color: "rgba(28,32,51,.42)", marginTop: 4, fontStyle: "italic" } }, t.translated))))));
   }
   function OfflinePanel({ children }) {
-    return /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 20 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, letterSpacing: ".16em", textTransform: "uppercase", color: "rgba(62,76,94,.45)", fontWeight: 700, marginBottom: 9 } }, "Offline translation"), /* @__PURE__ */ React.createElement("div", { style: { background: "#fff", border: "1px solid rgba(62,76,94,.08)", borderRadius: 18, overflow: "hidden" } }, children));
+    return /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 20 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, letterSpacing: ".16em", textTransform: "uppercase", color: "rgba(28,32,51,.45)", fontWeight: 700, marginBottom: 9 } }, "Offline translation"), /* @__PURE__ */ React.createElement("div", { style: { background: "#fff", border: "1px solid rgba(28,32,51,.08)", borderRadius: 18, overflow: "hidden" } }, children));
   }
   function OfflineNote({ children }) {
-    return /* @__PURE__ */ React.createElement("div", { style: { padding: "14px 15px", fontSize: 13, lineHeight: 1.5, color: "rgba(62,76,94,.6)" } }, children);
+    return /* @__PURE__ */ React.createElement("div", { style: { padding: "14px 15px", fontSize: 13, lineHeight: 1.5, color: "rgba(28,32,51,.6)" } }, children);
   }
   function OfflineTranslationSection({ onStart }) {
     const engine = offlineEngine();
@@ -1613,7 +1956,7 @@
       setBusy(code);
       setError(null);
       try {
-        await downloadOfflineModels(["en", code]);
+        await downloadOfflinePair("en", code);
         await refresh();
       } catch (err) {
         setError(`Could not download ${getLang(code).label}. Check your connection and try again.`);
@@ -1627,17 +1970,17 @@
     if (!engine) {
       return /* @__PURE__ */ React.createElement(OfflinePanel, null, /* @__PURE__ */ React.createElement(OfflineNote, null, "Offline translation is not available in this version. Sessions need a connection."));
     }
-    return /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement(OfflinePanel, null, /* @__PURE__ */ React.createElement("div", { style: { padding: "13px 15px", borderBottom: "1px solid rgba(62,76,94,.06)", fontSize: 12.5, lineHeight: 1.5, color: "rgba(62,76,94,.62)" } }, canDownload ? "Download a language to translate it to and from English with no connection. Each is about 30MB, so use Wi-Fi." : "Languages you have downloaded on this device can be translated to and from English with no connection. Add more in Settings \u203A Apps \u203A Translate \u203A Downloaded Languages.", " ", "Cantonese has no offline model on any phone and always needs a connection."), supported.map((code, i) => {
+    return /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement(OfflinePanel, null, /* @__PURE__ */ React.createElement("div", { style: { padding: "13px 15px", borderBottom: "1px solid rgba(28,32,51,.06)", fontSize: 12.5, lineHeight: 1.5, color: "rgba(28,32,51,.62)" } }, canDownload ? "Download a language to translate it to and from English with no connection. Each is about 30MB, so use Wi-Fi." : "Languages you have downloaded on this device can be translated to and from English with no connection. Add more in Settings \u203A Apps \u203A Translate \u203A Downloaded Languages.", " ", "Cantonese has no offline model on any phone and always needs a connection."), supported.map((code, i) => {
       const status = statuses ? statuses[code] : void 0;
-      return /* @__PURE__ */ React.createElement("div", { key: code, style: { padding: "12px 15px", display: "flex", alignItems: "center", gap: 12, borderTop: i ? "1px solid rgba(62,76,94,.06)" : "none" } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 17 } }, getLang(code).flag), /* @__PURE__ */ React.createElement("div", { style: { flex: 1, fontSize: 14.5, fontWeight: 600, color: T.slate } }, getLang(code).label), statuses === null && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: "rgba(62,76,94,.4)" } }, "Checking\\u2026"), status === "installed" && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, fontWeight: 600, color: "#2E8E86" } }, "On device"), status === "unsupported" && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: "rgba(62,76,94,.35)" } }, "Not available"), status === "supported" && (canDownload ? /* @__PURE__ */ React.createElement(
+      return /* @__PURE__ */ React.createElement("div", { key: code, style: { padding: "12px 15px", display: "flex", alignItems: "center", gap: 12, borderTop: i ? "1px solid rgba(28,32,51,.06)" : "none" } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 17 } }, getLang(code).flag), /* @__PURE__ */ React.createElement("div", { style: { flex: 1, fontSize: 14.5, fontWeight: 600, color: T.slate } }, getLang(code).label), statuses === null && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: "rgba(28,32,51,.4)" } }, "Checking\\u2026"), status === "installed" && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, fontWeight: 600, color: "#2A8B5D" } }, "On device"), status === "unsupported" && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: "rgba(28,32,51,.35)" } }, "Not available"), status === "supported" && (canDownload ? /* @__PURE__ */ React.createElement(
         "button",
         {
           onClick: () => handleDownload(code),
           disabled: busy === code,
-          style: { fontSize: 12.5, fontWeight: 600, color: busy === code ? "rgba(62,76,94,.4)" : T.amber, background: "transparent", border: "none", padding: "4px 2px" }
+          style: { fontSize: 12.5, fontWeight: 600, color: busy === code ? "rgba(28,32,51,.4)" : T.amber, background: "transparent", border: "none", padding: "4px 2px" }
         },
         busy === code ? "Downloading\u2026" : "Download"
-      ) : /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: "rgba(62,76,94,.45)" } }, "In iPhone Settings")));
+      ) : /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: "rgba(28,32,51,.45)" } }, "In iPhone Settings")));
     })), onStart && /* @__PURE__ */ React.createElement(
       "button",
       {
@@ -1649,7 +1992,7 @@
           marginBottom: 18,
           background: "#fff",
           color: T.slate,
-          border: "1px solid rgba(62,76,94,.14)",
+          border: "1px solid rgba(28,32,51,.14)",
           borderRadius: 18,
           fontSize: 15,
           fontWeight: 600,
@@ -1661,9 +2004,21 @@
       },
       /* @__PURE__ */ React.createElement(Icon, { name: "mic", size: 17, color: T.slate }),
       "Start an offline session"
-    ), error && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#C0453B", marginTop: -12, marginBottom: 16, paddingLeft: 2 } }, error));
+    ), error && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#D93A5C", marginTop: -12, marginBottom: 16, paddingLeft: 2 } }, error));
   }
-  function SettingsScreen({ onStartOffline }) {
+  function SubscriptionSection({ tier, secondsLeft, onUpgrade }) {
+    const pro = tier === "pro";
+    return /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 20 } }, /* @__PURE__ */ React.createElement("div", { style: { fontFamily: T.mono, fontSize: 10.5, letterSpacing: ".16em", textTransform: "uppercase", color: "rgba(28,32,51,.45)", fontWeight: 700, marginBottom: 9 } }, "Subscription"), /* @__PURE__ */ React.createElement("div", { style: { background: T.surface, border: `1px solid ${T.hairline}`, borderRadius: 18, overflow: "hidden" } }, /* @__PURE__ */ React.createElement("div", { style: { padding: "15px 16px" } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "baseline", gap: 8 } }, /* @__PURE__ */ React.createElement("div", { style: { fontFamily: T.display, fontSize: 20, fontWeight: 700, letterSpacing: "-.02em", color: T.slate } }, pro ? "Voca Pro" : "Free"), pro && /* @__PURE__ */ React.createElement("div", { style: { fontFamily: T.mono, fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase", fontWeight: 700, color: secondsLeft > 0 ? T.tealDeep : T.error } }, formatMinutes(secondsLeft), " left")), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12.5, lineHeight: 1.5, color: T.inkMute, marginTop: 4, textWrap: "pretty" } }, pro ? `${PLAN_MINUTES} minutes of cloud translation each month, then on-device translation stays available.` : "On-device translation, free and unlimited, for the language pairs your phone can do without a network."), pro && /* @__PURE__ */ React.createElement("div", { style: { height: 6, borderRadius: 99, background: "rgba(28,32,51,.08)", marginTop: 11, overflow: "hidden" } }, /* @__PURE__ */ React.createElement("div", { style: { height: "100%", borderRadius: 99, background: T.amber, width: `${Math.round(100 * Math.max(0, secondsLeft) / (PLAN_MINUTES * 60))}%` } }))), /* @__PURE__ */ React.createElement(
+      "button",
+      {
+        onClick: onUpgrade,
+        style: { width: "100%", padding: "14px 16px", borderTop: "1px solid rgba(28,32,51,.06)", display: "flex", alignItems: "center", gap: 12, textAlign: "left" }
+      },
+      /* @__PURE__ */ React.createElement("div", { style: { flex: 1, fontSize: 14.5, fontWeight: 600, color: pro ? T.slate : T.amber } }, pro ? "Manage or restore purchase" : `Upgrade to Pro \u2014 ${PLAN_PRICE_FALLBACK}/mo`),
+      /* @__PURE__ */ React.createElement(Icon, { name: "chevron", size: 16, color: "rgba(28,32,51,.3)", style: { transform: "rotate(180deg)" } })
+    )));
+  }
+  function SettingsScreen({ onStartOffline, tier = "free", secondsLeft = 0, onUpgrade }) {
     const [values, setValues] = useState({ notes: true, save: true, autoplay: true, haptics: true, large: false });
     const groups = [
       ["Session", [["notes", "Automated notes", "Summarise each session when it ends"], ["save", "Save transcripts", "Keep full text on this device"], ["autoplay", "Speak translations aloud", "Play synthesised voice on the other half"]]],
@@ -1672,7 +2027,7 @@
     const links = [
       ["Privacy policy", "How microphone audio and transcripts are handled", `${apiBase()}/privacy`]
     ];
-    return /* @__PURE__ */ React.createElement("div", { style: { flex: 1, overflowY: "auto", background: T.cream } }, /* @__PURE__ */ React.createElement("div", { style: { padding: "62px 22px 14px" } }, /* @__PURE__ */ React.createElement("h1", { style: { fontFamily: "'Instrument Serif', serif", fontSize: 34, fontWeight: 400, color: T.slate } }, "Settings")), /* @__PURE__ */ React.createElement("div", { style: { padding: "6px 20px 96px" } }, groups.map(([title, rows]) => /* @__PURE__ */ React.createElement("div", { key: title, style: { marginBottom: 20 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, letterSpacing: ".16em", textTransform: "uppercase", color: "rgba(62,76,94,.45)", fontWeight: 700, marginBottom: 9 } }, title), /* @__PURE__ */ React.createElement("div", { style: { background: "#fff", border: "1px solid rgba(62,76,94,.08)", borderRadius: 18, overflow: "hidden" } }, rows.map(([key, label, hint], i) => /* @__PURE__ */ React.createElement("button", { key, onClick: () => setValues((v) => ({ ...v, [key]: !v[key] })), style: { width: "100%", padding: "14px 15px", display: "flex", alignItems: "center", gap: 12, borderTop: i ? "1px solid rgba(62,76,94,.06)" : "none", textAlign: "left" } }, /* @__PURE__ */ React.createElement("div", { style: { flex: 1 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 14.5, fontWeight: 600, color: T.slate } }, label), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, color: "rgba(62,76,94,.48)", marginTop: 2 } }, hint)), /* @__PURE__ */ React.createElement("div", { style: { width: 44, height: 26, borderRadius: 99, background: values[key] ? T.amber : "rgba(62,76,94,.16)", padding: 3, display: "flex", justifyContent: values[key] ? "flex-end" : "flex-start" } }, /* @__PURE__ */ React.createElement("div", { style: { width: 20, height: 20, borderRadius: "50%", background: "#fff", boxShadow: "0 1px 3px rgba(0,0,0,.25)" } }))))))), /* @__PURE__ */ React.createElement(OfflineTranslationSection, { onStart: onStartOffline }), /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 20 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, letterSpacing: ".16em", textTransform: "uppercase", color: "rgba(62,76,94,.45)", fontWeight: 700, marginBottom: 9 } }, "Legal"), /* @__PURE__ */ React.createElement("div", { style: { background: "#fff", border: "1px solid rgba(62,76,94,.08)", borderRadius: 18, overflow: "hidden" } }, links.map(([label, hint, href], i) => /* @__PURE__ */ React.createElement("a", { key: label, href, rel: "noopener noreferrer", style: { width: "100%", padding: "14px 15px", display: "flex", alignItems: "center", gap: 12, borderTop: i ? "1px solid rgba(62,76,94,.06)" : "none", textAlign: "left", textDecoration: "none" } }, /* @__PURE__ */ React.createElement("div", { style: { flex: 1 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 14.5, fontWeight: 600, color: T.slate } }, label), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, color: "rgba(62,76,94,.48)", marginTop: 2 } }, hint)), /* @__PURE__ */ React.createElement(Icon, { name: "chevron-left", size: 16, color: "rgba(62,76,94,.3)" })))))));
+    return /* @__PURE__ */ React.createElement("div", { style: { flex: 1, overflowY: "auto", background: T.cream } }, /* @__PURE__ */ React.createElement("div", { style: { padding: "62px 22px 14px" } }, /* @__PURE__ */ React.createElement("h1", { style: { fontFamily: T.display, fontSize: 34, fontWeight: 700, letterSpacing: "-.02em", color: T.slate } }, "Settings")), /* @__PURE__ */ React.createElement("div", { style: { padding: "6px 20px 96px" } }, groups.map(([title, rows]) => /* @__PURE__ */ React.createElement("div", { key: title, style: { marginBottom: 20 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, letterSpacing: ".16em", textTransform: "uppercase", color: "rgba(28,32,51,.45)", fontWeight: 700, marginBottom: 9 } }, title), /* @__PURE__ */ React.createElement("div", { style: { background: "#fff", border: "1px solid rgba(28,32,51,.08)", borderRadius: 18, overflow: "hidden" } }, rows.map(([key, label, hint], i) => /* @__PURE__ */ React.createElement("button", { key, onClick: () => setValues((v) => ({ ...v, [key]: !v[key] })), style: { width: "100%", padding: "14px 15px", display: "flex", alignItems: "center", gap: 12, borderTop: i ? "1px solid rgba(28,32,51,.06)" : "none", textAlign: "left" } }, /* @__PURE__ */ React.createElement("div", { style: { flex: 1 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 14.5, fontWeight: 600, color: T.slate } }, label), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, color: "rgba(28,32,51,.48)", marginTop: 2 } }, hint)), /* @__PURE__ */ React.createElement("div", { style: { width: 44, height: 26, borderRadius: 99, background: values[key] ? T.amber : "rgba(28,32,51,.16)", padding: 3, display: "flex", justifyContent: values[key] ? "flex-end" : "flex-start" } }, /* @__PURE__ */ React.createElement("div", { style: { width: 20, height: 20, borderRadius: "50%", background: "#fff", boxShadow: "0 1px 3px rgba(0,0,0,.25)" } }))))))), /* @__PURE__ */ React.createElement(SubscriptionSection, { tier, secondsLeft, onUpgrade }), /* @__PURE__ */ React.createElement(OfflineTranslationSection, { onStart: onStartOffline }), /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 20 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, letterSpacing: ".16em", textTransform: "uppercase", color: "rgba(28,32,51,.45)", fontWeight: 700, marginBottom: 9 } }, "Legal"), /* @__PURE__ */ React.createElement("div", { style: { background: "#fff", border: "1px solid rgba(28,32,51,.08)", borderRadius: 18, overflow: "hidden" } }, links.map(([label, hint, href], i) => /* @__PURE__ */ React.createElement("a", { key: label, href, rel: "noopener noreferrer", style: { width: "100%", padding: "14px 15px", display: "flex", alignItems: "center", gap: 12, borderTop: i ? "1px solid rgba(28,32,51,.06)" : "none", textAlign: "left", textDecoration: "none" } }, /* @__PURE__ */ React.createElement("div", { style: { flex: 1 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 14.5, fontWeight: 600, color: T.slate } }, label), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, color: "rgba(28,32,51,.48)", marginTop: 2 } }, hint)), /* @__PURE__ */ React.createElement(Icon, { name: "chevron-left", size: 16, color: "rgba(28,32,51,.3)", style: { transform: "rotate(180deg)" } })))))));
   }
   function ErrorScreen({ type, onRetry, onBack }) {
     const isMic = type === "mic";
@@ -1694,7 +2049,7 @@
       alignItems: "center",
       justifyContent: "center",
       marginBottom: 20
-    } }, /* @__PURE__ */ React.createElement(Icon, { name: isMic ? "mic-off" : "wifi-off", size: 36, color: T.error })), /* @__PURE__ */ React.createElement("h2", { style: { fontFamily: "'Instrument Serif', serif", fontSize: 28, fontWeight: 400, marginBottom: 8, textAlign: "center", color: T.navy, lineHeight: 1.1 } }, isMic ? "Microphone access required" : "Connection failed"), /* @__PURE__ */ React.createElement("p", { style: { fontSize: 13.5, color: T.inkMute, textAlign: "center", lineHeight: 1.55, maxWidth: 280, marginBottom: 32 } }, isMic ? "Voca needs microphone access to translate speech. Allow it for Voca in your device settings, then try again." : "Unable to connect to the translation server. Please check your connection and try again."), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 10, width: "100%", maxWidth: 280 } }, /* @__PURE__ */ React.createElement(
+    } }, /* @__PURE__ */ React.createElement(Icon, { name: isMic ? "mic-off" : "wifi-off", size: 36, color: T.error })), /* @__PURE__ */ React.createElement("h2", { style: { fontFamily: T.display, fontSize: 28, fontWeight: 700, letterSpacing: "-.02em", marginBottom: 8, textAlign: "center", color: T.navy, lineHeight: 1.1 } }, isMic ? "Microphone access required" : "Connection failed"), /* @__PURE__ */ React.createElement("p", { style: { fontSize: 13.5, color: T.inkMute, textAlign: "center", lineHeight: 1.55, maxWidth: 280, marginBottom: 32 } }, isMic ? "Voca needs microphone access to translate speech. Allow it for Voca in your device settings, then try again." : "Unable to connect to the translation server. Please check your connection and try again."), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 10, width: "100%", maxWidth: 280 } }, /* @__PURE__ */ React.createElement(
       "button",
       {
         onClick: onRetry,
@@ -1705,7 +2060,7 @@
           borderRadius: 18,
           fontSize: 16,
           fontWeight: 600,
-          boxShadow: "0 12px 24px -8px rgba(244,124,54,.6)"
+          boxShadow: "0 12px 24px -8px rgba(108,92,231,.6)"
         }
       },
       "Try again"
@@ -1726,7 +2081,91 @@
       "Go back"
     )));
   }
+  function PaywallScreen({ reason = "upsell", balance, langA, langB, onClose, onPurchased }) {
+    const [busy, setBusy] = useState(null);
+    const [error, setError] = useState(null);
+    const heading = reason === "exhausted" ? "You are out of minutes" : reason === "unsupported" ? "This pair needs Voca Pro" : "Voca Pro";
+    const lede = reason === "exhausted" ? `Your ${PLAN_MINUTES} minutes reset at the start of next month. Until then you can keep translating on-device, free.` : reason === "unsupported" ? `${getLang(langA).label} to ${getLang(langB).label} has no on-device model, so it needs the cloud engine.` : "Natural two-way conversation, translated live by a voice on each side.";
+    async function run(kind, fn) {
+      setBusy(kind);
+      setError(null);
+      try {
+        const result = await fn();
+        if (result.status === "cancelled") return;
+        if (result.status === "pending") {
+          setError("Your purchase is awaiting approval. Minutes appear as soon as it clears.");
+          return;
+        }
+        if (result.status !== "purchased") {
+          setError(kind === "restore" ? "No previous subscription found on this account." : "The purchase did not complete.");
+          return;
+        }
+        const fresh = await activateEntitlement({ receipt: result.receipt, reachable: true });
+        if (fresh.tier !== "pro") {
+          setError("The store confirmed a purchase but it could not be verified. No charge has been kept \u2014 please contact support.");
+          return;
+        }
+        await acknowledgeIfNeeded(result.raw);
+        onPurchased(fresh);
+      } catch (err) {
+        setError(
+          String(err == null ? void 0 : err.message) === "in_app_purchase_unavailable" ? "Purchases are only available in the App Store and Google Play builds." : "Something went wrong reaching the store. Please try again."
+        );
+      } finally {
+        setBusy(null);
+      }
+    }
+    const [price, setPrice] = useState(PLAN_PRICE_FALLBACK);
+    useEffect(() => {
+      let active = true;
+      storePrice().then((p) => {
+        if (active && p) setPrice(p);
+      });
+      return () => {
+        active = false;
+      };
+    }, []);
+    const perks = [
+      ["mic", "Two live voices", "Each person hears the other in their own language, in the moment."],
+      ["globe", "Every language pair", "All eleven languages, including the pairs no phone can do on-device."],
+      ["clock", `${PLAN_MINUTES} minutes a month`, "Minutes count real conversation, not time the app sits idle."]
+    ];
+    return /* @__PURE__ */ React.createElement("div", { style: { flex: 1, display: "flex", flexDirection: "column", overflowY: "auto", background: T.bg } }, /* @__PURE__ */ React.createElement("div", { style: { padding: "54px 22px 0", flexShrink: 0 } }, /* @__PURE__ */ React.createElement("button", { onClick: onClose, style: { width: 34, height: 34, borderRadius: 11, display: "grid", placeItems: "center", background: "rgba(28,32,51,.05)", color: T.slate }, "aria-label": "Close" }, /* @__PURE__ */ React.createElement(Icon, { name: "chevron-left", size: 17 }))), /* @__PURE__ */ React.createElement("div", { style: { padding: "18px 22px 0" } }, /* @__PURE__ */ React.createElement("div", { style: { fontFamily: T.mono, fontSize: 10, letterSpacing: ".16em", textTransform: "uppercase", color: T.amber, fontWeight: 700 } }, reason === "exhausted" ? "Monthly allowance" : "Upgrade"), /* @__PURE__ */ React.createElement("h1", { style: { fontFamily: T.display, fontSize: 33, fontWeight: 700, letterSpacing: "-.025em", color: T.slate, lineHeight: 1.05, marginTop: 8 } }, heading), /* @__PURE__ */ React.createElement("p", { style: { fontSize: 14, lineHeight: 1.55, color: T.inkMute, marginTop: 10, textWrap: "pretty" } }, lede)), balance && balance.tier === "pro" && /* @__PURE__ */ React.createElement("div", { style: { margin: "18px 20px 0", background: T.surface, border: `1px solid ${T.hairline}`, borderRadius: 18, padding: "14px 16px" } }, /* @__PURE__ */ React.createElement("div", { style: { fontFamily: T.mono, fontSize: 9.5, letterSpacing: ".14em", textTransform: "uppercase", color: T.inkMute, fontWeight: 700 } }, "Remaining this month"), /* @__PURE__ */ React.createElement("div", { style: { fontFamily: T.display, fontSize: 26, fontWeight: 700, letterSpacing: "-.02em", color: T.slate, marginTop: 4 } }, formatMinutes(balance.seconds_remaining)), /* @__PURE__ */ React.createElement("div", { style: { height: 6, borderRadius: 99, background: "rgba(28,32,51,.08)", marginTop: 10, overflow: "hidden" } }, /* @__PURE__ */ React.createElement("div", { style: {
+      height: "100%",
+      borderRadius: 99,
+      background: T.amber,
+      width: `${balance.seconds_total ? Math.round(100 * balance.seconds_remaining / balance.seconds_total) : 0}%`
+    } }))), /* @__PURE__ */ React.createElement("div", { style: { padding: "18px 20px 0", display: "flex", flexDirection: "column", gap: 8 } }, perks.map(([icon, title, body]) => /* @__PURE__ */ React.createElement("div", { key: title, style: { display: "flex", gap: 12, background: T.surface, border: `1px solid ${T.hairline}`, borderRadius: 18, padding: "14px 15px" } }, /* @__PURE__ */ React.createElement("div", { style: { width: 38, height: 38, flexShrink: 0, borderRadius: 12, background: T.inkA08, color: T.amber, display: "grid", placeItems: "center" } }, /* @__PURE__ */ React.createElement(Icon, { name: icon, size: 18 })), /* @__PURE__ */ React.createElement("div", { style: { minWidth: 0 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 14.5, fontWeight: 600, color: T.slate } }, title), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, lineHeight: 1.45, color: T.inkMute, marginTop: 2, textWrap: "pretty" } }, body))))), /* @__PURE__ */ React.createElement("div", { style: { padding: "20px 20px 0" } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "baseline", justifyContent: "center", gap: 6 } }, /* @__PURE__ */ React.createElement("span", { style: { fontFamily: T.display, fontSize: 34, fontWeight: 700, letterSpacing: "-.025em", color: T.slate } }, price), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 14, color: T.inkMute } }, "/ month")), /* @__PURE__ */ React.createElement("p", { style: { textAlign: "center", fontSize: 11.5, color: T.textFaint, marginTop: 6 } }, "Renews monthly. Cancel any time in your store account.")), /* @__PURE__ */ React.createElement("div", { style: { padding: "16px 20px 0" } }, error && /* @__PURE__ */ React.createElement("div", { style: { background: T.errorLight, color: T.error, borderRadius: 14, padding: "11px 13px", fontSize: 12.5, lineHeight: 1.45, marginBottom: 10 } }, error), /* @__PURE__ */ React.createElement(
+      "button",
+      {
+        onClick: () => run("purchase", purchasePro),
+        disabled: Boolean(busy),
+        style: {
+          width: "100%",
+          height: 62,
+          background: T.amber,
+          color: "#fff",
+          border: "none",
+          borderRadius: 20,
+          fontSize: 17,
+          fontWeight: 600,
+          opacity: busy ? 0.6 : 1,
+          boxShadow: "0 12px 26px -8px rgba(108,92,231,.6)"
+        }
+      },
+      busy === "purchase" ? "Contacting the store\u2026" : `Subscribe \u2014 ${price}/mo`
+    ), /* @__PURE__ */ React.createElement(
+      "button",
+      {
+        onClick: () => run("restore", restorePurchases),
+        disabled: Boolean(busy),
+        style: { width: "100%", height: 46, marginTop: 8, background: "none", border: "none", color: T.amber, fontSize: 13.5, fontWeight: 600 }
+      },
+      busy === "restore" ? "Checking\u2026" : "Restore a previous purchase"
+    )), /* @__PURE__ */ React.createElement("div", { style: { padding: "10px 24px 32px" } }, /* @__PURE__ */ React.createElement("button", { onClick: onClose, style: { width: "100%", background: "none", border: "none", color: T.inkMute, fontSize: 13, fontWeight: 600, padding: "10px 0" } }, reason === "unsupported" ? "Pick another language pair" : "Keep translating on-device, free")));
+  }
   function App() {
+    var _a;
     const [screen, setScreen] = useState("home");
     const [tab, setTab] = useState("home");
     const [sessionConfig, setSessionConfig] = useState(null);
@@ -1736,6 +2175,47 @@
     const [langPickSide, setLangPickSide] = useState("a");
     const [detailSessionId, setDetailSessionId] = useState(null);
     const [pendingMicConfig, setPendingMicConfig] = useState(null);
+    const [balance, setBalance] = useState(null);
+    const [paywallReason, setPaywallReason] = useState("upsell");
+    const [offlinePref, setOfflinePref] = useState(readOfflinePref);
+    const tier = (balance == null ? void 0 : balance.tier) === "pro" ? "pro" : "free";
+    const secondsLeft = (_a = balance == null ? void 0 : balance.seconds_remaining) != null ? _a : 0;
+    const metered = (balance == null ? void 0 : balance.enforced) !== false;
+    const cloudAllowed = tier === "pro" || !metered;
+    const offlineMode = offlinePref === null ? tier !== "pro" : offlinePref;
+    function setOfflineMode(value) {
+      setOfflinePref(value);
+      writeOfflinePref(value);
+    }
+    const syncEntitlement = useCallback(async () => {
+      try {
+        const { receipt, reachable } = await currentReceipt();
+        const fresh = !reachable && !receipt ? await fetchBalance() : await activateEntitlement({ receipt, reachable });
+        setBalance(fresh);
+        return fresh;
+      } catch (error) {
+        console.warn("Could not sync entitlement:", error);
+        return null;
+      }
+    }, []);
+    useEffect(() => {
+      let active = true;
+      (async () => {
+        if (active) await syncEntitlement();
+      })();
+      const off = onEntitlementChanged(() => {
+        syncEntitlement();
+      });
+      return () => {
+        active = false;
+        off();
+      };
+    }, [syncEntitlement]);
+    useEffect(() => {
+      const live = screen === "live-face" || screen === "live-auto" || screen === "live-offline";
+      if (tier === "free" && metered && !live && balance) showFreeTierBanner();
+      else hideFreeTierBanner();
+    }, [tier, screen, balance]);
     function goTab(t) {
       setTab(t);
       if (t === "home") setScreen("home");
@@ -1747,6 +2227,18 @@
       setSessionConfig(cfg);
       setLangA(cfg.langA);
       setLangB(cfg.langB);
+      if (offlineMode && canTranslateOffline(cfg.langA, cfg.langB)) {
+        return setScreen("live-offline");
+      }
+      if (!cloudAllowed) {
+        if (canTranslateOffline(cfg.langA, cfg.langB)) return setScreen("live-offline");
+        setPaywallReason("unsupported");
+        return setScreen("paywall");
+      }
+      if (metered && secondsLeft <= 0) {
+        setPaywallReason("exhausted");
+        return setScreen("paywall");
+      }
       setScreen("live-face");
     }
     function handleStart(cfg) {
@@ -1801,13 +2293,13 @@
               setLangA(langB);
               setLangB(langA);
             },
-            onHistory: () => {
-              setTab("history");
-              setScreen("history");
-            },
-            onSession: (id) => {
-              setDetailSessionId(id);
-              setScreen("detail");
+            tier,
+            secondsLeft,
+            offlineMode,
+            onOfflineChange: setOfflineMode,
+            onUpgrade: () => {
+              setPaywallReason(tier === "pro" && secondsLeft <= 0 ? "exhausted" : "upsell");
+              setScreen("paywall");
             }
           }
         );
@@ -1849,6 +2341,12 @@
           FaceToFaceLiveScreen,
           {
             config: sessionConfig,
+            budgetSeconds: metered ? secondsLeft : Infinity,
+            onUsage: (sessionId, seconds) => reportUsage(sessionId, seconds).then((b) => b && setBalance(b)),
+            onExhausted: () => {
+              setPaywallReason("exhausted");
+              setScreen("paywall");
+            },
             onStop: handleStop,
             onError: handleError
           }
@@ -1873,7 +2371,10 @@
         content = /* @__PURE__ */ React.createElement(SessionDetailScreen, { sessionId: detailSessionId, onBack: () => setScreen("history") });
         break;
       case "settings":
-        content = /* @__PURE__ */ React.createElement(SettingsScreen, { onStartOffline: () => setScreen("live-offline") });
+        content = /* @__PURE__ */ React.createElement(SettingsScreen, { onStartOffline: () => setScreen("live-offline"), tier, secondsLeft, onUpgrade: () => {
+          setPaywallReason(tier === "pro" && secondsLeft <= 0 ? "exhausted" : "upsell");
+          setScreen("paywall");
+        } });
         break;
       case "live-offline":
         content = /* @__PURE__ */ React.createElement(
@@ -1882,8 +2383,33 @@
             langA,
             langB,
             onBack: () => {
-              setTab("settings");
-              setScreen("settings");
+              setTab("home");
+              setScreen("home");
+            }
+          }
+        );
+        break;
+      case "paywall":
+        content = /* @__PURE__ */ React.createElement(
+          PaywallScreen,
+          {
+            reason: paywallReason,
+            balance,
+            langA,
+            langB,
+            onClose: () => {
+              setTab("home");
+              setScreen("home");
+            },
+            onPurchased: (fresh) => {
+              var _a2;
+              setBalance(fresh);
+              hideFreeTierBanner();
+              if (sessionConfig && ((_a2 = fresh == null ? void 0 : fresh.seconds_remaining) != null ? _a2 : 0) > 0) setScreen("live-face");
+              else {
+                setTab("home");
+                setScreen("home");
+              }
             }
           }
         );
