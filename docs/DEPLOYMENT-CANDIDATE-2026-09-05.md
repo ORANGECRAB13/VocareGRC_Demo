@@ -1,7 +1,7 @@
 # Android and Pro deployment candidate — 5 September 2026
 
-Status: local candidate built and verified; NOT approved for a paid production release.
-Source: `voca-redesign-subscriptions`, based on `8931435`, with uncommitted fixes in
+Status: verified code deployed to Azure; paid Pro enforcement remains disabled pending Play credentials.
+Source: `voca-redesign-subscriptions`, runtime commit `f7f4f4d`, in
 `F:\voca\qa-redesign-subscriptions`. The original `F:\voca` checkout is preserved.
 The branch README was not used.
 
@@ -84,9 +84,15 @@ The branch README was not used.
 
 ## Production handoff
 
-The inspected live app is `vocare-grc-bot` in resource group `vocare-grc`; it uses Azure LLM routing
-and the agent translation engine. Its inspected environment-variable configuration lacked Play verification
-credentials and entitlement flags. Redis configuration was present. No live settings were changed.
+The live app is `vocare-grc-bot` in resource group `vocare-grc`; it uses Azure LLM routing
+and the agent translation engine. Its environment-variable configuration lacks Play verification
+credentials and entitlement flags. Redis configuration is present. No live settings were changed.
+
+Runtime commit `f7f4f4d` was built from the pinned base, passed the disposable-container smoke test, and was
+published as immutable digest `sha256:c7743a3013197117a3e0cf78a66232ea1648b82d7872ad69c17e5b93b232d13e`.
+Azure revision `vocare-grc-bot--subf7f4f4d` became healthy and received 100% traffic. Live `/healthz`,
+`/vocare`, and the free entitlement response were verified after cutover. The previous revision remains
+available in Container Apps' inactive revision history for rollback.
 
 Do not use the legacy deployment workflow's different app/resource-group target for this candidate.
 The new `verify-redesign.yml` workflow verifies and uploads QA artifacts only; it does not deploy.
@@ -96,7 +102,8 @@ use `STORE_ALLOW_SANDBOX=false`, and run `python scripts/check-pro-config.py --m
 That preflight checks configuration shape only. Rebuild the final Android and backend artifacts after configuration changes.
 Push the reviewed backend candidate to ACR, resolve its immutable digest, and deploy that digest to the verified target.
 Verify the new revision's readiness, health endpoint, entitlement behavior, and traffic before declaring deployment complete.
-Retain the previous live revision/digest for rollback. No commit, push, store upload or deployment has been performed.
+Retain the previous live revision/digest for rollback. The branch was committed and pushed and Azure was deployed;
+no Play Store upload was performed and paid entitlement enforcement was not enabled.
 
 References: [Play Billing versions](https://developer.android.com/google/play/billing/deprecation-faq),
 [subscription lifecycle](https://developer.android.com/google/play/billing/lifecycle/subscriptions),
