@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -43,7 +45,7 @@ android {
     // CI that only runs assembleDebug keeps working.
     val keystoreProperties = rootProject.file("keystore.properties")
     if (keystoreProperties.exists()) {
-        val props = java.util.Properties().apply { keystoreProperties.inputStream().use { load(it) } }
+        val props = Properties().apply { keystoreProperties.inputStream().use { load(it) } }
         signingConfigs {
             create("release") {
                 storeFile = file(props.getProperty("storeFile"))

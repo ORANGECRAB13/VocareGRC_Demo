@@ -95,6 +95,19 @@ class CloudSessionViewModel(
     private var setupJob: Job? = null
     private var tornDown = false
 
+    /**
+     * Side A's pc_id, kept for turn attribution only. `SideRuntime.pcId` is
+     * cleared by [teardown]; if attribution read that, every turn already in the
+     * transcript would be re-attributed by the `original_lang` fallback the
+     * moment the session ends (and to side B outright when the backend sends no
+     * `original_lang`). This copy is never cleared.
+     */
+    private var attributionPcIdA: String? = null
+
+    /** Latched synchronously so a second End tap cannot persist a second `ended` record. */
+    private var ending = false
+    private var finishing = false
+
     private val _state = MutableStateFlow(render())
     val state: StateFlow<LiveState> = _state.asStateFlow()
 
@@ -174,6 +187,7 @@ class CloudSessionViewModel(
             ),
         )
         runtime.pcId = answer.pcId
+        if (side == Side.A) attributionPcIdA = answer.pcId
         runtime.leg?.setAnswer(answer.sdp, answer.type)
     }
 
@@ -321,7 +335,7 @@ class CloudSessionViewModel(
 
     /** §3.8 attribution: `speaker == pc_id_a`, falling back to `original_lang == langA`. */
     private fun sideFor(speaker: String?, originalLang: String?): Side {
-        val pcIdA = sides.getValue(Side.A).pcId
+        val pcIdA = attributionPcIdA
         return if (speaker != null && pcIdA != null) {
             if (speaker == pcIdA) Side.A else Side.B
         } else {
@@ -365,7 +379,8 @@ class CloudSessionViewModel(
 
     /** User pressed End. */
     fun end() {
-        if (phase is SessionPhase.Ended) return
+        if (ending || phase is SessionPhase.Ended) return
+        ending = true
         scope.launch {
             reportElapsed()
             finish(EndReason.USER)
@@ -373,7 +388,11 @@ class CloudSessionViewModel(
     }
 
     private suspend fun finish(reason: EndReason) {
-        if (phase is SessionPhase.Ended) return
+        // `persist` suspends, so the phase check alone is not enough: two End
+        // taps (or End racing `closed:true`) would both get past it and write
+        // two `ended` records. Latch before the first suspension point.
+        if (phase is SessionPhase.Ended || finishing) return
+        finishing = true
         persist(STATUS_ENDED)
         phase = SessionPhase.Ended
         _endReason.value = reason
@@ -382,7 +401,7 @@ class CloudSessionViewModel(
     }
 
     private fun fail(error: SessionError, message: String) {
-        if (phase is SessionPhase.Ended) return
+        if (phase is SessionPhase.Ended || finishing) return
         connState = message
         phase = SessionPhase.Error(error)
         teardown()

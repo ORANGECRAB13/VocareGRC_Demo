@@ -67,15 +67,15 @@ class PlayPurchasesService(
      */
     suspend fun syncEntitlement(): Balance {
         val subject = clientId()
+        val client = store ?: return api.entitlement(subject)
         val held: HeldPurchase? = try {
-            store?.currentEntitlement()
+            client.currentEntitlement()
         } catch (_: StoreUnavailableException) {
             return api.entitlement(subject)
         }
-        if (store == null) return api.entitlement(subject)
         val fresh = api.activate(subject, receipt = held?.purchaseToken.orEmpty(), storeReachable = true)
         if (held != null && fresh.verified == true && fresh.isPro && !held.acknowledged) {
-            runCatching { store.acknowledge(held.purchaseToken) }
+            runCatching { client.acknowledge(held.purchaseToken) }
         }
         return fresh
     }
@@ -90,8 +90,9 @@ class PlayPurchasesService(
         // Only now is it safe to acknowledge; an unacknowledged purchase is
         // auto-refunded, which is the correct outcome if verification failed.
         if (!alreadyAcknowledged) {
+            val client = store ?: return PurchaseOutcome.Failed("in_app_purchase_unavailable")
             try {
-                store!!.acknowledge(token)
+                client.acknowledge(token)
             } catch (e: Exception) {
                 return PurchaseOutcome.Failed("acknowledge_failed: ${e.message}")
             }

@@ -125,6 +125,10 @@ class RetrofitVocaApi internal constructor(private val service: VocaService) : V
 
     companion object {
         val json: Json = Json {
+            // The backend expects `type:"offer"`, `platform:"android"` and `topic`
+            // on the wire; without this kotlinx-serialization drops every field
+            // that happens to equal its Kotlin default (CONTRACT §2).
+            encodeDefaults = true
             ignoreUnknownKeys = true
             explicitNulls = false
             coerceInputValues = true
