@@ -1,0 +1,27 @@
+# Gradle / build output
+.gradle/
+.kotlin/
+build/
+*/build/
+*.apk
+*.aab
+*.aar
+*.dex
+*.class
+
+# Local machine configuration — never committed
+local.properties
+
+# Release signing material
+*.jks
+*.keystore
+keystore.properties
+
+# IDE
+.idea/
+*.iml
+captures/
+.externalNativeBuild
+.cxx/
+*.log
+*.hprof

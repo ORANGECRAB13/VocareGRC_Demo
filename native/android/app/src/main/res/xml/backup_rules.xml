@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 11 and below. The Room history database holds conversation transcripts
+     and is excluded so translated content never leaves the device via Auto Backup.
+     Filenames must stay in sync with HistoryDatabase.NAME. -->
+<full-backup-content>
+    <exclude domain="database" path="vocare_translation_history.db" />
+    <exclude domain="database" path="vocare_translation_history.db-wal" />
+    <exclude domain="database" path="vocare_translation_history.db-shm" />
+    <exclude domain="database" path="vocare_translation_history.db-journal" />
+</full-backup-content>
