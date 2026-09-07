@@ -1,47 +1,43 @@
-# Environment & secrets
+# Secrets and local configuration
 .env
-*.env
 .env.*
 !.env.example
+*.pem
+*.p12
+*.jks
+*.keystore
 
 # Python
 __pycache__/
 *.py[cod]
-*.pyo
-*.pyd
-.Python
-*.egg-info/
-dist/
-build/
+.pytest_cache/
 .venv/
 venv/
-env/
 
-# Database
-*.db
-*.sqlite
-*.sqlite3
-
-# Logs
-*.log
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Node
+# Node / Capacitor
 node_modules/
 
-# Docker build artifacts
-wheelhouse-linux/
+# Apple build and user state
+ios/**/build/
+ios/**/xcuserdata/
+ios/**/.swiftpm/
+DerivedData/
 
-# IDE
-.vscode/
+# Local databases and logs
+*.db
+*.sqlite*
+*.log
+
+# Editors and operating systems
+.DS_Store
 .idea/
-*.swp
+.vscode/
 
-# Load test artifacts
-.venv-loadtest/
-.venv-voice-tests/
-loadtest/sample_ulaw_8k.raw
-loadtest/report*.csv
+.tools/
+
+# Native app build artefacts (native/ios, native/android)
+# SwiftPM resolves WebRTC + GoogleMobileAds xcframeworks into .build (~134MB).
+native/ios/**/.build/
+native/ios/**/.swiftpm/
+native/ios/**/xcuserdata/
+native/**/DerivedData/

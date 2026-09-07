@@ -1,0 +1,10 @@
+{
+  "tier": "free",
+  "period": "2026-09",
+  "seconds_total": 0,
+  "seconds_used": 0,
+  "seconds_remaining": 0,
+  "durable": true,
+  "enforced": false,
+  "sandbox_ok": false
+}

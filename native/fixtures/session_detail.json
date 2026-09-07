@@ -1,0 +1,77 @@
+{
+  "session_id": "GRC-qa_Fixture_Session",
+  "caller_name": "Alex",
+  "lang": "en",
+  "topic": "Translation Session",
+  "status": "ended",
+  "transcript": [
+    {
+      "type": "turn",
+      "speaker": "pc-a-3f9c1d2e",
+      "speaker_name": "Alex",
+      "original": "Hello, welcome to the clinic.",
+      "original_lang": "en",
+      "translated": "你好，欢迎来到诊所。",
+      "translated_lang": "zh"
+    },
+    {
+      "type": "turn",
+      "speaker": "pc-b-7b41e0aa",
+      "speaker_name": "Mei",
+      "original": "你好，我今天早上预约了。",
+      "original_lang": "zh",
+      "translated": "Hello, I have an appointment this morning.",
+      "translated_lang": "en"
+    },
+    {
+      "type": "turn",
+      "speaker": "pc-a-3f9c1d2e",
+      "speaker_name": "Alex",
+      "original": "Can I have your name and date of birth?",
+      "original_lang": "en",
+      "translated": "请告诉我您的姓名和出生日期。",
+      "translated_lang": "zh"
+    },
+    {
+      "type": "turn",
+      "speaker": "pc-b-7b41e0aa",
+      "speaker_name": "Mei",
+      "original": "我叫李美，1990年3月5日出生。",
+      "original_lang": "zh",
+      "translated": "My name is Li Mei, born on the 5th of March 1990.",
+      "translated_lang": "en"
+    },
+    {
+      "type": "turn",
+      "speaker": "pc-a-3f9c1d2e",
+      "speaker_name": "Alex",
+      "original": "Thank you. Please take a seat.",
+      "original_lang": "en",
+      "translated": "谢谢。请坐。",
+      "translated_lang": "zh"
+    },
+    {
+      "type": "turn",
+      "speaker": "pc-b-7b41e0aa",
+      "speaker_name": "Mei",
+      "original": "好的，谢谢。",
+      "original_lang": "zh",
+      "translated": "Okay, thank you.",
+      "translated_lang": "en"
+    }
+  ],
+  "live_transcripts": {},
+  "live_previews": {},
+  "participants": [
+    {
+      "pc_id": "pc-a-3f9c1d2e",
+      "name": "Alex",
+      "language": "en"
+    },
+    {
+      "pc_id": "pc-b-7b41e0aa",
+      "name": "Mei",
+      "language": "zh"
+    }
+  ]
+}

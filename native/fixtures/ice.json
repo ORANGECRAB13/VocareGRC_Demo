@@ -1,0 +1,22 @@
+{
+  "iceServers": [
+    {
+      "urls": "stun:global.stun.twilio.com:3478"
+    },
+    {
+      "urls": "turn:global.turn.twilio.com:3478?transport=udp",
+      "username": "FIXTURE_USERNAME",
+      "credential": "FIXTURE_CREDENTIAL"
+    },
+    {
+      "urls": "turn:global.turn.twilio.com:3478?transport=tcp",
+      "username": "FIXTURE_USERNAME",
+      "credential": "FIXTURE_CREDENTIAL"
+    },
+    {
+      "urls": "turn:global.turn.twilio.com:443?transport=tcp",
+      "username": "FIXTURE_USERNAME",
+      "credential": "FIXTURE_CREDENTIAL"
+    }
+  ]
+}

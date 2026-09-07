@@ -187,7 +187,18 @@ public struct SessionConfig { langA, langB, nameA, nameB, clientId, budgetSecond
 public struct LiveState { sideA: SideState; sideB: SideState; elapsed: TimeInterval; phase: .connecting/.live/.ended/.error(SessionError); badge: String? }
 public struct SideState { name, langCode, langLabel, pressing: Bool, disabled: Bool, status: String, turns: [TurnView], note: String? }
 public struct LiveSplitView: View { init(state: LiveState, onHold:(Side)->Void, onRelease:(Side)->Void, onEnd:()->Void) }  // in VocaSession/UI, used by VocaKit/Screens
-public protocol OfflineEngine { pairStatus(a,b) async -> PairStatus; prepare(a,b) async throws -> Bool; recognize(locale:, partial:) async throws -> String; translate(text, from, to) async throws -> String; speak(text, locale) async }
+public protocol OfflineEngine: Sendable {   // VocaSession/Offline; AppleOfflineEngine is the real one
+  func pairStatus(_ a: String, _ b: String) async -> PairStatus
+  func prepare(_ a: String, _ b: String) async throws -> Bool                // false = user declined (not an error)
+  func startRecognition(locale: String, partial: @escaping @Sendable (String) -> Void) async throws  // hold: returns once listening
+  func finishRecognition() async throws -> String                            // release: final transcript
+  func cancelRecognition() async                                             // teardown
+  func translate(_ text: String, from: String, to: String) async throws -> String
+  func speak(_ text: String, locale: String) async throws                    // throws when no local voice
+}
+// Recognition is split into start/finish because hold-and-release cannot be expressed as one call.
+// Cloud view model also accepts optional `legFactory:`/`scheduler:`/`microphone:` for tests; the §6 3-arg init is the production one.
+// LiveSplitView takes an optional `onSwap:` (offline only); `LiveState.notice` carries the offline error strip.
 ```
 Design tokens (`VocaTheme`) and `Icon` live in `VocaKit/Design` and are imported by `VocaSession/UI` — so `VocaSession` depends on `VocaKit`, not the reverse. `VocaKit/Screens/LiveScreen` just hosts `LiveSplitView` with the right view model.
 

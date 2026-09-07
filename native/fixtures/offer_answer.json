@@ -1,0 +1,5 @@
+{
+  "pc_id": "pc-a-3f9c1d2e",
+  "sdp": "v=0\r\no=- 3957051234 3957051234 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\na=msid-semantic:WMS *\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\nc=IN IP4 0.0.0.0\r\na=sendrecv\r\na=mid:0\r\na=rtcp-mux\r\na=candidate:1 1 udp 41885439 203.0.113.10 49152 typ relay raddr 0.0.0.0 rport 0\r\na=ice-ufrag:fixture\r\na=ice-pwd:fixturefixturefixturefix\r\na=fingerprint:sha-256 00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF\r\na=setup:active\r\na=rtpmap:111 opus/48000/2\r\na=fmtp:111 minptime=10;useinbandfec=1\r\n",
+  "type": "answer"
+}

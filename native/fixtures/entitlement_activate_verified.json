@@ -1,0 +1,11 @@
+{
+  "tier": "pro",
+  "period": "2026-09",
+  "seconds_total": 3600,
+  "seconds_used": 0,
+  "seconds_remaining": 3600,
+  "durable": true,
+  "enforced": true,
+  "sandbox_ok": false,
+  "verified": true
+}

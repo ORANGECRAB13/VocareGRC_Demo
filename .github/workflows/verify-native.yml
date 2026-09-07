@@ -1,0 +1,77 @@
+name: Verify native apps
+
+on:
+  pull_request:
+    paths:
+      - 'native/**'
+      - 'tests/**'
+      - 'scripts/verify-native.sh'
+      - 'bot.py'
+      - '.github/workflows/verify-native.yml'
+  push:
+    branches: [native-apps]
+  workflow_dispatch:
+
+jobs:
+  contract:
+    name: Backend contract tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: In-process contract tests (bot.py handlers)
+        run: python -m unittest tests.test_native_api_contract tests.test_entitlement_lifecycle tests.test_store_entitlements -v
+      - name: Live contract tests (only when the VOCARE_API_BASE secret is set)
+        if: ${{ secrets.VOCARE_API_BASE != '' }}
+        env:
+          VOCARE_API_BASE: ${{ secrets.VOCARE_API_BASE }}
+        run: python -m unittest tests.test_native_api_contract -v
+
+  ios:
+    name: iOS build and test
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.2.app || sudo xcode-select -s "$(ls -d /Applications/Xcode_16*.app | tail -n1)"
+      - name: Build and test with xcodebuild
+        run: |
+          set -eu
+          PROJECT="$(ls -d native/ios/*.xcodeproj 2>/dev/null | head -n1 || true)"
+          if [ -z "$PROJECT" ]; then echo "::warning::native/ios has no .xcodeproj yet; skipping"; exit 0; fi
+          DEST="platform=iOS Simulator,name=iPhone 16"
+          xcodebuild -project "$PROJECT" -scheme VocaApp -destination "$DEST" CODE_SIGNING_ALLOWED=NO build
+          xcodebuild -project "$PROJECT" -scheme VocaApp -destination "$DEST" CODE_SIGNING_ALLOWED=NO -resultBundlePath TestResults.xcresult test
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios-test-results
+          path: TestResults.xcresult
+          if-no-files-found: ignore
+
+  android:
+    name: Android build and unit tests
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+      - name: Compile and unit-test
+        run: |
+          set -eu
+          if [ ! -f native/android/gradlew ]; then echo "::warning::native/android has no gradlew yet; skipping"; exit 0; fi
+          cd native/android
+          bash gradlew assembleDebug testDebugUnitTest --no-daemon
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-native-debug
+          path: |
+            native/android/app/build/outputs/apk/debug/*.apk
+            native/android/**/build/reports/tests/**
+          if-no-files-found: ignore

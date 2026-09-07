@@ -1,0 +1,152 @@
+{
+  "session_id": "GRC-qa_Fixture_Session",
+  "pc_id_a": "pc-a-3f9c1d2e",
+  "pc_id_b": "pc-b-7b41e0aa",
+  "lang_a": "en",
+  "lang_b": "zh",
+  "name_a": "Alex",
+  "name_b": "Mei",
+  "expected": {
+    "turns_spoken_by_a": 3,
+    "turns_spoken_by_b": 3,
+    "panel_a_translated_count": 3,
+    "panel_b_translated_count": 3,
+    "turn_failed_sides": [
+      "B"
+    ],
+    "closes_on_frame_index": 10,
+    "ignored_event_types": [
+      "status",
+      "live"
+    ]
+  },
+  "frames": [
+    {
+      "events": [],
+      "closed": false
+    },
+    {
+      "events": [
+        {
+          "type": "status",
+          "status": "live"
+        }
+      ],
+      "closed": false
+    },
+    {
+      "events": [
+        {
+          "type": "live",
+          "speaker": "pc-a-3f9c1d2e",
+          "speaker_name": "Alex",
+          "text": "Hello, welcome"
+        }
+      ],
+      "closed": false
+    },
+    {
+      "events": [
+        {
+          "type": "turn",
+          "speaker": "pc-a-3f9c1d2e",
+          "speaker_name": "Alex",
+          "original": "Hello, welcome to the clinic.",
+          "original_lang": "en",
+          "translated": "你好，欢迎来到诊所。",
+          "translated_lang": "zh"
+        }
+      ],
+      "closed": false
+    },
+    {
+      "events": [],
+      "closed": false
+    },
+    {
+      "events": [
+        {
+          "type": "turn",
+          "speaker": "pc-b-7b41e0aa",
+          "speaker_name": "Mei",
+          "original": "你好，我今天早上预约了。",
+          "original_lang": "zh",
+          "translated": "Hello, I have an appointment this morning.",
+          "translated_lang": "en"
+        }
+      ],
+      "closed": false
+    },
+    {
+      "events": [
+        {
+          "type": "turn",
+          "speaker": "pc-a-3f9c1d2e",
+          "speaker_name": "Alex",
+          "original": "Can I have your name and date of birth?",
+          "original_lang": "en",
+          "translated": "请告诉我您的姓名和出生日期。",
+          "translated_lang": "zh"
+        }
+      ],
+      "closed": false
+    },
+    {
+      "events": [
+        {
+          "type": "turn_failed",
+          "speaker": "pc-b-7b41e0aa",
+          "speaker_name": "Mei",
+          "reason": "translation timed out"
+        }
+      ],
+      "closed": false
+    },
+    {
+      "events": [
+        {
+          "type": "turn",
+          "speaker": "pc-b-7b41e0aa",
+          "speaker_name": "Mei",
+          "original": "我叫李美，1990年3月5日出生。",
+          "original_lang": "zh",
+          "translated": "My name is Li Mei, born on the 5th of March 1990.",
+          "translated_lang": "en"
+        }
+      ],
+      "closed": false
+    },
+    {
+      "events": [
+        {
+          "type": "turn",
+          "speaker": "pc-a-3f9c1d2e",
+          "speaker_name": "Alex",
+          "original": "Thank you. Please take a seat.",
+          "original_lang": "en",
+          "translated": "谢谢。请坐。",
+          "translated_lang": "zh"
+        },
+        {
+          "type": "turn",
+          "speaker": "pc-b-7b41e0aa",
+          "speaker_name": "Mei",
+          "original": "好的，谢谢。",
+          "original_lang": "zh",
+          "translated": "Okay, thank you.",
+          "translated_lang": "en"
+        }
+      ],
+      "closed": false
+    },
+    {
+      "events": [
+        {
+          "type": "status",
+          "status": "ended"
+        }
+      ],
+      "closed": true
+    }
+  ]
+}
