@@ -326,6 +326,7 @@ enum Fixtures {
             .deletingLastPathComponent() // Tests
             .deletingLastPathComponent() // VocaKit
             .deletingLastPathComponent() // ios
+            .deletingLastPathComponent() // native
             .appendingPathComponent("fixtures")
     }
 

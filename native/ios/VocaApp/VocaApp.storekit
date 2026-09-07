@@ -1,0 +1,60 @@
+{
+  "identifier" : "A1B2C3D4-0000-4000-8000-000000000001",
+  "nonRenewingSubscriptions" : [
+
+  ],
+  "products" : [
+
+  ],
+  "settings" : {
+    "_applicationInternalID" : "vocare.translate.local",
+    "_developerTeamID" : "DZZNRYF752",
+    "_failTransactionsEnabled" : false,
+    "_lastSynchronizedDate" : 0,
+    "_locale" : "en_AU",
+    "_storefront" : "AUS",
+    "_storeKitErrors" : [
+
+    ]
+  },
+  "subscriptionGroups" : [
+    {
+      "id" : "A1B2C3D4-0000-4000-8000-000000000010",
+      "localizations" : [
+
+      ],
+      "name" : "Voca",
+      "subscriptions" : [
+        {
+          "adHocOffers" : [
+
+          ],
+          "codeOffers" : [
+
+          ],
+          "displayPrice" : "29.99",
+          "familyShareable" : false,
+          "groupNumber" : 1,
+          "internalID" : "A1B2C3D4-0000-4000-8000-000000000011",
+          "introductoryOffer" : null,
+          "localizations" : [
+            {
+              "description" : "60 minutes of live two-way translation each month.",
+              "displayName" : "Voca Pro",
+              "locale" : "en_AU"
+            }
+          ],
+          "productID" : "vocare_pro_monthly",
+          "recurringSubscriptionPeriod" : "P1M",
+          "referenceName" : "Voca Pro Monthly",
+          "subscriptionGroupID" : "A1B2C3D4-0000-4000-8000-000000000010",
+          "type" : "RecurringSubscription"
+        }
+      ]
+    }
+  ],
+  "version" : {
+    "major" : 3,
+    "minor" : 0
+  }
+}

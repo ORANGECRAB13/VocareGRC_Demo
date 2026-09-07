@@ -245,7 +245,8 @@ final class APIClientTests: XCTestCase {
         } else {
             StubProtocol.enqueue(json: #"{"session_id":"GRC-1","caller_name":"Person A","lang":"en","topic":"T","status":"ended","transcript":[{"type":"turn","speaker":"pc-a","original_lang":"en","original":"Hi","translated":"嗨"}],"live_transcripts":{}}"#)
         }
-        let detail = try XCTUnwrap(try await client.session(id: "GRC-1"))
+        let fetched = try await client.session(id: "GRC-1")
+        let detail = try XCTUnwrap(fetched)
         XCTAssertFalse(detail.sessionId.isEmpty)
         XCTAssertFalse(detail.transcript.isEmpty)
         XCTAssertEqual(StubProtocol.requests.last?.request.url?.path, "/api/translation/session/GRC-1")

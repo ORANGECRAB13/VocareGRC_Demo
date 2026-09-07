@@ -366,7 +366,11 @@ private struct TranslationHostView: View {
     var body: some View {
         Color.clear
             .translationTask(configuration) { session in
-                await work(session)
+                // `TranslationSession` is not Sendable and SwiftUI hands it to us on
+                // the main actor; the work closure awaits it on the cooperative pool.
+                // Only one closure ever touches the value, so the hop is safe.
+                nonisolated(unsafe) let handed = session
+                await work(handed)
             }
             .onAppear {
                 configuration = TranslationSession.Configuration(source: source, target: target)

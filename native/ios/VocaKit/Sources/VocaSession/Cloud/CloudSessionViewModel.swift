@@ -29,11 +29,16 @@ public final class CloudSessionViewModel: ObservableObject {
     private var sessionId: String?
     private var legs: [Side: PeerLeg] = [:]
     private var pcIds: [Side: String] = [:]
+    /// Leg A's pc_id, kept past teardown: the transcript is re-projected after
+    /// the session ends and turn attribution still has to work.
+    private var speakerPcIdA: String?
     private var transcript: [SessionTurn] = []
     private var elapsedSeconds = 0
     private var connectionNote = "Connecting…"
     private var phase: LivePhase = .connecting
     private var tornDown = false
+    /// `end()` is called from a button; two taps must not persist twice.
+    private var ending = false
 
     // Push-to-talk
     private var pressing: [Side: Bool] = [.a: false, .b: false]
@@ -73,7 +78,8 @@ public final class CloudSessionViewModel: ObservableObject {
 
     /// End pressed: persist, report usage, hang up, done.
     public func end() {
-        guard !tornDown else { return }
+        guard !tornDown, !ending else { return }
+        ending = true
         tasks.track { [weak self] in
             guard let self else { return }
             await self.persistSession(status: "ended")
@@ -139,6 +145,7 @@ public final class CloudSessionViewModel: ObservableObject {
             ))
             if tornDown { return }
             pcIds[.a] = answerA.pcId
+            speakerPcIdA = answerA.pcId
             try await legA.setRemoteAnswer(sdp: answerA.sdp, type: answerA.type)
             if tornDown { return }
 
@@ -259,7 +266,7 @@ public final class CloudSessionViewModel: ObservableObject {
             case "turn_failed":
                 // The server gave up on this turn; release the speaker now
                 // instead of waiting for the 36s client fallback.
-                markTurnReady(event.speaker == pcIds[.a] ? .a : .b)
+                markTurnReady(event.speaker == speakerPcIdA ? .a : .b)
             default:
                 break // status and unknown types are ignored
             }
@@ -280,7 +287,7 @@ public final class CloudSessionViewModel: ObservableObject {
     /// Attribute by `speaker == pc_id`; fall back to the original language.
     private func spokenBy(_ turn: SessionTurn) -> Side {
         if let speaker = turn.speaker, !speaker.isEmpty {
-            return speaker == pcIds[.a] ? .a : .b
+            return speaker == speakerPcIdA ? .a : .b
         }
         return turn.originalLang == config.langA ? .a : .b
     }
