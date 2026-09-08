@@ -299,37 +299,60 @@ class CloudSessionViewModel(
 
     // ── §3.6/§3.8 poll ───────────────────────────────────────────────────────
 
+    /**
+     * Drives the poll cadence, but does not perform the request.
+     *
+     * Awaiting `api.poll` inline made the real period `1s + round trip`, so on
+     * a phone talking to Australia East every cycle ran late and translated
+     * text arrived behind the audio, which comes over WebRTC and is unaffected
+     * by any of this. That was reported from a device against the iOS build
+     * before the same shape was found here.
+     *
+     * Each request is launched instead, so the cadence stays at
+     * [POLL_INTERVAL_MS] whatever the network is doing. Overlapping polls are
+     * fine: the queue lives on the server, so two concurrent reads split the
+     * pending events between them rather than duplicating anything.
+     */
     private fun startPoll() {
         if (pollJob != null) return
         pollJob = scope.launch {
             while (isActive) {
                 delay(POLL_INTERVAL_MS)
                 val id = sessionId ?: continue
-                val response = try {
-                    api.poll(id)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    continue
-                }
-                if (tornDown) return@launch
-                var gotTurn = false
-                for (event in response.events) {
-                    when {
-                        event.isTurn -> {
-                            gotTurn = true
-                            handleTurn(event)
-                        }
-                        event.isTurnFailed -> markReady(sideFor(event.speaker, event.originalLang))
-                        else -> Unit // status, live and unknown types are ignored
-                    }
-                }
-                if (gotTurn) persist(STATUS_ACTIVE)
-                if (response.closed) {
-                    finish(EndReason.SERVER_CLOSED)
-                    return@launch
-                }
+                launch { pollOnce(id) }
             }
+        }
+    }
+
+    private suspend fun pollOnce(id: String) {
+        val response = try {
+            api.poll(id)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            return
+        }
+        if (tornDown) return
+        var gotTurn = false
+        for (event in response.events) {
+            when {
+                event.isTurn -> {
+                    gotTurn = true
+                    handleTurn(event)
+                }
+                event.isTurnFailed -> markReady(sideFor(event.speaker, event.originalLang))
+                else -> Unit // status, live and unknown types are ignored
+            }
+        }
+        if (gotTurn) persist(STATUS_ACTIVE)
+        if (response.closed) {
+            // On the outer scope on purpose. This runs inside a child of
+            // `pollJob`, and `finish` tears the session down — which cancels
+            // `pollJob` and every child, this one included. Calling it here
+            // would cancel the coroutine part way through ending the session,
+            // leaving the loops alive and the session never finished. `finish`
+            // latches, so overlapping polls both seeing `closed` is harmless.
+            scope.launch { finish(EndReason.SERVER_CLOSED) }
         }
     }
 

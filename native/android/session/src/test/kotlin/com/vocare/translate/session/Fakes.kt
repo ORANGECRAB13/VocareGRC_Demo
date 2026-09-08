@@ -1,5 +1,7 @@
 package com.vocare.translate.session
 
+import kotlinx.coroutines.delay
+
 import com.vocare.translate.core.api.ApiException
 import com.vocare.translate.core.api.VocaApi
 import com.vocare.translate.core.history.SessionHistoryStore
@@ -134,8 +136,16 @@ class FakeVocaApi(
         }
     }
 
+    /**
+     * Set to simulate network round-trip time. The poll cadence must not
+     * depend on it: awaiting the request inside the loop made the real period
+     * `interval + rtt`, which is what put translated text behind the audio.
+     */
+    var pollLatencyMillis: Long = 0
+
     override suspend fun poll(sessionId: String): PollResponse {
         pollCalls++
+        if (pollLatencyMillis > 0) delay(pollLatencyMillis)
         return if (pollFrames.isEmpty()) PollResponse() else pollFrames.removeAt(0)
     }
 

@@ -443,4 +443,60 @@ class CloudSessionViewModelTest {
         assertEquals(1, record.transcript.size)
         assertEquals("你好", record.transcript[0].translated)
     }
+
+    // ── poll cadence (§3.6/§3.8) ─────────────────────────────────────────────
+
+    /**
+     * Reported from a device against iOS first: translated audio arrived on
+     * time and the text lagged behind it. Audio comes over WebRTC, text only
+     * appears when the client next polls, so the lag was entirely in this loop.
+     * Awaiting the request inline made the real period `interval + round trip`.
+     *
+     * Ten seconds of virtual time with a 400ms round trip: a loop that awaits
+     * inline manages 7 polls, one that only paces itself manages 10.
+     */
+    @Test
+    fun `poll cadence does not degrade when the network is slow`() = runSessionTest {
+        val api = FakeVocaApi()
+        api.pollLatencyMillis = 400
+        val h = harness(config, api = api)
+
+        h.tick(10_000)
+
+        assertTrue(
+            "poll rate collapsed to interval + rtt: ${h.api.pollCalls} polls in 10s",
+            h.api.pollCalls >= 9,
+        )
+    }
+
+    /**
+     * A slow poll must not push the next one out, which means two can be in
+     * flight at once. That is safe because the queue being drained lives on
+     * the server: overlapping reads split the pending events rather than
+     * duplicating them. This pins that a turn delivered by a slow poll still
+     * lands exactly once.
+     */
+    @Test
+    fun `a turn delivered by a slow poll is recorded once`() = runSessionTest {
+        val api = FakeVocaApi(
+            pollFrames = mutableListOf(
+                PollResponse(
+                    events = listOf(
+                        PollEvent(
+                            type = "turn", speaker = FakeVocaApi.PC_A,
+                            originalLang = "en", original = "Hello", translated = "你好",
+                        ),
+                    ),
+                ),
+            ),
+        )
+        api.pollLatencyMillis = 1_500   // longer than the poll interval
+        val h = harness(config, api = api)
+
+        h.tick(6_000)
+
+        val turns = h.state.sideA.turns.count { it.turn.translated == "你好" }
+        assertEquals("turn recorded more than once by overlapping polls", 1, turns)
+    }
+
 }
