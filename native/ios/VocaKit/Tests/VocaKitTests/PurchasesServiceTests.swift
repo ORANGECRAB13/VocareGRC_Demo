@@ -86,6 +86,16 @@ final class PurchasesServiceTests: XCTestCase {
         XCTAssertTrue(held.receipt.isEmpty)
     }
 
+    func testCurrentReceiptWhenTheStoreCannotBeAskedIsNotReachable() async {
+        // §2: `false` = couldn't ask (must NOT downgrade). A StoreKit read
+        // failure must be distinguishable from a verified "nothing owned".
+        let store = FakeStore()
+        store.entitlementError = .unavailable
+        let held = await service(store).currentReceipt()
+        XCTAssertFalse(held.reachable, "a store read failure must report store_reachable:false")
+        XCTAssertTrue(held.receipt.isEmpty)
+    }
+
     // MARK: price
 
     func testDisplayPriceComesFromTheStorefront() async {

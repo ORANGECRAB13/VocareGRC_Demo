@@ -111,13 +111,20 @@ final class CloudSessionViewModelTests: XCTestCase {
         XCTAssertTrue(legs.legB.closed)
     }
 
-    func testPaymentRequiredIsNetworkErrorAndTearsDown() async {
+    func testPaymentRequiredOnOfferEndsTheSessionAsExhausted() async {
+        // §2: /offer answers 402 no_translation_credit. That is the paywall,
+        // not a transport failure — LiveScreen maps .ended(.exhausted) to
+        // onExhausted. Android: CloudSessionViewModel.kt EndReason.EXHAUSTED.
         api.offerError = APIError.paymentRequired(nil)
         let vm = makeVM()
         vm.start()
         await vm.settle()
-        XCTAssertEqual(vm.state.phase, .error(.network))
+        XCTAssertEqual(vm.state.phase, .ended(.exhausted))
+        XCTAssertNotEqual(vm.state.phase, .error(.network))
         XCTAssertTrue(legs.legs.allSatisfy(\.closed))
+        // The "active" upsert from session creation may still be in flight;
+        // what matters is that the transcript was persisted as ended.
+        XCTAssertTrue(history.saved.contains { $0.status == "ended" })
     }
 
     func testConnectionLostIsNetworkError() async {

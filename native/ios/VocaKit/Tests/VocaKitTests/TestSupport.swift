@@ -145,6 +145,8 @@ final class FakeStore: StoreClient, @unchecked Sendable {
     var purchaseOutcome: StorePurchaseOutcome = .cancelled
     var purchaseError: StoreError?
     var held: StoreEntitlement?
+    /// Non-nil = the store could not be asked at all.
+    var entitlementError: StoreError?
     var restored: StoreEntitlement?
     var purchaseCalls = 0
     var restoreCalls = 0
@@ -158,7 +160,10 @@ final class FakeStore: StoreClient, @unchecked Sendable {
         if let purchaseError { throw purchaseError }
         return purchaseOutcome
     }
-    func currentEntitlement(id: String) async -> StoreEntitlement? { held }
+    func currentEntitlement(id: String) async throws -> StoreEntitlement? {
+        if let entitlementError { throw entitlementError }
+        return held
+    }
     func restore(id: String) async -> StoreEntitlement? {
         restoreCalls += 1
         return restored ?? held

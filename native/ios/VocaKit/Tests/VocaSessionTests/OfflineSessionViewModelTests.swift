@@ -137,18 +137,87 @@ final class OfflineSessionViewModelTests: XCTestCase {
         XCTAssertTrue(model.turns.isEmpty)
     }
 
-    func testSupportedButNotInstalledPairAlsoRefusesTheTurn() async throws {
-        // "supported" means the pack exists but has not been downloaded yet.
+    func testSupportedPairIsDownloadedBeforeTheFirstTurn() async throws {
+        // §4: language packs are installable *in-app*. A `supported` pair must
+        // be prepared in place, not refused. Android: OfflineSessionViewModel.kt
+        // "a supported pair is downloaded before the first turn".
         let engine = FakeOfflineEngine()
         engine.status = .supported
+        engine.prepareResult = true
+        engine.finalText = "hello there"
+        engine.translations = ["hello there": "\u{4f60}\u{597d}"]
+        let model = makeModel(engine: engine)
+
+        model.hold(side: .a)
+        await model.settle()
+        model.release(side: .a)
+        await model.settle()
+
+        XCTAssertEqual(engine.calls, [
+            .pairStatus("en", "zh"),
+            .prepare("en", "zh"),
+            .start(locale: "en-US"),
+            .finish,
+            .translate(text: "hello there", from: "en", to: "zh"),
+            .speak(text: "\u{4f60}\u{597d}", locale: "zh-CN"),
+        ], "the pack is downloaded in session, then the turn runs")
+        XCTAssertNil(model.state.notice)
+        XCTAssertEqual(model.turns.count, 1)
+    }
+
+    func testDeclinedInSessionDownloadIsANoticeThatLeavesTheSessionUsable() async throws {
+        // §4: "A declined download is not an error." The user is informed and
+        // can hold again (and accept) rather than being stuck.
+        let engine = FakeOfflineEngine()
+        engine.status = .supported
+        engine.prepareResult = false
         let model = makeModel(engine: engine)
 
         model.hold(side: .a)
         await model.settle()
 
-        XCTAssertEqual(engine.calls, [.pairStatus("en", "zh")])
-        XCTAssertNotNil(model.state.notice)
+        XCTAssertEqual(engine.calls, [.pairStatus("en", "zh"), .prepare("en", "zh")],
+                       "the download was offered, declined, and nothing was recorded")
+        let notice = try XCTUnwrap(model.state.notice)
+        XCTAssertTrue(notice.contains("Download both translation languages"), notice)
         XCTAssertEqual(model.phase, .idle)
+        XCTAssertFalse(model.state.sideA.pressing)
+        XCTAssertFalse(model.state.sideB.disabled, "the session stays usable")
+        XCTAssertTrue(model.turns.isEmpty)
+
+        // Accepting on the second attempt gets the user through.
+        engine.prepareResult = true
+        engine.status = .supported
+        engine.finalText = "hello there"
+        engine.translations = ["hello there": "\u{4f60}\u{597d}"]
+        model.hold(side: .a)
+        await model.settle()
+        model.release(side: .a)
+        await model.settle()
+        XCTAssertEqual(model.turns.count, 1)
+        XCTAssertNil(model.state.notice)
+    }
+
+    /// §5 routing sends a free user into the offline session on a code-supported
+    /// pair (`Languages.canTranslateOffline`), which says nothing about whether
+    /// the packs are installed. With the in-session install above, that landing
+    /// is no longer a dead end.
+    func testFreeRoutingIntoAnUninstalledButSupportedPairCanStillProduceATurn() async throws {
+        XCTAssertTrue(Languages.canTranslateOffline("en", "zh"),
+                      "routing is code-based, so this pair sends a free user offline")
+        let engine = FakeOfflineEngine()
+        engine.status = .supported          // routed in, nothing downloaded yet
+        engine.finalText = "hello there"
+        engine.translations = ["hello there": "\u{4f60}\u{597d}"]
+        let model = makeModel(engine: engine)
+
+        model.hold(side: .a)
+        await model.settle()
+        model.release(side: .a)
+        await model.settle()
+
+        XCTAssertEqual(model.turns.count, 1, "a free user must never land where no turn is possible")
+        XCTAssertTrue(engine.calls.contains(.prepare("en", "zh")))
     }
 
     // MARK: Declined download

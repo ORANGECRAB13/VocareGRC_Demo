@@ -183,6 +183,24 @@ final class EntitlementStoreTests: XCTestCase {
         XCTAssertEqual(subject.tier, .free, "a verified no-subscription downgrades")
     }
 
+    func testAStoreWeCouldNotAskMustNotDowngrade() async throws {
+        // §2: store_reachable:false = "couldn't ask". The client must not send
+        // an empty receipt to /activate (that is the downgrade signal); it
+        // falls back to GET /api/entitlement. Android: PlayPurchasesServiceTest
+        // "a store we could not ask must not downgrade".
+        let fake = FakeStore()
+        fake.held = nil
+        fake.entitlementError = .unavailable
+        let api = FakeEntitlementAPI(balance: try balance("balance_pro"))
+        let (subject, _, _) = try store("balance_pro", store: fake, api: api)
+
+        let fresh = await subject.sync()
+        XCTAssertTrue(api.activateRequests.isEmpty, "an unreachable store must never call /activate with an empty receipt")
+        XCTAssertEqual(api.entitlementCalls, 1, "it reads the server's own record instead")
+        XCTAssertEqual(fresh?.tier, .pro)
+        XCTAssertTrue(subject.isPro, "a store we could not ask must not downgrade a paying user")
+    }
+
     func testSyncFailureKeepsTheBalanceWeHad() async throws {
         let api = FakeEntitlementAPI(balance: try balance("balance_free_unenforced"))
         api.error = .network(code: -1009, description: "offline")

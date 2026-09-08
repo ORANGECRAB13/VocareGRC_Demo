@@ -160,6 +160,15 @@ public final class CloudSessionViewModel: ObservableObject {
             // RTP is established; push-to-talk owns the tracks from here on.
             legA.setTrackEnabled(false)
             legB.setTrackEnabled(false)
+        } catch let error as APIError where error.isPaymentRequired {
+            // 402 `no_translation_credit` on either leg's /offer (§2): this is
+            // not a transport failure, it is the paywall. `.ended(.exhausted)`
+            // is what LiveScreen maps to `onExhausted`.
+            if tornDown { return }
+            await persistSession(status: "ended")
+            teardown()
+            phase = .ended(.exhausted)
+            publish()
         } catch {
             if tornDown { return }
             fail(.network)

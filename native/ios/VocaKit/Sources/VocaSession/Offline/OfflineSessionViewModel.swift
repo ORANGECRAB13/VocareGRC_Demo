@@ -90,7 +90,17 @@ public final class OfflineSessionViewModel: ObservableObject {
         let a = langA, b = langB
         let engine = self.engine
         op.start = Task { @MainActor [weak self] in
-            guard await engine.pairStatus(a, b) == .installed else {
+            // §4: packs are installable in-app. A `supported` pair is
+            // downloaded here (Apple's own sheet asks the user); a declined
+            // download is a notice, not a hard failure.
+            switch await engine.pairStatus(a, b) {
+            case .installed:
+                break
+            case .supported:
+                guard try await engine.prepare(a, b) else {
+                    throw OfflineEngineError.translationUnavailable(from: a, to: b)
+                }
+            case .unsupported:
                 throw OfflineEngineError.translationUnavailable(from: a, to: b)
             }
             guard let self, self.operation === op else { throw OfflineEngineError.cancelled }

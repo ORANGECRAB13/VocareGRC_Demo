@@ -52,10 +52,16 @@ public struct PurchasesService: Sendable {
     }
 
     public func currentReceipt() async -> Held {
-        guard let held = await store.currentEntitlement(id: productID) else {
-            return Held(reachable: true, receipt: "")
+        do {
+            guard let held = try await store.currentEntitlement(id: productID) else {
+                // Verified "no subscription" — the server may downgrade.
+                return Held(reachable: true, receipt: "")
+            }
+            return Held(reachable: true, receipt: held.receipt)
+        } catch {
+            // We could not ask the store; §2 says this must NOT downgrade.
+            return Held(reachable: false, receipt: "")
         }
-        return Held(reachable: true, receipt: held.receipt)
     }
 
     public func purchase() async throws -> Result {

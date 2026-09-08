@@ -56,7 +56,9 @@ public protocol StoreClient: Sendable {
     func product(id: String) async throws -> StoreProduct
     func purchase(id: String) async throws -> StorePurchaseOutcome
     /// Active, verified, unrevoked, unexpired entitlement for `id`, or nil.
-    func currentEntitlement(id: String) async -> StoreEntitlement?
+    /// `nil` is a *verified* "nothing owned"; throwing means the store could
+    /// not be asked at all (§2: `store_reachable:false`, must not downgrade).
+    func currentEntitlement(id: String) async throws -> StoreEntitlement?
     /// Forces a refresh (`AppStore.sync`, which may prompt for a password) and
     /// re-reads entitlements. A cancelled prompt just falls through to a re-read.
     func restore(id: String) async -> StoreEntitlement?
@@ -105,20 +107,29 @@ public struct StoreKitClient: StoreClient {
         }
     }
 
-    public func currentEntitlement(id: String) async -> StoreEntitlement? {
+    public func currentEntitlement(id: String) async throws -> StoreEntitlement? {
+        // Distinguish "the account owns nothing" from "we could not read the
+        // receipt". `Transaction.currentEntitlements` never throws, so the
+        // practical signal for the latter is a stream that yielded only
+        // unverified results (a fresh install before the receipt syncs).
+        var sawUnverified = false
         for await result in Transaction.currentEntitlements {
-            guard case .verified(let transaction) = result else { continue }
+            guard case .verified(let transaction) = result else {
+                sawUnverified = true
+                continue
+            }
             guard transaction.productID == id else { continue }
             if transaction.revocationDate != nil { continue }
             if let expires = transaction.expirationDate, expires <= Date() { continue }
             return StoreEntitlement(productId: transaction.productID, receipt: result.jwsRepresentation)
         }
+        if sawUnverified { throw StoreError.unavailable }
         return nil
     }
 
     public func restore(id: String) async -> StoreEntitlement? {
         try? await AppStore.sync()
-        return await currentEntitlement(id: id)
+        return try? await currentEntitlement(id: id)
     }
 
     public func updates() -> AsyncStream<StoreUpdate> {
