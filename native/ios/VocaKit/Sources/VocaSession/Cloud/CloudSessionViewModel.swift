@@ -50,7 +50,7 @@ public final class CloudSessionViewModel: ObservableObject {
     // Timers
     private var timer: SchedulerToken?
     private var poller: SchedulerToken?
-    private var pollInFlight = false
+    private var inFlightPolls = 0
     private let tasks = TaskTracker()
 
     public init(config: SessionConfig, api: VocaAPI, history: SessionHistoryStore,
@@ -239,9 +239,15 @@ public final class CloudSessionViewModel: ObservableObject {
     }
 
     private func pollOnce() async {
-        guard !tornDown, !pollInFlight, let sessionId else { return }
-        pollInFlight = true
-        defer { pollInFlight = false }
+        // Deliberately no "one poll at a time" guard. Dropping a tick because
+        // the previous request is still in flight halves the effective rate on
+        // exactly the slow links where the transcript is already lagging, and
+        // the queue this drains is server-side, so two overlapping reads simply
+        // split the pending events between them. `inFlightPolls` exists only so
+        // teardown can tell whether anything is still outstanding.
+        guard !tornDown, let sessionId else { return }
+        inFlightPolls += 1
+        defer { inFlightPolls -= 1 }
 
         let response: PollResponse
         do {

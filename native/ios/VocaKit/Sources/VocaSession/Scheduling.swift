@@ -27,12 +27,40 @@ public final class TaskScheduler: SessionScheduler {
         func cancel() { task.cancel() }
     }
 
+    /// Fires on a fixed wall-clock schedule rather than sleeping a full interval
+    /// after each tick.
+    ///
+    /// Sleeping `interval` *between* ticks makes the real period
+    /// `interval + tick + main-actor scheduling delay`, and because nothing ever
+    /// corrects for it the error accumulates: the transcript falls further
+    /// behind the longer a session runs, and the elapsed clock — which drives
+    /// metering — under-counts. `setInterval` in the webview this replaced is
+    /// fixed-rate, which is why the same session felt slower here.
+    ///
+    /// Each wake-up is computed from the start instant, so a late tick is
+    /// followed by a correspondingly shorter sleep. If the main actor was busy
+    /// long enough to miss whole periods those are skipped rather than fired
+    /// back to back, which is what a fixed-rate timer does and what the poll
+    /// loop wants: catching up on missed polls buys nothing, the next poll
+    /// drains the whole queue anyway.
     public func repeating(every interval: TimeInterval, _ tick: @escaping @MainActor () -> Void) -> SchedulerToken {
-        let ns = UInt64(max(0.001, interval) * 1_000_000_000)
+        let period = max(0.001, interval)
         return Token(Task { @MainActor in
+            let start = DispatchTime.now().uptimeNanoseconds
+            let periodNs = UInt64(period * 1_000_000_000)
+            var iteration: UInt64 = 1
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: ns)
+                let deadline = start &+ (periodNs &* iteration)
+                let now = DispatchTime.now().uptimeNanoseconds
+                if deadline > now {
+                    try? await Task.sleep(nanoseconds: deadline - now)
+                } else {
+                    // Ran late: skip the periods already missed and realign.
+                    iteration = (now &- start) / periodNs
+                    await Task.yield()
+                }
                 if Task.isCancelled { return }
+                iteration &+= 1
                 tick()
             }
         })
