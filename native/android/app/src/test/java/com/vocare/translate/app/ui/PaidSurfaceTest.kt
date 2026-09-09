@@ -10,6 +10,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -56,7 +57,7 @@ class PaidSurfaceTest {
         assertEquals(StartRoute.Cloud, route)
         assertEquals(StartRoute.Cloud, PaidSurface.resolve(route))
         assertFalse("no upgrade affordance in free mode", free.paidSurfaceVisible)
-        assertFalse("and no ads", free.showAds)
+        assertTrue("free is ad-supported even with metering off", free.showAds)
     }
 
     @Test

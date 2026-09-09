@@ -65,10 +65,14 @@ class MainActivity : ComponentActivity() {
         val model = ViewModelProvider(this, AppViewModel.factory(container))[AppViewModel::class.java]
         viewModel = model
 
+        // Consent first (UMP), then the ads SDK, then the App Open preload —
+        // in that order, and none of it without consent. See AdMobRuntime.
+        container.ads.start(this)
+
         setContent {
             VocaTheme {
                 Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars)) {
-                    VocaNavHost(vm = model, ads = { container.ads.Banner() })
+                    VocaNavHost(vm = model, ads = container.ads)
                 }
             }
         }

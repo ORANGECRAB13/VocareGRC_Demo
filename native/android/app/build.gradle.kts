@@ -9,33 +9,81 @@ plugins {
 }
 
 /**
- * The single switch that decides whether this is a free build or a paid one:
- * `-Pvocare.paidTier=true` (or VOCARE_PAID_TIER=true). It drives
- * BuildConfig.PAID_TIER_ENABLED, which of `src/free` / `src/paid` is compiled,
- * and whether the AdMob SDK is linked at all. See native/android/README.md.
+ * Billing switch: `-Pvocare.paidTier=true` (or VOCARE_PAID_TIER=true) drives
+ * BuildConfig.PAID_TIER_ENABLED, which decides whether the paywall, the
+ * subscription section and Play Billing exist in the binary. It no longer has
+ * anything to do with ads. See native/android/README.md.
  */
 val paidTierEnabled: Boolean =
     ((project.findProperty("vocare.paidTier") as String?) ?: System.getenv("VOCARE_PAID_TIER") ?: "false")
         .equals("true", ignoreCase = true)
 
-// Flipping the flag alone is not enough: the free manifest deliberately drops
-// the BILLING permission and the AdMob application id, and an APK built with
-// the paid code but the free manifest would fail to purchase (and crash the ads
-// SDK's init provider). Fail early with the checklist instead.
+/**
+ * Ads switch: the app ships free and ad-supported, so this defaults to TRUE in
+ * every build. `-Pvocare.ads=false` (or VOCARE_ADS=false) cuts the AdMob and
+ * UMP SDKs out of the binary entirely (no dependency, `ads/sdk` sources not
+ * compiled, BuildConfig.ADS_ENABLED=false, `showAds` always false) for the day
+ * a build must ship without advertising.
+ */
+val adsEnabled: Boolean =
+    ((project.findProperty("vocare.ads") as String?) ?: System.getenv("VOCARE_ADS") ?: "true")
+        .equals("true", ignoreCase = true)
+
+// ── AdMob ids ─────────────────────────────────────────────────────────────────
+// Google's published sample ids (https://developers.google.com/admob/android/test-ads).
+// They serve test ads only and are what every debug build uses. Real ids are
+// never committed: they come from the environment at build time.
+val googleSamplePublisher = "ca-app-pub-3940256099942544"
+val admobTestAppId = "$googleSamplePublisher~3347511713"
+val admobTestAppOpenUnit = "$googleSamplePublisher/9257395921"
+
+val admobAppId: String = System.getenv("VOCARE_ADMOB_ANDROID_APP_ID")?.takeIf { it.isNotBlank() } ?: admobTestAppId
+val admobAppOpenUnit: String =
+    System.getenv("VOCARE_ADMOB_ANDROID_APP_OPEN_UNIT")?.takeIf { it.isNotBlank() } ?: admobTestAppOpenUnit
+/** Optional; empty means "no banner". */
+val admobBannerUnit: String = System.getenv("VOCARE_ADMOB_ANDROID_BANNER") ?: ""
+/** Comma-separated AdMob test device ids, so real units can be exercised on a dev phone without policy risk. */
+val admobTestDeviceIds: String = System.getenv("VOCARE_ADMOB_TEST_DEVICE_IDS") ?: ""
+/** UMP hashed test device id for the EEA debug-geography consent flow (debug builds only). */
+val umpTestDeviceHash: String = System.getenv("VOCARE_UMP_TEST_DEVICE_HASH") ?: ""
+
+/**
+ * The release guard. Shipping Google's sample ids to production is an AdMob
+ * policy violation (and earns nothing), so a release build with either id
+ * still at its test default must not exist. Checked at configuration time
+ * whenever a release task was requested, and again when `preReleaseBuild`
+ * runs, so no task alias slips past it. Debug builds keep the test ids.
+ */
+val releaseAdIdProblems: List<String> = if (!adsEnabled) emptyList() else buildList {
+    if (admobAppId.startsWith(googleSamplePublisher)) {
+        add("VOCARE_ADMOB_ANDROID_APP_ID is unset or still Google's sample app id ($admobAppId)")
+    }
+    if (admobAppOpenUnit.startsWith(googleSamplePublisher)) {
+        add("VOCARE_ADMOB_ANDROID_APP_OPEN_UNIT is unset or still Google's sample App Open unit ($admobAppOpenUnit)")
+    }
+    if (admobBannerUnit.startsWith(googleSamplePublisher)) {
+        add("VOCARE_ADMOB_ANDROID_BANNER is Google's sample banner unit ($admobBannerUnit)")
+    }
+}
+val releaseAdIdGuardMessage: String =
+    "Release build refused: AdMob test ids must not ship. " + releaseAdIdProblems.joinToString("; ") +
+        ". Export the real ids from the AdMob console (VOCARE_ADMOB_ANDROID_APP_ID=ca-app-pub-XXXX~YYYY, " +
+        "VOCARE_ADMOB_ANDROID_APP_OPEN_UNIT=ca-app-pub-XXXX/ZZZZ) and rebuild, or build debug. " +
+        "See native/android/README.md, \"Ads\"."
+val releaseRequested: Boolean = gradle.startParameter.taskNames.any { name ->
+    name.contains("Release", ignoreCase = true) ||
+        name.substringAfterLast(':') in setOf("build", "assemble", "bundle", "publish", "install")
+}
+if (releaseRequested && releaseAdIdProblems.isNotEmpty()) throw GradleException(releaseAdIdGuardMessage)
+
+// A paid build with the free manifest would fail to purchase; warn early.
 if (paidTierEnabled) {
     val manifest = file("src/main/AndroidManifest.xml").readText()
-    val missing = buildList {
-        if (!manifest.contains("<uses-permission android:name=\"com.android.vending.BILLING\" />")) {
-            add("the com.android.vending.BILLING <uses-permission> (and remove the tools:node=\"remove\" one)")
-        }
-        if (!manifest.contains("com.google.android.gms.ads.APPLICATION_ID")) {
-            add("the com.google.android.gms.ads.APPLICATION_ID <meta-data> with \${admobAppId} — only if ads go live")
-        }
-    }
-    if (missing.isNotEmpty()) {
+    if (!manifest.contains("<uses-permission android:name=\"com.android.vending.BILLING\" />")) {
         logger.warn(
-            "vocare.paidTier=true but src/main/AndroidManifest.xml is still the free one: add " +
-                missing.joinToString("; ") + ". See native/android/README.md, \"Turning the paid tier on\".",
+            "vocare.paidTier=true but src/main/AndroidManifest.xml is still the free one: add the " +
+                "com.android.vending.BILLING <uses-permission> (and remove the tools:node=\"remove\" one). " +
+                "See native/android/README.md, \"Turning the paid tier on\".",
         )
     }
 }
@@ -56,10 +104,7 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // Backend base URL and ad ids come from the environment at build time;
-        // nothing secret is committed. Google's sample AdMob app id keeps the
-        // SDK's startup content provider satisfied in ad-free builds (it can
-        // never serve production ads). The banner unit id defaults to EMPTY,
-        // which AdsService reads as "never initialise the ads SDK".
+        // nothing secret is committed. See the AdMob block at the top of this file.
         buildConfigField(
             "String", "VOCARE_API_BASE",
             "\"${System.getenv("VOCARE_API_BASE") ?: "https://vocare-grc-bot.yellowtree-d62e92d2.australiaeast.azurecontainerapps.io"}\"",
@@ -71,24 +116,17 @@ android {
         // it with `-Pvocare.paidTier=true` (or VOCARE_PAID_TIER=true) once
         // `vocare_pro_monthly` exists in Play Console. See native/android/README.md.
         buildConfigField("boolean", "PAID_TIER_ENABLED", paidTierEnabled.toString())
-        buildConfigField(
-            "String", "VOCARE_ADMOB_BANNER_UNIT_ID",
-            "\"${System.getenv("VOCARE_ADMOB_ANDROID_BANNER") ?: ""}\"",
-        )
-        // The AdMob application-id placeholder only exists in a paid build; the
-        // free manifest carries no com.google.android.gms.ads.APPLICATION_ID
-        // meta-data because the SDK is not linked, so nothing needs it.
-        if (paidTierEnabled) {
-            manifestPlaceholders["admobAppId"] =
-                System.getenv("VOCARE_ADMOB_ANDROID_APP_ID") ?: "ca-app-pub-3940256099942544~3347511713"
-        }
+        // Ads: on by default (the app is ad-supported); see `adsEnabled` above.
+        buildConfigField("boolean", "ADS_ENABLED", adsEnabled.toString())
+        buildConfigField("String", "VOCARE_ADMOB_APP_OPEN_UNIT_ID", "\"$admobAppOpenUnit\"")
+        buildConfigField("String", "VOCARE_ADMOB_BANNER_UNIT_ID", "\"$admobBannerUnit\"")
+        buildConfigField("String", "VOCARE_ADMOB_TEST_DEVICE_IDS", "\"$admobTestDeviceIds\"")
+        buildConfigField("String", "VOCARE_UMP_TEST_DEVICE_HASH", "\"$umpTestDeviceHash\"")
+        // The SDK's startup ContentProvider reads this meta-data and crashes the
+        // process when it is missing or malformed, so it is always set — to the
+        // sample id in debug, to the real one (release guard above) in release.
+        manifestPlaceholders["admobAppId"] = admobAppId
     }
-
-    // Exactly one ads implementation is compiled: a no-op in the free build (no
-    // play-services-ads on the classpath at all, so the shipped binary contains
-    // no advertising SDK, matching the published privacy policy) and the real
-    // AdMob banner in a paid build.
-    sourceSets.getByName("main").java.srcDir(if (paidTierEnabled) "src/paid/java" else "src/free/java")
 
     // Release signing material is read from keystore.properties (git-ignored)
     // when present; otherwise the release build type simply stays unsigned so
@@ -137,6 +175,24 @@ kotlin {
     jvmToolchain(21)
 }
 
+// `ads/sdk` is the only package that imports com.google.android.gms.ads or
+// com.google.android.ump; `ads/AdsRuntime.kt` reaches it by name, so a build
+// without ads simply does not compile it. (A filter on the Kotlin source set is
+// ignored for Android source sets; the compile task's own filter is not.)
+if (!adsEnabled) {
+    tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach { exclude("**/ads/sdk/**") }
+}
+
+// Second half of the release guard (see `releaseAdIdProblems`): fires even when
+// the release variant is reached through a task alias the start-parameter
+// check did not recognise.
+tasks.configureEach {
+    if (name == "preReleaseBuild" && releaseAdIdProblems.isNotEmpty()) {
+        val message = releaseAdIdGuardMessage
+        doFirst { throw GradleException(message) }
+    }
+}
+
 dependencies {
     implementation(project(":core"))
     implementation(project(":session"))
@@ -168,8 +224,14 @@ dependencies {
 
     implementation(libs.play.billing)
     implementation(libs.play.billing.ktx)
-    // Advertising SDK: paid builds only. See `paidTierEnabled` above.
-    if (paidTierEnabled) implementation(libs.play.services.ads)
+    // Advertising: AdMob (App Open + banner) and the User Messaging Platform
+    // consent SDK. Linked in every build unless `vocare.ads=false`, in which
+    // case the `ads/sdk` sources are excluded too (below) so nothing references
+    // them and the binary carries no advertising SDK at all.
+    if (adsEnabled) {
+        implementation(libs.play.services.ads)
+        implementation(libs.user.messaging.platform)
+    }
 
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)

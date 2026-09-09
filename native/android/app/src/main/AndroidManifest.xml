@@ -18,13 +18,11 @@
         android:name="com.android.vending.BILLING"
         tools:node="remove" />
     <!--
-      No advertising-id permission and no AdMob meta-data: the free build does not
-      link play-services-ads at all (app/build.gradle.kts), so nothing merges
-      com.google.android.gms.permission.AD_ID in and there is no init
-      ContentProvider to satisfy. The published privacy policy promises exactly
-      this. Restoring ads means dependency + APPLICATION_ID meta-data + AD_ID +
-      the Data Safety declaration + a policy update, together — see
-      native/android/README.md.
+      Advertising. The app is free and ad-supported (AdMob App Open ads, gated
+      on consent and never over a live session — see ads/AppOpenAdManager.kt).
+      play-services-ads merges com.google.android.gms.permission.AD_ID in by
+      itself; it is deliberately NOT removed here, and Play's Data Safety form
+      declares the advertising id accordingly (native/android/README.md, "Ads").
     -->
 
     <!-- Offline STT: let the app see which recognition services exist on Android 11+. -->
@@ -47,7 +45,14 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Voca">
 
-        <!-- Sample id by default; the real id comes from VOCARE_ADMOB_ANDROID_APP_ID at build time. -->
+        <!--
+          AdMob application id. Google's sample id by default (debug builds);
+          the real one comes from VOCARE_ADMOB_ANDROID_APP_ID at build time and a
+          release build refuses to configure without it (app/build.gradle.kts).
+        -->
+        <meta-data
+            android:name="com.google.android.gms.ads.APPLICATION_ID"
+            android:value="${admobAppId}" />
 
         <activity
             android:name=".MainActivity"

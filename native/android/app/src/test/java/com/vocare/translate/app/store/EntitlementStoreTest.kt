@@ -25,7 +25,7 @@ class EntitlementStoreTest {
         assertEquals(Tier.FREE, fresh.tier)
         assertTrue("a missing balance must be treated as metered", fresh.metered)
         assertFalse(fresh.cloudAllowed)
-        assertFalse("no ads until we know the tier", fresh.showAds)
+        assertTrue("an unknown tier is free, and free is ad-supported (a Pro may see one ad before sync)", fresh.showAds)
         assertTrue("free defaults to on-device", fresh.offlineMode)
     }
 
@@ -40,12 +40,41 @@ class EntitlementStoreTest {
     }
 
     @Test
-    fun `enforced false opens the cloud to everyone and stops the ads`() {
+    fun `enforced false opens the cloud to everyone but does not stop the ads`() {
         val unenforced = snapshot("balance_free_unenforced.json")
         assertFalse("explicit enforced:false is the only thing that switches metering off", unenforced.metered)
         assertTrue(unenforced.cloudAllowed)
-        assertFalse(unenforced.showAds)
+        assertTrue("with metering off everyone is free, and everyone is ad-supported", unenforced.showAds)
         assertEquals(Double.POSITIVE_INFINITY, unenforced.budgetSeconds, 0.0)
+    }
+
+    // ── Ads (tier × build flag) ──────────────────────────────────────────────
+
+    @Test
+    fun `ads show to free and never to pro`() {
+        assertTrue(EntitlementStore.Snapshot(balance("balance_free_enforced.json"), null, adsEnabled = true).showAds)
+        assertTrue(EntitlementStore.Snapshot(balance("balance_free_unenforced.json"), null, adsEnabled = true).showAds)
+        assertTrue("no balance yet: free", EntitlementStore.Snapshot(null, null, adsEnabled = true).showAds)
+        assertFalse(EntitlementStore.Snapshot(balance("balance_pro.json"), null, adsEnabled = true).showAds)
+        assertFalse(EntitlementStore.Snapshot(balance("balance_sandbox.json"), null, adsEnabled = true).showAds)
+        assertFalse(
+            "an exhausted pro is still pro",
+            EntitlementStore.Snapshot(balance("balance_pro_exhausted.json"), null, adsEnabled = true).showAds,
+        )
+    }
+
+    @Test
+    fun `a build without ads shows none to anyone`() {
+        assertFalse(EntitlementStore.Snapshot(balance("balance_free_enforced.json"), null, adsEnabled = false).showAds)
+        assertFalse(EntitlementStore.Snapshot(null, null, adsEnabled = false).showAds)
+        assertFalse(EntitlementStore.Snapshot(balance("balance_pro.json"), null, adsEnabled = false).showAds)
+    }
+
+    @Test
+    fun `this build ships ad-supported — the ads flag defaults on`() {
+        assertTrue("vocare.ads defaults to true", com.vocare.translate.app.BuildConfig.ADS_ENABLED)
+        assertTrue(snapshot("balance_free_enforced.json").showAds)
+        assertFalse(snapshot("balance_pro.json").showAds)
     }
 
     @Test

@@ -80,11 +80,15 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
                 _state.update { it.copy(settings = settings) }
             }
         }
+        publish()
         refreshEntitlement()
     }
 
     private fun publish() {
-        _state.update { it.copy(snapshot = container.entitlements.snapshot) }
+        val snapshot = container.entitlements.snapshot
+        _state.update { it.copy(snapshot = snapshot) }
+        // Pro never sees an App Open ad; the manager learns the tier from here.
+        container.ads.appOpen.setAdsAllowedForUser(snapshot.showAds)
     }
 
     // ── entitlement / purchases ──────────────────────────────────────────────
@@ -94,7 +98,6 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
             val balance = runCatching { container.purchases.syncEntitlement() }.getOrNull()
             if (balance != null) container.entitlements.update(balance)
             publish()
-            if (container.entitlements.snapshot.showAds) container.ads.initialise()
         }
         viewModelScope.launch {
             val price = container.purchases.price()

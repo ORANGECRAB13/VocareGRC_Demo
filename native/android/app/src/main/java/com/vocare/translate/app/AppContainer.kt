@@ -1,8 +1,8 @@
 package com.vocare.translate.app
 
 import android.content.Context
-import com.vocare.translate.app.ads.AdsService
-import com.vocare.translate.app.ads.adsService
+import com.vocare.translate.app.ads.AdsRuntime
+import com.vocare.translate.app.ads.adsRuntime
 import com.vocare.translate.app.api.RetrofitVocaApi
 import com.vocare.translate.app.api.VocaAccountApi
 import com.vocare.translate.app.history.HistoryRepository
@@ -57,11 +57,11 @@ class AppContainer(context: Context) {
     }
 
     /**
-     * The free build's implementation is a no-op and links no ad SDK at all;
-     * the paid one never initialises AdMob without a configured unit id
-     * (CONTRACT §5). See [AdsService].
+     * AdMob + UMP behind an SDK-free seam; `NoAdsRuntime` in a build with
+     * `vocare.ads=false`. Nothing initialises until consent allows it, and the
+     * App Open manager never shows over a live session (CONTRACT §5).
      */
-    val ads: AdsService by lazy { adsService(app, BuildConfig.VOCARE_ADMOB_BANNER_UNIT_ID) }
+    val ads: AdsRuntime by lazy { adsRuntime(app) }
 
     val offlineEngine: OfflineEngine by lazy { AndroidOfflineEngine(app) }
 

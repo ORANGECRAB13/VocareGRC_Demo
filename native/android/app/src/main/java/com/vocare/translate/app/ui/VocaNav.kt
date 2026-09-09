@@ -18,12 +18,17 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.vocare.translate.app.MicPermissionBridge
+import com.vocare.translate.app.ads.AdSurface
+import com.vocare.translate.app.ads.AdsRuntime
+import com.vocare.translate.app.ads.NoAdsRuntime
 import com.vocare.translate.app.store.PaywallReason
 import com.vocare.translate.app.store.StartRoute
 import com.vocare.translate.app.store.Tier
 import com.vocare.translate.core.model.SessionError
+import com.vocare.translate.core.model.SessionPhase
 import com.vocare.translate.core.model.Side
 import com.vocare.translate.session.EndReason
 import com.vocare.translate.session.cloud.MicPermission
@@ -48,19 +53,34 @@ object Routes {
 
 /**
  * The whole app's navigation (CONTRACT §5). Live screens never show a banner —
- * that gate is here, not in [com.vocare.translate.app.ads.AdsService].
+ * that gate is here, not in [AdsRuntime] — and the App Open manager is told
+ * from here which route is on top, whether the mic disclosure sheet is up,
+ * and whether a session is connecting or live, so it can refuse to show.
  */
 @Composable
 fun VocaNavHost(
     vm: AppViewModel,
-    ads: @Composable () -> Unit,
+    ads: AdsRuntime = NoAdsRuntime,
     navController: NavHostController = rememberNavController(),
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var micSheet by remember { mutableStateOf(false) }
 
-    val banner: @Composable () -> Unit = { if (state.snapshot.showAds) ads() }
+    val banner: @Composable () -> Unit = { if (state.snapshot.showAds) ads.Banner() }
+
+    // ── App Open ad gates ────────────────────────────────────────────────────
+    val backStackEntry by navController.currentBackStackEntryAsState()
+    val route = backStackEntry?.destination?.route
+    LaunchedEffect(route, micSheet) {
+        ads.appOpen.setSurface(AdSurface(route = route, micDisclosureVisible = micSheet))
+    }
+    val cloudModel by vm.cloud.collectAsStateWithLifecycle()
+    val offlineModel by vm.offline.collectAsStateWithLifecycle()
+    val cloudPhase = cloudModel?.state?.collectAsStateWithLifecycle()?.value?.phase
+    val offlinePhase = offlineModel?.state?.collectAsStateWithLifecycle()?.value?.phase
+    val liveSessionActive = cloudPhase.inProgress() || offlinePhase.inProgress()
+    LaunchedEffect(liveSessionActive) { ads.appOpen.setLiveSessionActive(liveSessionActive) }
 
     /** Play's subscription page for this product; Play policy forbids obstructing cancellation. */
     fun openPlaySubscriptions() = runCatching {
@@ -107,6 +127,9 @@ fun VocaNavHost(
 
     NavHost(navController = navController, startDestination = Routes.HOME) {
         composable(Routes.HOME) {
+            // Cold-start App Open trigger: Home has composed, so there is a real
+            // screen for the ad to return to (never a splash or loading state).
+            LaunchedEffect(Unit) { (context as? Activity)?.let(ads.appOpen::onHomeRendered) }
             HomeScreen(
                 state = state,
                 onStart = ::start,
@@ -188,6 +211,12 @@ fun VocaNavHost(
                 onOpenLink = { url ->
                     runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
                 },
+                // UMP: users in a region that requires it can revisit their consent.
+                onPrivacyOptions = if (ads.privacyOptionsRequired) {
+                    { (context as? Activity)?.let(ads::showPrivacyOptions) }
+                } else {
+                    null
+                },
                 onBack = { navController.popBackStack() },
                 banner = banner,
             )
@@ -221,6 +250,10 @@ fun VocaNavHost(
         }
     }
 }
+
+/** A session that still owns the microphone (or is about to): no ad may cover it. */
+private fun SessionPhase?.inProgress(): Boolean =
+    this == SessionPhase.Connecting || this == SessionPhase.Live
 
 /** Cloud live screen: `:session`'s split view driven by [com.vocare.translate.session.cloud.CloudSessionViewModel]. */
 @Composable

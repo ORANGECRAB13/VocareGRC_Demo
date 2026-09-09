@@ -40,13 +40,15 @@ class EntitlementStore {
 
     /**
      * @param paidTierEnabled the build-time switch ([BuildConfig.PAID_TIER_ENABLED]).
-     * It is a constructor parameter rather than a direct read so both builds are
-     * testable from one test run.
+     * @param adsEnabled the build-time ads switch ([BuildConfig.ADS_ENABLED]).
+     * Both are constructor parameters rather than direct reads so every build
+     * is testable from one test run.
      */
     data class Snapshot(
         val balance: Balance?,
         val offlinePref: Boolean?,
         val paidTierEnabled: Boolean = BuildConfig.PAID_TIER_ENABLED,
+        val adsEnabled: Boolean = BuildConfig.ADS_ENABLED,
     ) {
         val tier: Tier get() = if (balance?.isPro == true) Tier.PRO else Tier.FREE
         val secondsLeft: Int get() = balance?.secondsRemaining ?: 0
@@ -59,8 +61,14 @@ class EntitlementStore {
         /** Free users default to on-device; once touched the switch wins for good. */
         val offlineMode: Boolean get() = offlinePref ?: (tier != Tier.PRO)
 
-        /** Show a banner only to free users while metering exists, and only once a balance has been read. */
-        val showAds: Boolean get() = balance != null && tier == Tier.FREE && metered
+        /**
+         * The app is ad-supported: everyone who is not Pro sees ads, metering or
+         * not (with metering off there is no Pro, so everyone is free). Pro never
+         * does. Accepted edge: before the first entitlement sync completes a
+         * returning Pro subscriber is, to this snapshot, still free, and may see
+         * one App Open ad on that launch.
+         */
+        val showAds: Boolean get() = adsEnabled && tier == Tier.FREE
 
         /**
          * Whether the app may show any in-app-purchase surface at all: the

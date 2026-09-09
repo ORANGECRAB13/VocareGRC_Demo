@@ -69,6 +69,8 @@ fun SettingsScreen(
     onInstall: (String) -> Unit,
     onOpenLink: (String) -> Unit,
     onBack: () -> Unit,
+    /** Null unless UMP says this user must be able to revisit their ad consent. */
+    onPrivacyOptions: (() -> Unit)? = null,
     banner: @Composable () -> Unit = {},
 ) {
     Column(
@@ -158,6 +160,7 @@ fun SettingsScreen(
             SectionLabel("About")
             VocaCard {
                 LinkRow("Privacy policy") { onOpenLink(LegalLinks.PRIVACY) }
+                onPrivacyOptions?.let { LinkRow("Privacy options", onClick = it) }
                 // A mailto: may have no handler on a device with no mail app —
                 // the caller wraps the intent in runCatching.
                 LinkRow("Contact support", last = true) { onOpenLink(LegalLinks.SUPPORT) }
