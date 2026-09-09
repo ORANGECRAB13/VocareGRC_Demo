@@ -56,11 +56,14 @@ class PlayStoreClient(
         val call = pendingPurchase
         pendingPurchase = null
 
-        if (result.responseCode == BillingClient.BillingResponseCode.USER_CANCELED) {
-            call?.resumeIfActive(StorePurchaseResult.Cancelled)
+        val outcome = BillingResponses.updateOutcome(result.responseCode, result.debugMessage)
+        if (outcome != null) {
+            // Cancellation, ITEM_ALREADY_OWNED (resolved by the caller through
+            // queryPurchasesAsync) or a real failure.
+            call?.resumeIfActive(outcome)
             return@PurchasesUpdatedListener
         }
-        if (result.responseCode != BillingClient.BillingResponseCode.OK || purchases == null) {
+        if (purchases == null) {
             call?.resumeIfActive(StorePurchaseResult.Failed("purchase_failed: ${result.debugMessage}"))
             return@PurchasesUpdatedListener
         }
@@ -103,6 +106,13 @@ class PlayStoreClient(
         val client = BillingClient.newBuilder(appContext)
             .setListener(purchasesUpdatedListener)
             .enableAutoServiceReconnection()
+            // enableOneTimeProducts() is mandatory even though this app only sells
+            // one auto-renewing subscription: PendingPurchasesParams.Builder.build()
+            // in Billing 8.3.0 throws IllegalArgumentException("Pending purchases
+            // for one-time products must be supported.") when it is not set (see
+            // the bytecode of that builder). enablePrepaidPlans() is deliberately
+            // NOT set — there is no prepaid base plan, so declaring support for
+            // one would be a lie about what this app can handle.
             .enablePendingPurchases(PendingPurchasesParams.newBuilder().enableOneTimeProducts().build())
             .build()
         billingClient = client
@@ -153,7 +163,8 @@ class PlayStoreClient(
         }
     }
 
-    override suspend fun purchase(activity: Activity): StorePurchaseResult = suspendCancellableCoroutine { cont ->
+    override suspend fun purchase(activity: Activity, obfuscatedAccountId: String): StorePurchaseResult =
+        suspendCancellableCoroutine { cont ->
         onMain {
             if (pendingPurchase != null) {
                 cont.resumeIfActive(StorePurchaseResult.Failed("purchase_in_progress"))
@@ -181,11 +192,15 @@ class PlayStoreClient(
                                     .build(),
                             ),
                         )
+                        // Google's fraud-detection signal, and what lets Play tie
+                        // a purchase back to this install. The client_id is an
+                        // opaque per-install UUID — never an email or a name.
+                        .apply { if (obfuscatedAccountId.isNotEmpty()) setObfuscatedAccountId(obfuscatedAccountId) }
                         .build()
                     val result = client.launchBillingFlow(activity, params)
-                    if (result.responseCode != BillingClient.BillingResponseCode.OK) {
+                    BillingResponses.launchOutcome(result.responseCode, result.debugMessage)?.let { outcome ->
                         pendingPurchase = null
-                        cont.resumeIfActive(StorePurchaseResult.Failed("could_not_launch_billing: ${result.debugMessage}"))
+                        cont.resumeIfActive(outcome)
                     }
                 }
             }

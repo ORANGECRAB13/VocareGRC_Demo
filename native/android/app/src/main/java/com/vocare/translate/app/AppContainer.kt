@@ -2,6 +2,7 @@ package com.vocare.translate.app
 
 import android.content.Context
 import com.vocare.translate.app.ads.AdsService
+import com.vocare.translate.app.ads.adsService
 import com.vocare.translate.app.api.RetrofitVocaApi
 import com.vocare.translate.app.api.VocaAccountApi
 import com.vocare.translate.app.history.HistoryRepository
@@ -38,20 +39,29 @@ class AppContainer(context: Context) {
     val entitlements: EntitlementStore by lazy { EntitlementStore() }
 
     /**
-     * Null when Play Billing is not present on the device (a bare emulator
-     * image, a sideloaded build). [PlayPurchasesService] treats that as "no
-     * store" rather than crashing the app on launch.
+     * Null when the paid tier is switched off at build time, and null when Play
+     * Billing is not present on the device (a bare emulator image, a sideloaded
+     * build). [PlayPurchasesService] treats either as "no store" rather than
+     * crashing the app on launch.
+     *
+     * The build-flag check comes first on purpose: a free build declares no
+     * `com.android.vending.BILLING` permission, so a BillingClient must never be
+     * constructed — it would only log errors on a user's device.
      */
     val storeClient: StoreClient? by lazy {
-        runCatching { PlayStoreClient(app) as StoreClient }.getOrNull()
+        if (!BuildConfig.PAID_TIER_ENABLED) null else runCatching { PlayStoreClient(app) as StoreClient }.getOrNull()
     }
 
     val purchases: PlayPurchasesService by lazy {
         PlayPurchasesService(storeClient, api) { preferences.clientId() }
     }
 
-    /** Never initialises the ads SDK without a configured unit id (CONTRACT §5). */
-    val ads: AdsService by lazy { AdsService(app, BuildConfig.VOCARE_ADMOB_BANNER_UNIT_ID) }
+    /**
+     * The free build's implementation is a no-op and links no ad SDK at all;
+     * the paid one never initialises AdMob without a configured unit id
+     * (CONTRACT §5). See [AdsService].
+     */
+    val ads: AdsService by lazy { adsService(app, BuildConfig.VOCARE_ADMOB_BANNER_UNIT_ID) }
 
     val offlineEngine: OfflineEngine by lazy { AndroidOfflineEngine(app) }
 

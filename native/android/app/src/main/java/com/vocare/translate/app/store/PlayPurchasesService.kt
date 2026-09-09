@@ -35,13 +35,18 @@ class PlayPurchasesService(
     suspend fun purchasePro(activity: Activity): PurchaseOutcome {
         val client = store ?: return PurchaseOutcome.Failed("in_app_purchase_unavailable")
         val result = try {
-            client.purchase(activity)
+            // The per-install client_id doubles as Play's obfuscated account id.
+            client.purchase(activity, obfuscatedAccountId = clientId())
         } catch (e: StoreUnavailableException) {
             return PurchaseOutcome.Failed(e.message ?: "store_unavailable")
         }
         return when (result) {
             StorePurchaseResult.Cancelled -> PurchaseOutcome.Cancelled
             StorePurchaseResult.Pending -> PurchaseOutcome.Pending
+            // Play refused to run a flow because this account already owns the
+            // subscription (reinstall, second device, a reviewer buying twice).
+            // The purchase exists, so this is a restore, not a failure.
+            StorePurchaseResult.AlreadyOwned -> restore()
             is StorePurchaseResult.Failed -> PurchaseOutcome.Failed(result.reason)
             is StorePurchaseResult.Purchased -> {
                 if (result.purchaseToken.isEmpty()) return PurchaseOutcome.Failed("purchase_receipt_missing")
@@ -49,6 +54,15 @@ class PlayPurchasesService(
             }
         }
     }
+
+    /**
+     * Play's subscription-management page for this product, so cancellation is
+     * never obstructed (Play policy) and the paywall's "cancel any time" copy is
+     * true. Only meaningful in a build where the paid surface exists.
+     */
+    fun manageSubscriptionUrl(packageName: String): String =
+        "https://play.google.com/store/account/subscriptions" +
+            "?sku=${StoreClient.PRODUCT_ID}&package=$packageName"
 
     suspend fun restore(): PurchaseOutcome {
         val client = store ?: return PurchaseOutcome.Failed("in_app_purchase_unavailable")

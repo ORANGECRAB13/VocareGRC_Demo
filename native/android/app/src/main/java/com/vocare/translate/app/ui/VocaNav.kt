@@ -22,6 +22,7 @@ import androidx.navigation.compose.rememberNavController
 import com.vocare.translate.app.MicPermissionBridge
 import com.vocare.translate.app.store.PaywallReason
 import com.vocare.translate.app.store.StartRoute
+import com.vocare.translate.app.store.Tier
 import com.vocare.translate.core.model.SessionError
 import com.vocare.translate.core.model.Side
 import com.vocare.translate.session.EndReason
@@ -61,7 +62,19 @@ fun VocaNavHost(
 
     val banner: @Composable () -> Unit = { if (state.snapshot.showAds) ads() }
 
-    fun go(route: StartRoute) = when (route) {
+    /** Play's subscription page for this product; Play policy forbids obstructing cancellation. */
+    fun openPlaySubscriptions() = runCatching {
+        context.startActivity(
+            Intent(Intent.ACTION_VIEW, Uri.parse(vm.manageSubscriptionUrl(context.packageName))),
+        )
+    }
+
+    /** No-op in a build with no paywall destination. */
+    fun openPaywall(reason: PaywallReason) {
+        PaidSurface.paywallRoute(reason)?.let(navController::navigate)
+    }
+
+    fun go(requested: StartRoute) = when (val route = PaidSurface.resolve(requested)) {
         StartRoute.Offline -> {
             vm.beginOffline()
             navController.navigate(Routes.LIVE_OFFLINE)
@@ -70,7 +83,7 @@ fun VocaNavHost(
             vm.beginCloud(MicPermission { MicPermissionBridge.request() })
             navController.navigate(Routes.LIVE_CLOUD)
         }
-        is StartRoute.Paywall -> navController.navigate(Routes.paywall(route.reason))
+        is StartRoute.Paywall -> openPaywall(route.reason)
     }
 
     fun start() {
@@ -102,7 +115,12 @@ fun VocaNavHost(
                 onOfflineToggle = vm::setOfflineMode,
                 onOpenHistory = { navController.navigate(Routes.HISTORY) },
                 onOpenSettings = { navController.navigate(Routes.SETTINGS) },
-                onOpenPaywall = { navController.navigate(Routes.paywall(state.snapshot.upgradeReason)) },
+                // Null in a free build: the chip stays, the upsell affordance does not.
+                onOpenPaywall = if (state.snapshot.paidSurfaceVisible) {
+                    { openPaywall(state.snapshot.upgradeReason) }
+                } else {
+                    null
+                },
                 banner = banner,
             )
         }
@@ -120,7 +138,7 @@ fun VocaNavHost(
             )
         }
 
-        composable(Routes.PAYWALL) { entry ->
+        if (PaidSurface.ENABLED) composable(Routes.PAYWALL) { entry ->
             val reason = runCatching {
                 PaywallReason.valueOf(entry.arguments?.getString("reason") ?: PaywallReason.UPSELL.name)
             }.getOrDefault(PaywallReason.UPSELL)
@@ -133,6 +151,7 @@ fun VocaNavHost(
                 message = state.purchaseMessage,
                 onBuy = { activity?.let(vm::buyPro) },
                 onRestore = vm::restorePurchases,
+                onManageInPlay = if (state.snapshot.tier == Tier.PRO) ({ openPlaySubscriptions() }) else null,
                 onClose = {
                     vm.clearPurchaseMessage()
                     navController.popBackStack()
@@ -162,7 +181,8 @@ fun VocaNavHost(
             SettingsScreen(
                 state = state,
                 onToggle = vm::setSetting,
-                onManageSubscription = { navController.navigate(Routes.paywall(state.snapshot.upgradeReason)) },
+                onManageSubscription = { openPaywall(state.snapshot.upgradeReason) },
+                onManageInPlay = { openPlaySubscriptions() },
                 onRestore = vm::restorePurchases,
                 onInstall = vm::installOffline,
                 onOpenLink = { url ->
@@ -220,7 +240,7 @@ private fun CloudLiveRoute(vm: AppViewModel, navController: NavHostController) {
                 navController.popBackStack(Routes.HOME, inclusive = false)
                 vm.refreshEntitlement()
                 if (endReason == EndReason.EXHAUSTED) {
-                    navController.navigate(Routes.paywall(PaywallReason.EXHAUSTED))
+                    PaidSurface.paywallRoute(PaywallReason.EXHAUSTED)?.let(navController::navigate)
                 }
             }
             else -> Unit

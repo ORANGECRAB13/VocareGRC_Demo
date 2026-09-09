@@ -8,6 +8,38 @@ plugins {
     alias(libs.plugins.ksp)
 }
 
+/**
+ * The single switch that decides whether this is a free build or a paid one:
+ * `-Pvocare.paidTier=true` (or VOCARE_PAID_TIER=true). It drives
+ * BuildConfig.PAID_TIER_ENABLED, which of `src/free` / `src/paid` is compiled,
+ * and whether the AdMob SDK is linked at all. See native/android/README.md.
+ */
+val paidTierEnabled: Boolean =
+    ((project.findProperty("vocare.paidTier") as String?) ?: System.getenv("VOCARE_PAID_TIER") ?: "false")
+        .equals("true", ignoreCase = true)
+
+// Flipping the flag alone is not enough: the free manifest deliberately drops
+// the BILLING permission and the AdMob application id, and an APK built with
+// the paid code but the free manifest would fail to purchase (and crash the ads
+// SDK's init provider). Fail early with the checklist instead.
+if (paidTierEnabled) {
+    val manifest = file("src/main/AndroidManifest.xml").readText()
+    val missing = buildList {
+        if (!manifest.contains("<uses-permission android:name=\"com.android.vending.BILLING\" />")) {
+            add("the com.android.vending.BILLING <uses-permission> (and remove the tools:node=\"remove\" one)")
+        }
+        if (!manifest.contains("com.google.android.gms.ads.APPLICATION_ID")) {
+            add("the com.google.android.gms.ads.APPLICATION_ID <meta-data> with \${admobAppId} — only if ads go live")
+        }
+    }
+    if (missing.isNotEmpty()) {
+        logger.warn(
+            "vocare.paidTier=true but src/main/AndroidManifest.xml is still the free one: add " +
+                missing.joinToString("; ") + ". See native/android/README.md, \"Turning the paid tier on\".",
+        )
+    }
+}
+
 android {
     // The namespace (Kotlin package / R / BuildConfig) deliberately differs from
     // the applicationId: `native` is a Java keyword, and BuildConfig is generated
@@ -32,13 +64,31 @@ android {
             "String", "VOCARE_API_BASE",
             "\"${System.getenv("VOCARE_API_BASE") ?: "https://vocare-grc-bot.yellowtree-d62e92d2.australiaeast.azurecontainerapps.io"}\"",
         )
+        // Build-time kill switch for the whole paid surface. FALSE ships a plain
+        // free app: no paywall destination in the nav graph, no upgrade
+        // affordance, no Subscribe button anywhere — the billing code stays in
+        // the source, but nothing can reach it, whatever the backend says. Flip
+        // it with `-Pvocare.paidTier=true` (or VOCARE_PAID_TIER=true) once
+        // `vocare_pro_monthly` exists in Play Console. See native/android/README.md.
+        buildConfigField("boolean", "PAID_TIER_ENABLED", paidTierEnabled.toString())
         buildConfigField(
             "String", "VOCARE_ADMOB_BANNER_UNIT_ID",
             "\"${System.getenv("VOCARE_ADMOB_ANDROID_BANNER") ?: ""}\"",
         )
-        manifestPlaceholders["admobAppId"] =
-            System.getenv("VOCARE_ADMOB_ANDROID_APP_ID") ?: "ca-app-pub-3940256099942544~3347511713"
+        // The AdMob application-id placeholder only exists in a paid build; the
+        // free manifest carries no com.google.android.gms.ads.APPLICATION_ID
+        // meta-data because the SDK is not linked, so nothing needs it.
+        if (paidTierEnabled) {
+            manifestPlaceholders["admobAppId"] =
+                System.getenv("VOCARE_ADMOB_ANDROID_APP_ID") ?: "ca-app-pub-3940256099942544~3347511713"
+        }
     }
+
+    // Exactly one ads implementation is compiled: a no-op in the free build (no
+    // play-services-ads on the classpath at all, so the shipped binary contains
+    // no advertising SDK, matching the published privacy policy) and the real
+    // AdMob banner in a paid build.
+    sourceSets.getByName("main").java.srcDir(if (paidTierEnabled) "src/paid/java" else "src/free/java")
 
     // Release signing material is read from keystore.properties (git-ignored)
     // when present; otherwise the release build type simply stays unsigned so
@@ -118,7 +168,8 @@ dependencies {
 
     implementation(libs.play.billing)
     implementation(libs.play.billing.ktx)
-    implementation(libs.play.services.ads)
+    // Advertising SDK: paid builds only. See `paidTierEnabled` above.
+    if (paidTierEnabled) implementation(libs.play.services.ads)
 
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)

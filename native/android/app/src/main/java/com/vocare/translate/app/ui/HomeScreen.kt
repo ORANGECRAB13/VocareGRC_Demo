@@ -54,7 +54,8 @@ fun HomeScreen(
     onOfflineToggle: (Boolean) -> Unit,
     onOpenHistory: () -> Unit,
     onOpenSettings: () -> Unit,
-    onOpenPaywall: () -> Unit,
+    /** Null when this build has no paid surface: the chip is then a plain, inert status label. */
+    onOpenPaywall: (() -> Unit)?,
     banner: @Composable () -> Unit = {},
 ) {
     val pro = state.snapshot.tier == com.vocare.translate.app.store.Tier.PRO

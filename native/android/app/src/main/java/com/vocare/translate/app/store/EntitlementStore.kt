@@ -1,5 +1,6 @@
 package com.vocare.translate.app.store
 
+import com.vocare.translate.app.BuildConfig
 import com.vocare.translate.core.model.Balance
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -37,7 +38,16 @@ class EntitlementStore {
 
     val snapshot: Snapshot get() = Snapshot.of(_balance.value, _offlinePref.value)
 
-    data class Snapshot(val balance: Balance?, val offlinePref: Boolean?) {
+    /**
+     * @param paidTierEnabled the build-time switch ([BuildConfig.PAID_TIER_ENABLED]).
+     * It is a constructor parameter rather than a direct read so both builds are
+     * testable from one test run.
+     */
+    data class Snapshot(
+        val balance: Balance?,
+        val offlinePref: Boolean?,
+        val paidTierEnabled: Boolean = BuildConfig.PAID_TIER_ENABLED,
+    ) {
         val tier: Tier get() = if (balance?.isPro == true) Tier.PRO else Tier.FREE
         val secondsLeft: Int get() = balance?.secondsRemaining ?: 0
 
@@ -51,6 +61,15 @@ class EntitlementStore {
 
         /** Show a banner only to free users while metering exists, and only once a balance has been read. */
         val showAds: Boolean get() = balance != null && tier == Tier.FREE && metered
+
+        /**
+         * Whether the app may show any in-app-purchase surface at all: the
+         * upgrade chip, the Settings subscription section, the paywall, the Play
+         * management link. Off in the free build, and off while the backend is
+         * not metering — a free app must not offer a subscription it does not
+         * need and (until Play Console has the product) cannot sell.
+         */
+        val paidSurfaceVisible: Boolean get() = paidTierEnabled && metered
 
         /** The chip / Settings shortcut into the paywall picks the honest variant. */
         val upgradeReason: PaywallReason

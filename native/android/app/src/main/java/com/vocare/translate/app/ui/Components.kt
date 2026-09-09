@@ -130,12 +130,13 @@ fun VocaTopBar(title: String, onBack: (() -> Unit)? = null, trailing: @Composabl
 
 /** Tier chip: "FREE · ON DEVICE" or "PRO · 42 MIN LEFT". */
 @Composable
-fun TierChip(text: String, pro: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
+/** [onClick] null makes the chip a status label with no upsell affordance — no ripple, no navigation. */
+fun TierChip(text: String, pro: Boolean, onClick: (() -> Unit)?, modifier: Modifier = Modifier) {
     Row(
         modifier = modifier
             .clip(CircleShape)
             .background(if (pro) C.InkB14 else C.InkA08)
-            .clickable(onClick = onClick)
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .padding(horizontal = 12.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

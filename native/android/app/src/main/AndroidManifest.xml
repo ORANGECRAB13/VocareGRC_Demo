@@ -1,11 +1,31 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
-    <uses-permission android:name="com.android.vending.BILLING" />
-    <uses-permission android:name="com.google.android.gms.permission.AD_ID" />
+    <!--
+      No com.android.vending.BILLING permission while BuildConfig.PAID_TIER_ENABLED
+      is false: this build sells nothing, has no paywall and no products in Play
+      Console, and a declared billing permission with no in-app products is what
+      review flags. The Play Billing library declares it in its own manifest, so
+      it has to be removed at merge; drop tools:node="remove" at the same time as
+      creating the Play Console subscription — see native/android/README.md,
+      "Turning the paid tier on".
+    -->
+    <uses-permission
+        android:name="com.android.vending.BILLING"
+        tools:node="remove" />
+    <!--
+      No advertising-id permission and no AdMob meta-data: the free build does not
+      link play-services-ads at all (app/build.gradle.kts), so nothing merges
+      com.google.android.gms.permission.AD_ID in and there is no init
+      ContentProvider to satisfy. The published privacy policy promises exactly
+      this. Restoring ads means dependency + APPLICATION_ID meta-data + AD_ID +
+      the Data Safety declaration + a policy update, together — see
+      native/android/README.md.
+    -->
 
     <!-- Offline STT: let the app see which recognition services exist on Android 11+. -->
     <queries>
@@ -28,9 +48,6 @@
         android:theme="@style/Theme.Voca">
 
         <!-- Sample id by default; the real id comes from VOCARE_ADMOB_ANDROID_APP_ID at build time. -->
-        <meta-data
-            android:name="com.google.android.gms.ads.APPLICATION_ID"
-            android:value="${admobAppId}" />
 
         <activity
             android:name=".MainActivity"

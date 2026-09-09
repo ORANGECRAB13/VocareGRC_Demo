@@ -32,14 +32,18 @@ private class FakeStore(
     val acknowledged = mutableListOf<String>()
     var purchaseCalls = 0
 
+    /** Every obfuscated account id Play was handed, in order. */
+    val accountIds = mutableListOf<String>()
+
     /** Everything the store was told to do, in order, so ordering can be asserted. */
     val calls = mutableListOf<String>()
 
     override suspend fun product() = StoreProduct(StoreClient.PRODUCT_ID, "A$29.99", "Voca Pro", null)
 
-    override suspend fun purchase(activity: Activity): StorePurchaseResult {
+    override suspend fun purchase(activity: Activity, obfuscatedAccountId: String): StorePurchaseResult {
         purchaseCalls++
         calls += "purchase"
+        accountIds += obfuscatedAccountId
         return purchaseResult
     }
 
@@ -193,6 +197,54 @@ class PlayPurchasesServiceTest {
         assertTrue(service.restore() is PurchaseOutcome.Failed)
         assertTrue(!service.storeAvailable)
         assertNull(service.price())
+    }
+
+    // ── ITEM_ALREADY_OWNED (Play refuses a flow for something already owned) ─
+
+    @Test
+    fun `an already-owned subscription is restored and verified, not reported as a failure`() = runBlocking {
+        val store = FakeStore(
+            purchaseResult = StorePurchaseResult.AlreadyOwned,
+            held = HeldPurchase("token-owned", acknowledged = false),
+        )
+        val api = FakeAccountApi(activateResult = balance("entitlement_activate_verified.json"))
+        val outcome = service(store, api).purchasePro(activity)
+
+        assertTrue("ITEM_ALREADY_OWNED means the purchase exists, got $outcome", outcome is PurchaseOutcome.Purchased)
+        assertEquals(listOf(Triple("client-123", "token-owned", true)), api.activations)
+        assertEquals("the owned token must go through verify-then-acknowledge", listOf("purchase", "query", "acknowledge"), store.calls)
+        assertEquals(listOf("token-owned"), store.acknowledged)
+    }
+
+    @Test
+    fun `an already-owned purchase the server will not verify is never acknowledged`() = runBlocking {
+        val store = FakeStore(
+            purchaseResult = StorePurchaseResult.AlreadyOwned,
+            held = HeldPurchase("token-owned", acknowledged = false),
+        )
+        val api = FakeAccountApi(activateResult = balance("entitlement_activate_unverified.json"))
+        assertTrue(service(store, api).purchasePro(activity) is PurchaseOutcome.NotVerified)
+        assertTrue(store.acknowledged.isEmpty())
+    }
+
+    // ── Obfuscated account id (Google's fraud signal) ────────────────────────
+
+    @Test
+    fun `the billing flow carries the client id as the obfuscated account id`() = runBlocking {
+        val store = FakeStore()
+        service(store, FakeAccountApi(activateResult = balance("entitlement_activate_verified.json")))
+            .purchasePro(activity)
+        assertEquals(listOf("client-123"), store.accountIds)
+    }
+
+    @Test
+    fun `the manage-subscription link points at this product and package`() {
+        val url = service(FakeStore(), FakeAccountApi()).manageSubscriptionUrl("com.vocare.translate.native")
+        assertEquals(
+            "https://play.google.com/store/account/subscriptions" +
+                "?sku=vocare_pro_monthly&package=com.vocare.translate.native",
+            url,
+        )
     }
 
     // ── syncEntitlement: store_reachable semantics (CONTRACT §2) ─────────────

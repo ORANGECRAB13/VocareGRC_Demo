@@ -98,6 +98,75 @@ A third issue was found in `:app`: the Retrofit `Json` did not set
 `encodeDefaults`, so `type:"offer"`, `platform:"android"` and `topic` were
 dropped from request bodies whenever they equalled their Kotlin default. Fixed.
 
+## The free build, and turning the paid tier on
+
+This app ships **free**. There is no paid surface in the binary at all — not
+merely hidden at runtime — because the subscription product does not exist in
+Play Console, a Subscribe button that errors is a review rejection, and the
+published privacy policy promises "no ad networks, no analytics or tracking
+SDKs of any kind".
+
+One switch decides it: `-Pvocare.paidTier=true` (or `VOCARE_PAID_TIER=true`),
+which sets `BuildConfig.PAID_TIER_ENABLED`. With it **off** (the default):
+
+| | |
+|---|---|
+| Paywall | not registered in the nav graph (`if (PaidSurface.ENABLED) composable(Routes.PAYWALL)`) |
+| Tier chip | a status label; `onOpenPaywall` is null, so it has no upsell affordance |
+| Settings | no Subscription section at all (`snapshot.paidSurfaceVisible`) |
+| Start routing | `PaidSurface.resolve` turns any paywall verdict into a cloud attempt |
+| `BillingClient` | never constructed — `AppContainer.storeClient` is null |
+| Manifest | no `com.android.vending.BILLING` (removed at merge), no AdMob meta-data |
+| Ads | `src/free/java` compiles a no-op `AdsService`; play-services-ads is not linked |
+
+The billing source (`PlayStoreClient`, `PlayPurchasesService`, `StoreClient`)
+stays in the tree and keeps compiling, so the flip is configuration, not a
+rewrite.
+
+### Turning the paid tier on
+
+Do these together — a build flag without a Play Console product, or a billing
+permission without products, is exactly the state this design avoids.
+
+1. **Build flag.** `-Pvocare.paidTier=true`. `app/build.gradle.kts` then
+   compiles `src/paid/java` instead of `src/free/java` and warns about any
+   manifest step below that is still missing.
+2. **Manifest + Play Console, together.** Replace the `tools:node="remove"`
+   entry in `app/src/main/AndroidManifest.xml` with a plain
+   `<uses-permission android:name="com.android.vending.BILLING" />`, and create
+   the `vocare_pro_monthly` subscription in Play Console with a single
+   auto-renewing monthly base plan, no offer id and no trial — `monthlyOffer()`
+   in `PlayStoreClient` selects exactly that shape and finds nothing otherwise.
+3. **Backend.** `ENTITLEMENT_ENFORCED=true` and `STORE_ALLOW_SANDBOX=false`.
+   `enforced:true` is what makes `metered` (and so `paidSurfaceVisible`) true;
+   until then the paid build still shows no paywall, by design.
+4. **Tests.** Two tests assert the shipped configuration is the free one —
+   `EntitlementStoreTest."this build ships free …"` and
+   `PaidSurfaceTest."the shipped build has the paid surface switched off"`.
+   They are the tripwire against shipping a paid surface by accident; invert
+   them deliberately when the paid build becomes the release build.
+5. **Ads (only if ads actually go live).** Re-add `implementation(libs.play.services.ads)`
+   — it is already conditional on the flag — plus the
+   `com.google.android.gms.ads.APPLICATION_ID` meta-data with a real app id,
+   `VOCARE_ADMOB_ANDROID_BANNER` for a real unit id, the
+   `com.google.android.gms.permission.AD_ID` permission, the advertising-ID
+   declaration in Play Data Safety, **and** an updated privacy policy: the
+   current one says the app contains no advertising SDKs, and Play's automated
+   SDK scan compares that claim against the uploaded binary.
+
+### What must be tested on a device before a paid release
+
+None of it can be tested here; it needs the Play Console product live, a
+licence tester account, and an internal-testing track build on real hardware:
+
+- a purchase completing end to end, and `activate` accepting the token;
+- `ITEM_ALREADY_OWNED` — buy, then buy again on a second device;
+- restore after a reinstall (`queryPurchasesAsync`);
+- a pending purchase clearing (test instrument "slow" card);
+- that the obfuscated account id shows up against the order in Play Console;
+- the Play subscription-management deep link opening the right page;
+- cancellation, and the downgrade the next `activate` produces.
+
 ## What is NOT verified
 
 Everything below compiles, and is exercised only through fakes. None of it has
@@ -112,12 +181,15 @@ run on a device or an emulator.
   local voices — is untested. In particular the `cmn-Hans-CN` recognition
   locale for Mandarin is asserted only as a string.
 - **Real Play Billing.** `PlayStoreClient` (Play Billing 8.3.0) is untested;
-  the purchase tests drive a fake `StoreClient`. Acknowledgement ordering is
-  proven against the fake, not against Play.
+  the purchase tests drive a fake `StoreClient`. Acknowledgement ordering,
+  `ITEM_ALREADY_OWNED` recovery and the obfuscated account id are proven
+  against the fake and against the response-code mapping, not against Play. No
+  purchase can complete without a Play Console product and a licence tester.
 - **Room.** `HistoryRepository` and the DAO have no tests at all; the schema is
   a port of the Capacitor app's table and has not been read back on a device.
-- **AdMob.** `AdsService` is untested. It refuses to initialise the SDK without
-  a banner unit id, and no unit id is committed, so nothing has ever loaded.
+- **AdMob.** The free build does not link the SDK at all (`src/free/java`), so
+  there is nothing to test; the paid `AdMobAdsService` is untested and still
+  refuses to initialise without a banner unit id, and no unit id is committed.
 - **Any screen on a device.** The nav host, permission flow, mic disclosure
   sheet, DataStore preferences and the deep-linked routes have not been run.
 - **The backend.** No test here talks to the real service; the fixtures are

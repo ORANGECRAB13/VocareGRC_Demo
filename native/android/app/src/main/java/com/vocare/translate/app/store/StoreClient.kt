@@ -11,6 +11,13 @@ sealed interface StorePurchaseResult {
     data class Purchased(val purchaseToken: String, val acknowledged: Boolean) : StorePurchaseResult
     data object Cancelled : StorePurchaseResult
     data object Pending : StorePurchaseResult
+
+    /**
+     * Play answered `ITEM_ALREADY_OWNED`: this account already holds the
+     * subscription, so no flow will run. The token has to be fetched with
+     * [StoreClient.currentEntitlement] and verified like any other purchase.
+     */
+    data object AlreadyOwned : StorePurchaseResult
     data class Failed(val reason: String) : StorePurchaseResult
 }
 
@@ -23,7 +30,12 @@ class StoreUnavailableException(message: String, cause: Throwable? = null) : Exc
  */
 interface StoreClient {
     suspend fun product(): StoreProduct
-    suspend fun purchase(activity: Activity): StorePurchaseResult
+    /**
+     * @param obfuscatedAccountId the per-install `client_id`, handed to Play as
+     * the obfuscated account id for fraud detection. Opaque by construction —
+     * it must never be an email or anything else personal.
+     */
+    suspend fun purchase(activity: Activity, obfuscatedAccountId: String): StorePurchaseResult
 
     /** Play's restore path: `queryPurchasesAsync`. Null when nothing active is held. */
     suspend fun currentEntitlement(): HeldPurchase?

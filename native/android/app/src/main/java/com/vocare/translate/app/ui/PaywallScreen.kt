@@ -46,6 +46,8 @@ fun PaywallScreen(
     message: String?,
     onBuy: () -> Unit,
     onRestore: () -> Unit,
+    /** Non-null once the user is subscribed: Play's own management page. */
+    onManageInPlay: (() -> Unit)? = null,
     onClose: () -> Unit,
 ) {
     val headline = when (reason) {
@@ -112,6 +114,10 @@ fun PaywallScreen(
                 enabled = storeAvailable && !busy,
                 modifier = Modifier.testTag(PaywallTags.RESTORE),
             )
+            onManageInPlay?.let {
+                Spacer(Modifier.height(10.dp))
+                VocaSecondaryButton(label = "Cancel or change plan in Google Play", onClick = it)
+            }
             if (!storeAvailable) {
                 Spacer(Modifier.height(10.dp))
                 Text(

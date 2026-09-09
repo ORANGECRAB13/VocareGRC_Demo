@@ -12,24 +12,24 @@ import com.google.android.gms.ads.MobileAds
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Free-tier banner. The SDK is never initialised without a configured ad unit
- * id (CONTRACT §5): a missing id must cost us a banner, never the session
- * someone is in. Ads are never shown to pro and never on a live screen — that
- * gate is in the navigation host, not here.
+ * The paid build's banner. Only compiled when `app/build.gradle.kts` adds
+ * `src/paid/java` (and with it the play-services-ads dependency); the free
+ * build uses `NoAdsService` and links no advertising SDK at all. A missing unit
+ * id must cost us a banner, never the session someone is in (CONTRACT §5).
  */
-class AdsService(private val context: Context, private val bannerUnitId: String) {
+internal class AdMobAdsService(private val context: Context, private val bannerUnitId: String) : AdsService {
     private val initialised = AtomicBoolean(false)
 
-    val enabled: Boolean get() = bannerUnitId.isNotBlank()
+    override val enabled: Boolean get() = bannerUnitId.isNotBlank()
 
     /** Idempotent, off the main thread is fine; no-op when no unit id is configured. */
-    fun initialise() {
+    override fun initialise() {
         if (!enabled || !initialised.compareAndSet(false, true)) return
         MobileAds.initialize(context.applicationContext) {}
     }
 
     @Composable
-    fun Banner(modifier: Modifier = Modifier) {
+    override fun Banner(modifier: Modifier) {
         if (!enabled) return
         initialise()
         AndroidView(
@@ -44,3 +44,6 @@ class AdsService(private val context: Context, private val bannerUnitId: String)
         )
     }
 }
+
+/** Source-set-selected factory; see [AdsService]. */
+fun adsService(context: Context, bannerUnitId: String): AdsService = AdMobAdsService(context, bannerUnitId)

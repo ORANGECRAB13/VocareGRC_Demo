@@ -90,6 +90,46 @@ class EntitlementStoreTest {
         assertEquals(PaywallReason.EXHAUSTED, snapshot("balance_pro_exhausted.json").upgradeReason)
     }
 
+    // ── The paid surface (build flag × metering) ─────────────────────────────
+
+    @Test
+    fun `the free build has no paid surface whatever the backend says`() {
+        assertFalse(
+            "enforced:false must never show a paywall affordance",
+            EntitlementStore.Snapshot(balance("balance_free_unenforced.json"), null, paidTierEnabled = true)
+                .paidSurfaceVisible,
+        )
+        assertFalse(
+            "even a metered backend must not surface a subscription in a build that cannot sell one",
+            EntitlementStore.Snapshot(balance("balance_free_enforced.json"), null, paidTierEnabled = false)
+                .paidSurfaceVisible,
+        )
+        assertFalse(
+            EntitlementStore.Snapshot(balance("balance_pro.json"), null, paidTierEnabled = false).paidSurfaceVisible,
+        )
+    }
+
+    @Test
+    fun `a paid build with a metering backend shows the paid surface`() {
+        assertTrue(
+            EntitlementStore.Snapshot(balance("balance_free_enforced.json"), null, paidTierEnabled = true)
+                .paidSurfaceVisible,
+        )
+        assertTrue(
+            EntitlementStore.Snapshot(balance("balance_pro.json"), null, paidTierEnabled = true).paidSurfaceVisible,
+        )
+    }
+
+    @Test
+    fun `this build ships free — the flag defaults off, so nothing can surface a purchase`() {
+        assertFalse(
+            "flip vocare.paidTier only together with the Play Console product",
+            com.vocare.translate.app.BuildConfig.PAID_TIER_ENABLED,
+        )
+        assertFalse(snapshot("balance_free_enforced.json").paidSurfaceVisible)
+        assertFalse(snapshot("balance_pro.json").paidSurfaceVisible)
+    }
+
     // ── Start routing (CONTRACT §5) ──────────────────────────────────────────
 
     @Test

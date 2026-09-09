@@ -32,11 +32,27 @@ import com.vocare.translate.core.theme.VocaTheme
 
 private typealias SC = VocaTheme.Colors
 
-/** Legal links live in one place so Settings and the store listing cannot drift. */
+/**
+ * Legal links live in one place so Settings and the store listing cannot drift.
+ * Every link here must resolve: Play requires a working privacy policy for an
+ * app that asks for RECORD_AUDIO, and a reviewer clicks them.
+ */
 object LegalLinks {
-    const val PRIVACY = "https://vocare.cx/privacy"
-    const val TERMS = "https://vocare.cx/terms"
-    const val SUPPORT = "https://vocare.cx/support"
+    /**
+     * The backend serves the full policy. `https://vocare.cx/privacy` is the
+     * intended permanent home and currently 404s — point this back at the
+     * branded domain once that page exists (or redirects here).
+     */
+    const val PRIVACY = "https://vocare-grc-bot.yellowtree-d62e92d2.australiaeast.azurecontainerapps.io/privacy"
+
+    /**
+     * TODO: restore a "Terms of service" row pointing at https://vocare.cx/terms
+     * once such a page exists. There is no terms page on either host today, and
+     * shipping a link to a 404 is worse than shipping no link.
+     */
+
+    /** Play Console requires a support contact; this is the published company address. */
+    const val SUPPORT = "mailto:info@vocare.cx"
 }
 
 /**
@@ -48,6 +64,7 @@ fun SettingsScreen(
     state: AppUiState,
     onToggle: (SettingKey, Boolean) -> Unit,
     onManageSubscription: () -> Unit,
+    onManageInPlay: () -> Unit,
     onRestore: () -> Unit,
     onInstall: (String) -> Unit,
     onOpenLink: (String) -> Unit,
@@ -80,33 +97,43 @@ fun SettingsScreen(
                 }
             }
 
-            SectionLabel("Subscription")
-            VocaCard {
-                val pro = state.snapshot.tier == Tier.PRO
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text(if (pro) "Voca Pro" else "Free", style = VocaTheme.Type.BodySemi, color = SC.Ink)
-                        Spacer(Modifier.height(3.dp))
-                        Text(
-                            if (pro) {
-                                "${state.snapshot.secondsLeft / 60} of ${state.snapshot.balance?.secondsTotal?.div(60) ?: 0} " +
-                                    "cloud minutes left this period"
-                            } else {
-                                "On-device translation, unlimited"
-                            },
-                            style = VocaTheme.Type.Body.copy(fontSize = 12.5.sp),
-                            color = SC.TextMuted,
-                        )
+            // The whole subscription section only exists in a build with a paid
+            // surface. A free build must show no purchase, upgrade or manage
+            // affordance at all (PaidSurface).
+            if (state.snapshot.paidSurfaceVisible) {
+                SectionLabel("Subscription")
+                VocaCard {
+                    val pro = state.snapshot.tier == Tier.PRO
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(if (pro) "Voca Pro" else "Free", style = VocaTheme.Type.BodySemi, color = SC.Ink)
+                            Spacer(Modifier.height(3.dp))
+                            Text(
+                                if (pro) {
+                                    "${state.snapshot.secondsLeft / 60} of ${state.snapshot.balance?.secondsTotal?.div(60) ?: 0} " +
+                                        "cloud minutes left this period"
+                                } else {
+                                    "On-device translation, unlimited"
+                                },
+                                style = VocaTheme.Type.Body.copy(fontSize = 12.5.sp),
+                                color = SC.TextMuted,
+                            )
+                        }
+                        TierChip(if (pro) "Pro" else "Free", pro = pro, onClick = onManageSubscription)
                     }
-                    TierChip(if (pro) "Pro" else "Free", pro = pro, onClick = onManageSubscription)
-                }
-                Spacer(Modifier.height(12.dp))
-                VocaSecondaryButton(if (pro) "Manage subscription" else "See Voca Pro", onManageSubscription)
-                Spacer(Modifier.height(8.dp))
-                VocaSecondaryButton("Restore purchases", onRestore, enabled = state.storeAvailable && !state.purchaseBusy)
-                state.purchaseMessage?.let {
+                    Spacer(Modifier.height(12.dp))
+                    VocaSecondaryButton(if (pro) "Manage subscription" else "See Voca Pro", onManageSubscription)
                     Spacer(Modifier.height(8.dp))
-                    Text(it, style = VocaTheme.Type.Body, color = SC.ADeep)
+                    VocaSecondaryButton("Restore purchases", onRestore, enabled = state.storeAvailable && !state.purchaseBusy)
+                    if (pro) {
+                        Spacer(Modifier.height(8.dp))
+                        // Play policy: cancellation must never be obstructed.
+                        VocaSecondaryButton("Cancel or change plan in Google Play", onManageInPlay)
+                    }
+                    state.purchaseMessage?.let {
+                        Spacer(Modifier.height(8.dp))
+                        Text(it, style = VocaTheme.Type.Body, color = SC.ADeep)
+                    }
                 }
             }
 
@@ -131,8 +158,9 @@ fun SettingsScreen(
             SectionLabel("About")
             VocaCard {
                 LinkRow("Privacy policy") { onOpenLink(LegalLinks.PRIVACY) }
-                LinkRow("Terms of service") { onOpenLink(LegalLinks.TERMS) }
-                LinkRow("Support", last = true) { onOpenLink(LegalLinks.SUPPORT) }
+                // A mailto: may have no handler on a device with no mail app —
+                // the caller wraps the intent in runCatching.
+                LinkRow("Contact support", last = true) { onOpenLink(LegalLinks.SUPPORT) }
             }
             Spacer(Modifier.height(28.dp))
         }

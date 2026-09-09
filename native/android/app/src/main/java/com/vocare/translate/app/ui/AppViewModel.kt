@@ -115,6 +115,10 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
         }
     }
 
+    /** Play's subscription-management page for this product (Play policy: never obstruct cancellation). */
+    fun manageSubscriptionUrl(packageName: String): String =
+        container.purchases.manageSubscriptionUrl(packageName)
+
     fun restorePurchases() {
         if (_state.value.purchaseBusy) return
         _state.update { it.copy(purchaseBusy = true, purchaseMessage = null) }
