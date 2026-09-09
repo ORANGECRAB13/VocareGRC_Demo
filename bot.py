@@ -21,7 +21,7 @@ import hashlib
 from store_entitlements import google_entitlement
 import time
 import wave
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -1782,9 +1782,12 @@ async def lifespan(app: FastAPI):
     _configure_twilio_webhook()
     # Auto-configure Telnyx Call Control Application webhook.
     _configure_telnyx_webhook()
+    # Enforce the 24-hour server-side retention the privacy policy states.
+    _retention_task = asyncio.create_task(_purge_expired_translation_sessions())
 
     yield
 
+    _retention_task.cancel()
     coros = [pc.disconnect() for pc in pcs_map.values()]
     await asyncio.gather(*coros)
     pcs_map.clear()
@@ -4763,6 +4766,50 @@ class TranslationSession:
 # Module-level registries
 translation_sessions: Dict[str, TranslationSession] = {}  # session_id -> session
 pc_to_translation: Dict[str, str] = {}                     # pc_id -> session_id
+
+# Server-side retention for translation sessions, and the reason it exists.
+#
+# Sessions live only in process memory (no database, audio never written to
+# disk), which is what the privacy policy promises. But "until the container
+# restarts" is not a retention period a user or a regulator can rely on, so the
+# policy states a concrete one and this enforces it: an ended session is dropped
+# 24 hours after it ended, and a session that was created but never joined is
+# dropped 24 hours after creation. Live sessions are never touched. The native
+# apps keep their own history on the device, so nothing user-visible depends on
+# a session outliving this window.
+TRANSLATION_SESSION_RETENTION = timedelta(hours=24)
+TRANSLATION_PURGE_INTERVAL_SECONDS = 15 * 60
+
+
+def _translation_sessions_expired(now: datetime) -> list[str]:
+    expired = []
+    for session_id, session in translation_sessions.items():
+        if session.status == "live":
+            continue
+        reference = session.ended_at if session.status == "ended" else session.created_at
+        if reference is not None and now - reference > TRANSLATION_SESSION_RETENTION:
+            expired.append(session_id)
+    return expired
+
+
+async def _purge_expired_translation_sessions() -> None:
+    """Background loop started from lifespan; cancelled on shutdown."""
+    while True:
+        try:
+            await asyncio.sleep(TRANSLATION_PURGE_INTERVAL_SECONDS)
+            expired = _translation_sessions_expired(datetime.now())
+            for session_id in expired:
+                translation_sessions.pop(session_id, None)
+            if expired:
+                stale_pcs = [pc for pc, sid in pc_to_translation.items() if sid in expired]
+                for pc in stale_pcs:
+                    pc_to_translation.pop(pc, None)
+                logger.info(f"[retention] purged {len(expired)} translation session(s) older than {TRANSLATION_SESSION_RETENTION}")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("[retention] purge pass failed; will retry next interval")
+
 
 def _translation_voice(code: str, *fallback_env_names: str) -> str:
     """Voice id for a language.

@@ -200,7 +200,7 @@
   <header class="masthead">
     <p class="eyebrow">Vocare Translate</p>
     <h1>Privacy Policy</h1>
-    <p class="updated">Last updated: 29 August 2026</p>
+    <p class="updated">Last updated: 9 September 2026</p>
   </header>
 
   <div class="lede">
@@ -214,9 +214,7 @@
   </div>
 
   <h2>1. Who we are</h2>
-  <p>This app is published by <span class="placeholder">[PLACEHOLDER: legal entity name and
-    registered address of the publisher — e.g. "Vocare Pty Ltd (ACN 000 000 000), Sydney NSW,
-    Australia"]</span>, referred to below as "we" or "us". We are the data controller for the
+  <p>This app is published by Vocare AI Pty Ltd (ACN 696 851 635, ABN 63 696 851 635), 6 Gannons Avenue, Hurstville NSW 2220, Australia, referred to below as "we" or "us". We are the data controller for the
     personal information described in this policy.</p>
 
   <h2>2. What we collect and why</h2>
@@ -282,11 +280,7 @@
       </tr>
       <tr>
         <td><strong>Our language-model provider:</strong>
-          <span class="placeholder">[PLACEHOLDER: name the single LLM provider actually configured
-          in the deployed build and its processing region — the code supports OpenAI, Azure OpenAI /
-          Azure AI Foundry, AWS Bedrock, Cerebras, Groq, Mistral and DeepSeek, and the deployed value
-          determines which company and which country this is. Naming the wrong one is a compliance
-          problem.]</span></td>
+          Microsoft Azure OpenAI (Azure AI Foundry), processed in Microsoft's Australia East region. It is used only when a session runs on our cascaded pipeline; in the default ElevenLabs Agents configuration the translation is produced by ElevenLabs, as described above.</td>
         <td>The transcribed text of what was said, plus the source and target language.</td>
         <td>Produces the translation. Not used when the ElevenLabs Agents engine is enabled.</td>
       </tr>
@@ -314,9 +308,7 @@
 
   <p>These providers operate in multiple countries. If you are outside the country where a provider
     processes data, your information will be transferred internationally.
-    <span class="placeholder">[PLACEHOLDER: list the specific processing countries for the deployed
-    configuration and the transfer mechanism relied on — e.g. Standard Contractual Clauses for
-    transfers out of the EEA/UK.]</span></p>
+    For the deployed service that means Australia (Microsoft Azure, Australia East, which hosts the service and the language model) and the United States (ElevenLabs). We are an Australian company, and overseas disclosure is made under Australian Privacy Principle 8.</p>
 
   <h2>4. What is kept, where, and for how long</h2>
 
@@ -344,24 +336,17 @@
           Audio is streamed through and is not written to disk or to any database.</td>
         <td>For as long as that server process is running. It is discarded whenever the service
           restarts, is redeployed, or scales down.
-          <span class="placeholder">[PLACEHOLDER: state a concrete maximum retention period and
-          implement it — the current code holds sessions in memory with no expiry, so the honest
-          period is "until the container restarts", which is not a period a user or a regulator can
-          rely on. Add a scheduled purge and state its interval here.]</span></td>
+          Independently of restarts, a session is removed from server memory 24 hours after it ends, and a session that was created but never joined is removed 24 hours after it was created. Nothing about a session survives on the server beyond that.</td>
       </tr>
       <tr>
         <td>Server logs</td>
         <td>Timestamps, session codes, connection and error events. Not transcript text.</td>
-        <td><span class="placeholder">[PLACEHOLDER: log retention period configured in Azure —
-          e.g. 30 days.]</span></td>
+        <td>30 days (Azure Log Analytics workspace retention).</td>
       </tr>
       <tr>
         <td>Our processors</td>
         <td>Whatever each receives per section 3, under that provider's own retention policy.</td>
-        <td><span class="placeholder">[PLACEHOLDER: confirm the retention/zero-retention setting on
-          each provider account — in particular whether ElevenLabs history logging and the language
-          model provider's abuse-monitoring retention are switched off — and state the outcome
-          here.]</span></td>
+        <td>Each provider keeps what it receives under its own published retention terms. We have not enabled zero-retention options: ElevenLabs retains conversation records within our account under its terms, and Microsoft may retain Azure OpenAI inputs for abuse monitoring under its published terms.</td>
       </tr>
     </tbody>
   </table>
@@ -381,9 +366,7 @@
     backed up to any account of ours, and we cannot read it.</p>
   <ul>
     <li><strong>iOS and watchOS:</strong> deleting the app removes its database and everything in
-      it. <span class="placeholder">[PLACEHOLDER: if an in-app "clear history" control is shipped,
-      describe it here — no delete function exists in the current build, so deleting the app is
-      genuinely the only way.]</span></li>
+      it. This version of the app has no clear-history control of its own; deleting the app is the only way to remove it.</li>
     <li><strong>Android:</strong> Settings → Apps → Vocare Translate → Storage → Clear storage, or
       uninstall the app.</li>
     <li>If your device backs up app data (iCloud Backup, Google Backup), a copy of that history may
@@ -429,14 +412,9 @@
   <section class="card">
     <dl class="contact">
       <dt>Privacy enquiries</dt>
-      <dd><span class="placeholder">[PLACEHOLDER: monitored privacy contact email address — this
-        must be a real, working address; App Store and Play both check it.]</span></dd>
+      <dd><a href="mailto:info@vocare.cx">info@vocare.cx</a></dd>
       <dt>Postal address</dt>
-      <dd><span class="placeholder">[PLACEHOLDER: registered postal address of the publishing
-        entity.]</span></dd>
-      <dt>Data protection contact</dt>
-      <dd><span class="placeholder">[PLACEHOLDER: DPO or EU/UK representative if one is required for
-        your entity; delete this row if not.]</span></dd>
+      <dd>Vocare AI Pty Ltd, 6 Gannons Avenue, Hurstville NSW 2220, Australia</dd>
     </dl>
   </section>
 
@@ -445,7 +423,7 @@
     top. Material changes will also be noted in the app's release notes.</p>
 
   <footer>
-    Vocare Translate — <span class="placeholder">[PLACEHOLDER: publisher name]</span>. This policy
+    Vocare Translate — Vocare AI Pty Ltd. This policy
     is served at the same address as the app.
   </footer>
 </main>
