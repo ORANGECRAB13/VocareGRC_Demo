@@ -207,7 +207,9 @@
     <p><strong>The short version.</strong> Vocare Translate turns speech into translated speech.
       To do that, the audio you record while holding the speak button is sent to our server and to
       our speech and translation providers, converted to text, translated, and spoken back. There
-      are no accounts, no sign-in, no advertising, and no analytics or tracking SDKs of any kind.
+      are no accounts, no sign-in, and no analytics or tracking SDKs. The Android app is free and shows
+      a short advertisement from Google AdMob when you open it; section 2 explains exactly what that
+      involves and how to limit it.
       Conversation transcripts are kept on your own device. A copy of the transcript text also
       exists on the server for the life of the running session process. Read on for exactly what
       that means.</p>
@@ -245,11 +247,28 @@
     levels, and error messages. These logs are for keeping the service working and are not used to
     profile you.</p>
 
+  <h3>Advertising (Android app only)</h3>
+  <p>The Android app is free and is supported by advertising. When you open the app, or bring it
+    back to the foreground after a while, Google AdMob may show a full-screen advertisement that
+    you can close using the control Google draws on it. We never show an advertisement while a
+    translation session is in progress, and subscribers will not see advertisements once a paid
+    tier exists. To serve and measure that advertisement, Google receives your device's
+    advertising ID, your IP address (from which a coarse location is derived), basic device and
+    app information, and whether you viewed or tapped the ad. Google never receives your
+    microphone audio, your transcripts, or your translations. Where consent is required (the
+    EEA, the UK and Switzerland) a consent form is shown before any ad is requested, and you can
+    change your choice at any time under Settings &rarr; Privacy options; without consent, only
+    non-personalised ads are requested. On any Android device you can also reset or delete your
+    advertising ID, or turn off ad personalisation, under Settings &rarr; Google &rarr; Ads.
+    Google's own handling of this data is described in its privacy policy at
+    <a href="https://policies.google.com/technologies/ads">policies.google.com/technologies/ads</a>.</p>
+
   <h3>What we deliberately do not collect</h3>
   <ul>
     <li>No account, email address, phone number, or password — the app has no sign-in at all.</li>
-    <li>No advertising identifiers, no ad networks, no advertising of any kind.</li>
-    <li>No analytics, crash-reporting, attribution, or tracking SDKs are bundled in the app.</li>
+    <li>No analytics, crash-reporting, attribution, or tracking SDKs are bundled in the app. The only
+      third-party SDK is Google AdMob, in the Android app, for the advertisement described above;
+      the iOS app currently contains no advertising.</li>
     <li>No contacts, photos, calendar, location, or health data.</li>
     <li>No payment information — the app does not take payments.</li>
   </ul>
@@ -257,16 +276,25 @@
   <h2>3. Who processes your data</h2>
   <p>We use a small number of third-party processors to deliver the translation itself. They act on
     our instructions and are bound by their own contractual and privacy obligations. We do not sell
-    or rent your data to anyone, and we do not share it with data brokers, advertisers, or for any
-    purpose other than delivering the translation you asked for.</p>
+    or rent your data to anyone, and we do not share your audio, transcripts or translations with
+    data brokers or advertisers, or use them for any purpose other than delivering the translation
+    you asked for. The advertising SDK in the Android app never receives any of that; what it does
+    receive is set out in section 2.</p>
 
   <div class="table-scroll">
   <table>
-    <caption>Third parties involved in a translation session</caption>
+    <caption>Third parties that receive data</caption>
     <thead>
       <tr><th>Processor</th><th>What it receives</th><th>Why</th></tr>
     </thead>
     <tbody>
+      <tr>
+        <td><strong>Google</strong> (AdMob &mdash; Android app only)</td>
+        <td>Your advertising ID, IP address, basic device and app information, and your interaction
+          with the advertisement. Never your audio, transcripts or translations.</td>
+        <td>Serves and measures the advertisement shown when the app opens. Personalised only with
+          your consent where consent is required; otherwise non-personalised.</td>
+      </tr>
       <tr>
         <td><strong>Microsoft Azure</strong> (Azure Container Apps, Australia East region)</td>
         <td>Hosts our server. Receives your audio stream, transcripts, and connection metadata.</td>
@@ -378,8 +406,9 @@
   <h2>6. Children</h2>
   <p>Vocare Translate is not directed at children and we do not knowingly collect personal
     information from children under 13 (or the equivalent age of digital consent where you live).
-    The app has no accounts, no user-generated content shared with others, no social features, and
-    no advertising. If you believe a child has used the app and you would like their data removed,
+    The app has no accounts, no user-generated content shared with others, and no social features.
+    The Android app shows advertising from Google AdMob; the app is not directed at children and we
+    do not request advertising aimed at children. If you believe a child has used the app and you would like their data removed,
     contact us and we will help.</p>
 
   <h2>7. Legal basis for processing</h2>
@@ -400,13 +429,19 @@
   <p>Australian users: we handle personal information in accordance with the Privacy Act 1988 (Cth)
     and the Australian Privacy Principles.</p>
 
+  <p>For advertising in the Android app, non-personalised advertising is served on the basis of our
+    legitimate interest in funding a free app, and personalised advertising only on the basis of
+    your consent where the law requires it.</p>
+
   <h2>8. Your rights</h2>
   <p>Depending on where you live, you may have the right to access, correct, delete, or export your
     personal information, to object to or restrict its processing, and to complain to your data
     protection authority. Because the app holds no account, we cannot look you up by name — a
-    request about a specific session needs its session code. We do not sell personal information and
-    do not "share" it for cross-context behavioural advertising as those terms are used in
-    California law.</p>
+    request about a specific session needs its session code. We do not sell personal information. In
+    the Android app, the advertising SDK's use of your advertising ID for personalised advertising
+    may amount to "sharing" for cross-context behavioural advertising as that term is used in
+    California law; you can opt out by declining personalised ads under Settings &rarr; Privacy
+    options, or by turning off ad personalisation in your device's Google settings.</p>
 
   <h2>9. Contact</h2>
   <section class="card">
